@@ -1,0 +1,13 @@
+gateway:
+  id: "gw-01"
+
+http:
+  addr: ":8080"
+
+mqtt:
+  broker: "tcp://127.0.0.1:1883"
+  clientId: "iot-gateway-gw-01"
+  qos: 1
+
+storage:
+  sqlitePath: "./gateway.db"
