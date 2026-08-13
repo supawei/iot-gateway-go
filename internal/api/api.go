@@ -23,11 +23,11 @@ func (a *API) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/devices", a.createDevice)
 	mux.HandleFunc("GET /api/v1/devices", a.listDevices)
-	mux.HandleFunc("GET /api/v1/devices/glm_5.2_ark_toC", a.getDevice)
-	mux.HandleFunc("PUT /api/v1/devices/glm_5.2_ark_toC", a.putDevice)
-	mux.HandleFunc("DELETE /api/v1/devices/glm_5.2_ark_toC", a.deleteDevice)
-	mux.HandleFunc("POST /api/v1/devices/glm_5.2_ark_toC/points", a.addPoint)
-	mux.HandleFunc("DELETE /api/v1/devices/glm_5.2_ark_toC/points/{name}", a.deletePoint)
+	mux.HandleFunc("GET /api/v1/devices/{deviceId}", a.getDevice)
+	mux.HandleFunc("PUT /api/v1/devices/{deviceId}", a.putDevice)
+	mux.HandleFunc("DELETE /api/v1/devices/{deviceId}", a.deleteDevice)
+	mux.HandleFunc("POST /api/v1/devices/{deviceId}/points", a.addPoint)
+	mux.HandleFunc("DELETE /api/v1/devices/{deviceId}/points/{name}", a.deletePoint)
 	return mux
 }
 

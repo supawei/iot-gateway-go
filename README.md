@@ -70,11 +70,11 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 |---|---|---|
 | POST | `/api/v1/devices` | 创建设备(含点位) |
 | GET | `/api/v1/devices` | 列出设备 |
-| GET | `/api/v1/devices/glm_5.2_ark_toC` | 获取设备 |
-| PUT | `/api/v1/devices/glm_5.2_ark_toC` | 更新设备 |
-| DELETE | `/api/v1/devices/glm_5.2_ark_toC` | 删除设备 |
-| POST | `/api/v1/devices/glm_5.2_ark_toC/points` | 添加点位 |
-| DELETE | `/api/v1/devices/glm_5.2_ark_toC/points/{name}` | 删除点位 |
+| GET | `/api/v1/devices/{deviceId}` | 获取设备 |
+| PUT | `/api/v1/devices/{deviceId}` | 更新设备 |
+| DELETE | `/api/v1/devices/{deviceId}` | 删除设备 |
+| POST | `/api/v1/devices/{deviceId}/points` | 添加点位 |
+| DELETE | `/api/v1/devices/{deviceId}/points/{name}` | 删除点位 |
 
 配置写入后自动热加载,scheduler 全量重启采集,无需重启进程。
 

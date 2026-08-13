@@ -1,0 +1,15 @@
+# 编译产物
+/iot-gateway
+/gateway
+*.exe
+
+# 运行时数据
+*.db
+*.db-journal
+
+# 用户本地配置(保留 config.example.yaml)
+/config.yaml
+
+# 编辑器/系统
+*.swp
+.DS_Store
