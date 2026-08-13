@@ -1,6 +1,7 @@
 # 编译产物
 /iot-gateway
 /gateway
+/dist
 *.exe
 
 # 运行时数据
