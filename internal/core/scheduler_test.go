@@ -16,7 +16,7 @@ type mockConn struct {
 	reads    int
 }
 
-func (c *mockConn) Read(point model.Point) (model.DataPoint, error) {
+func (c *mockConn) Read(_ context.Context, point model.Point) (model.DataPoint, error) {
 	c.reads++
 	return model.DataPoint{
 		DeviceID:  c.deviceID,
@@ -31,7 +31,7 @@ func (c *mockConn) Close() error { return nil }
 
 type mockDriver struct{}
 
-func (mockDriver) Open(deviceID string, _ json.RawMessage) (driver.Conn, error) {
+func (mockDriver) Open(_ context.Context, deviceID string, _ json.RawMessage) (driver.Conn, error) {
 	return &mockConn{deviceID: deviceID}, nil
 }
 

@@ -95,6 +95,13 @@ func TestParseConnConfig(t *testing.T) {
 	if cfg.BaudRate != defaultBaudRate {
 		t.Fatalf("default baud rate: %d want %d", cfg.BaudRate, defaultBaudRate)
 	}
+	rtuOverTCP, err := parseConnConfig(json.RawMessage(`{"mode":"rtu-over-tcp","address":"192.168.1.5:502","slaveId":2}`))
+	if err != nil {
+		t.Fatalf("rtu-over-tcp err: %v", err)
+	}
+	if rtuOverTCP.Mode != "rtu-over-tcp" || rtuOverTCP.Address != "192.168.1.5:502" || rtuOverTCP.SlaveID != 2 {
+		t.Fatalf("unexpected rtu-over-tcp cfg: %+v", rtuOverTCP)
+	}
 	if _, err := parseConnConfig(json.RawMessage(`{}`)); err == nil {
 		t.Fatal("expected error for missing mode")
 	}

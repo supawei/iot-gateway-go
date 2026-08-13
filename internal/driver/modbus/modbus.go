@@ -1,6 +1,7 @@
 package modbus
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/goburrow/modbus"
+	"github.com/grid-x/modbus"
 
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
@@ -33,12 +34,12 @@ func init() {
 
 type modbusDriver struct{}
 
-func (modbusDriver) Open(deviceID string, connection json.RawMessage) (driver.Conn, error) {
+func (modbusDriver) Open(ctx context.Context, deviceID string, connection json.RawMessage) (driver.Conn, error) {
 	cfg, err := parseConnConfig(connection)
 	if err != nil {
 		return nil, err
 	}
-	client, closer, err := buildClient(cfg)
+	client, closer, err := buildClient(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -55,12 +56,12 @@ type modbusConn struct {
 	closer   io.Closer
 }
 
-func (c *modbusConn) Read(point model.Point) (model.DataPoint, error) {
+func (c *modbusConn) Read(ctx context.Context, point model.Point) (model.DataPoint, error) {
 	function, register, err := parseAddress(point.Address)
 	if err != nil {
 		return model.DataPoint{}, err
 	}
-	raw, err := c.readRaw(function, register, quantityOf(point.DataType))
+	raw, err := c.readRaw(ctx, function, register, quantityOf(point.DataType))
 	timestamp := time.Now()
 	if err != nil {
 		// 通信失败:产出 bad 数据点,让北向感知设备异常
@@ -83,16 +84,16 @@ func (c *modbusConn) Close() error {
 	return c.closer.Close()
 }
 
-func (c *modbusConn) readRaw(function string, register, quantity uint16) ([]byte, error) {
+func (c *modbusConn) readRaw(ctx context.Context, function string, register, quantity uint16) ([]byte, error) {
 	switch function {
 	case "holding":
-		return c.client.ReadHoldingRegisters(register, quantity)
+		return c.client.ReadHoldingRegisters(ctx, register, quantity)
 	case "input":
-		return c.client.ReadInputRegisters(register, quantity)
+		return c.client.ReadInputRegisters(ctx, register, quantity)
 	case "coil":
-		return c.client.ReadCoils(register, quantity)
+		return c.client.ReadCoils(ctx, register, quantity)
 	case "discrete":
-		return c.client.ReadDiscreteInputs(register, quantity)
+		return c.client.ReadDiscreteInputs(ctx, register, quantity)
 	default:
 		return nil, fmt.Errorf("unsupported modbus function %q", function)
 	}
@@ -208,7 +209,7 @@ func parseConnConfig(connection json.RawMessage) (connConfig, error) {
 
 // buildClient 按配置创建具体 handler 并建立连接,返回 client 与可关闭句柄。
 // Connect/Close 在具体 handler 类型上,ClientHandler 接口不暴露,故用 io.Closer 持有。
-func buildClient(cfg connConfig) (modbus.Client, io.Closer, error) {
+func buildClient(ctx context.Context, cfg connConfig) (modbus.Client, io.Closer, error) {
 	timeout, err := time.ParseDuration(cfg.Timeout)
 	if err != nil || timeout == 0 {
 		timeout = defaultTimeout
@@ -220,17 +221,26 @@ func buildClient(cfg connConfig) (modbus.Client, io.Closer, error) {
 		handler.DataBits = cfg.DataBits
 		handler.Parity = cfg.Parity
 		handler.StopBits = cfg.StopBits
-		handler.SlaveId = cfg.SlaveID
+		handler.SlaveID = cfg.SlaveID
 		handler.Timeout = timeout
-		if err := handler.Connect(); err != nil {
+		if err := handler.Connect(ctx); err != nil {
 			return nil, nil, fmt.Errorf("modbus rtu connect: %w", err)
+		}
+		return modbus.NewClient(handler), handler, nil
+	case "rtu-over-tcp":
+		// RTU 帧(带 CRC)走 TCP 传输,常见于 RS-485 串口服务器透传
+		handler := modbus.NewRTUOverTCPClientHandler(cfg.Address)
+		handler.SlaveID = cfg.SlaveID
+		handler.Timeout = timeout
+		if err := handler.Connect(ctx); err != nil {
+			return nil, nil, fmt.Errorf("modbus rtu-over-tcp connect: %w", err)
 		}
 		return modbus.NewClient(handler), handler, nil
 	case "tcp":
 		handler := modbus.NewTCPClientHandler(cfg.Address)
-		handler.SlaveId = cfg.SlaveID
+		handler.SlaveID = cfg.SlaveID
 		handler.Timeout = timeout
-		if err := handler.Connect(); err != nil {
+		if err := handler.Connect(ctx); err != nil {
 			return nil, nil, fmt.Errorf("modbus tcp connect: %w", err)
 		}
 		return modbus.NewClient(handler), handler, nil

@@ -59,6 +59,7 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 |---|---|
 | TCP | `mode:"tcp"`, `address:"host:502"`, `slaveId` |
 | RTU | `mode:"rtu"`, `serialPort:"/dev/ttyS0"`, `baudRate`, `dataBits`, `parity`, `stopBits`, `slaveId` |
+| RTU over TCP | `mode:"rtu-over-tcp"`, `address:"host:502"`, `slaveId` |
 
 **点位地址** (`address` 字段):`function:register`,function 为 `holding`/`input`/`coil`/`discrete`。
 

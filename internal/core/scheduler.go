@@ -88,7 +88,7 @@ func (s *Scheduler) startDevice(ctx context.Context, device model.Device) {
 		log.Printf("device %q: driver %q not registered: %v", device.ID, device.Driver, err)
 		return
 	}
-	conn, err := drv.Open(device.ID, device.Connection)
+	conn, err := drv.Open(ctx, device.ID, device.Connection)
 	if err != nil {
 		log.Printf("device %q: open failed: %v", device.ID, err)
 		return
@@ -123,7 +123,7 @@ func (s *Scheduler) collectLoop(ctx context.Context, conn driver.Conn, point mod
 }
 
 func (s *Scheduler) collectOnce(ctx context.Context, conn driver.Conn, point model.Point) {
-	dataPoint, err := conn.Read(point)
+	dataPoint, err := conn.Read(ctx, point)
 	if err != nil {
 		// 配置级错误(地址无法解析等):数据点无效,跳过不发
 		log.Printf("read point %q failed: %v", point.Name, err)

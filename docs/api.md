@@ -69,17 +69,22 @@
 { "mode": "rtu", "serialPort": "/dev/ttyS0", "baudRate": 9600, "dataBits": 8, "parity": "N", "stopBits": 1, "slaveId": 1, "timeout": "1s" }
 ```
 
-| 字段 | TCP | RTU | 默认 |
-|---|---|---|---|
-| `mode` | 必填 `tcp` | 必填 `rtu` | - |
-| `address` | 必填 `host:port` | - | - |
-| `serialPort` | - | 必填 | - |
-| `baudRate` | - | 可选 | `9600` |
-| `dataBits` | - | 可选 | `8` |
-| `parity` | - | 可选 | `N` |
-| `stopBits` | - | 可选 | `1` |
-| `slaveId` | 可选 | 可选 | `0` |
-| `timeout` | 可选 | 可选 | `1s` |
+**RTU over TCP**(RTU 帧[带 CRC]走 TCP 传输,常见于 RS-485 串口服务器透传):
+```json
+{ "mode": "rtu-over-tcp", "address": "192.168.1.5:502", "slaveId": 1, "timeout": "1s" }
+```
+
+| 字段 | TCP | RTU | RTU over TCP | 默认 |
+|---|---|---|---|---|
+| `mode` | 必填 `tcp` | 必填 `rtu` | 必填 `rtu-over-tcp` | - |
+| `address` | 必填 `host:port` | - | 必填 `host:port` | - |
+| `serialPort` | - | 必填 | - | - |
+| `baudRate` | - | 可选 | - | `9600` |
+| `dataBits` | - | 可选 | - | `8` |
+| `parity` | - | 可选 | - | `N` |
+| `stopBits` | - | 可选 | - | `1` |
+| `slaveId` | 可选 | 可选 | 可选 | `0` |
+| `timeout` | 可选 | 可选 | 可选 | `1s` |
 
 ## 点位地址
 
