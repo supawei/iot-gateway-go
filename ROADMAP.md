@@ -20,7 +20,7 @@
 ### 已实现模块
 
 - **model** — Device / Point / DataPoint 数据模型,设备-点位抽象
-- **driver** — Driver/Conn 接口 + registry + Modbus RTU/TCP 实现
+- **driver** — Driver/Conn 接口 + registry + Modbus RTU/TCP/RTU over TCP 实现
 - **output** — Output 接口 + MQTT 输出
 - **core** — scheduler 周期采集 + pipeline 分发 + 配置热加载
 - **store** — SQLite 持久化,设备/点位 CRUD + OnChange 通知
@@ -28,11 +28,11 @@
 - **config** — YAML 配置 + 默认值
 - **测试** — 协议解析、SQLite CRUD、管道分发、调度采集
 
-### 待验收
+### 验收(2026-08-13 实采通过)
 
-- [ ] 端到端联调:mosquitto + Modbus 模拟器跑通真实链路
-- [ ] 热加载验证:API 改配置后采集自动重载
-- [ ] 优雅关闭验证:SIGINT/SIGTERM 后连接与 output 正确释放
+- [x] 端到端联调:mosquitto + Modbus 模拟器跑通真实链路
+- [x] 热加载验证:API 改配置后采集自动重载
+- [x] 优雅关闭验证:SIGINT/SIGTERM 后连接与 output 正确释放
 
 ### P1 已知简化(留待后续优化)
 
@@ -101,3 +101,4 @@
 | output registry | 去掉,main 直接构造 | 网关级单例无需注册表,更克制 |
 | 热加载 | 全量重载 | MVP 简化,增量 diff 留 P3 |
 | Read 语义 | error 表配置级错误,Quality 表数据质量 | 让北向能感知设备异常(bad/uncertain) |
+| Modbus 库 | grid-x/modbus | 原生 RTU over TCP;Client/Connect 带 ctx,阻塞读可取消;纯 Go 不影响交叉编译 |
