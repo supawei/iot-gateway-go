@@ -16,15 +16,19 @@ type mockConn struct {
 	reads    int
 }
 
-func (c *mockConn) Read(_ context.Context, point model.Point) (model.DataPoint, error) {
+func (c *mockConn) Read(_ context.Context, points []model.Point) ([]model.DataPoint, error) {
 	c.reads++
-	return model.DataPoint{
-		DeviceID:  c.deviceID,
-		Point:     point.Name,
-		Value:     c.reads,
-		Timestamp: time.Now(),
-		Quality:   model.QualityGood,
-	}, nil
+	results := make([]model.DataPoint, len(points))
+	for i, p := range points {
+		results[i] = model.DataPoint{
+			DeviceID:  c.deviceID,
+			Point:     p.Name,
+			Value:     c.reads,
+			Timestamp: time.Now(),
+			Quality:   model.QualityGood,
+		}
+	}
+	return results, nil
 }
 
 func (c *mockConn) Close() error { return nil }
@@ -47,9 +51,10 @@ func TestSchedulerCollects(t *testing.T) {
 		ID:         "d1",
 		Driver:     "testdriver",
 		Connection: []byte(`{}`),
+		IntervalMs: 50,
 		Enabled:    true,
 		Points: []model.Point{
-			{Name: "p1", Address: "holding:0", DataType: model.DataTypeInt16, IntervalMs: 50},
+			{Name: "p1", Address: "holding:0", DataType: model.DataTypeInt16},
 		},
 	})
 

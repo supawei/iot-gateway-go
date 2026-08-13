@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS device (
     name        TEXT NOT NULL,
     driver      TEXT NOT NULL,
     connection  TEXT NOT NULL,
+    interval_ms INTEGER NOT NULL,
     enabled     INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS point (
@@ -23,7 +24,6 @@ CREATE TABLE IF NOT EXISTS point (
     name        TEXT NOT NULL,
     address     TEXT NOT NULL,
     data_type   TEXT NOT NULL,
-    interval_ms INTEGER NOT NULL,
     scale       REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (device_id, name),
     FOREIGN KEY (device_id) REFERENCES device(id) ON DELETE CASCADE
@@ -64,7 +64,7 @@ func (s *Store) notify() {
 }
 
 func (s *Store) ListDevices() ([]model.Device, error) {
-	devices, err := s.queryDevices("SELECT id, name, driver, connection, enabled FROM device")
+	devices, err := s.queryDevices("SELECT id, name, driver, connection, interval_ms, enabled FROM device")
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +79,7 @@ func (s *Store) ListDevices() ([]model.Device, error) {
 }
 
 func (s *Store) GetDevice(id string) (model.Device, error) {
-	devices, err := s.queryDevices("SELECT id, name, driver, connection, enabled FROM device WHERE id = ?", id)
+	devices, err := s.queryDevices("SELECT id, name, driver, connection, interval_ms, enabled FROM device WHERE id = ?", id)
 	if err != nil {
 		return model.Device{}, err
 	}
@@ -87,7 +87,7 @@ func (s *Store) GetDevice(id string) (model.Device, error) {
 		return model.Device{}, fmt.Errorf("device %q not found", id)
 	}
 	device := devices[0]
-	device.Points, err = s.queryPoints("SELECT name, address, data_type, interval_ms, scale FROM point WHERE device_id = ?", id)
+	device.Points, err = s.queryPoints("SELECT name, address, data_type, scale FROM point WHERE device_id = ?", id)
 	if err != nil {
 		return model.Device{}, err
 	}
@@ -132,8 +132,8 @@ func (s *Store) DeleteDevice(id string) error {
 
 func (s *Store) AddPoint(deviceID string, point model.Point) error {
 	_, err := s.db.Exec(
-		"INSERT INTO point (device_id, name, address, data_type, interval_ms, scale) VALUES (?, ?, ?, ?, ?, ?)",
-		deviceID, point.Name, point.Address, string(point.DataType), point.IntervalMs, point.Scale,
+		"INSERT INTO point (device_id, name, address, data_type, scale) VALUES (?, ?, ?, ?, ?)",
+		deviceID, point.Name, point.Address, string(point.DataType), point.Scale,
 	)
 	if err != nil {
 		return fmt.Errorf("insert point: %w", err)
@@ -185,7 +185,7 @@ func (s *Store) queryPoints(query string, args ...any) ([]model.Point, error) {
 }
 
 func (s *Store) queryAllPoints() (map[string][]model.Point, error) {
-	rows, err := s.db.Query("SELECT device_id, name, address, data_type, interval_ms, scale FROM point")
+	rows, err := s.db.Query("SELECT device_id, name, address, data_type, scale FROM point")
 	if err != nil {
 		return nil, fmt.Errorf("query all points: %w", err)
 	}
@@ -194,7 +194,7 @@ func (s *Store) queryAllPoints() (map[string][]model.Point, error) {
 	for rows.Next() {
 		var deviceID, dataType string
 		var point model.Point
-		if err := rows.Scan(&deviceID, &point.Name, &point.Address, &dataType, &point.IntervalMs, &point.Scale); err != nil {
+		if err := rows.Scan(&deviceID, &point.Name, &point.Address, &dataType, &point.Scale); err != nil {
 			return nil, fmt.Errorf("scan point: %w", err)
 		}
 		point.DataType = model.DataType(dataType)
@@ -211,7 +211,7 @@ func scanDevice(row rowScanner) (model.Device, error) {
 	var device model.Device
 	var connection string
 	var enabled int
-	if err := row.Scan(&device.ID, &device.Name, &device.Driver, &connection, &enabled); err != nil {
+	if err := row.Scan(&device.ID, &device.Name, &device.Driver, &connection, &device.IntervalMs, &enabled); err != nil {
 		return model.Device{}, fmt.Errorf("scan device: %w", err)
 	}
 	device.Connection = json.RawMessage(connection)
@@ -222,7 +222,7 @@ func scanDevice(row rowScanner) (model.Device, error) {
 func scanPoint(row rowScanner) (model.Point, error) {
 	var point model.Point
 	var dataType string
-	if err := row.Scan(&point.Name, &point.Address, &dataType, &point.IntervalMs, &point.Scale); err != nil {
+	if err := row.Scan(&point.Name, &point.Address, &dataType, &point.Scale); err != nil {
 		return model.Point{}, fmt.Errorf("scan point: %w", err)
 	}
 	point.DataType = model.DataType(dataType)
@@ -235,9 +235,9 @@ func saveDeviceTx(tx *sql.Tx, device model.Device) error {
 		enabled = 1
 	}
 	_, err := tx.Exec(
-		`INSERT INTO device (id, name, driver, connection, enabled) VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, driver=excluded.driver, connection=excluded.connection, enabled=excluded.enabled`,
-		device.ID, device.Name, device.Driver, string(device.Connection), enabled,
+		`INSERT INTO device (id, name, driver, connection, interval_ms, enabled) VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, driver=excluded.driver, connection=excluded.connection, interval_ms=excluded.interval_ms, enabled=excluded.enabled`,
+		device.ID, device.Name, device.Driver, string(device.Connection), device.IntervalMs, enabled,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert device: %w", err)
@@ -247,8 +247,8 @@ func saveDeviceTx(tx *sql.Tx, device model.Device) error {
 	}
 	for _, point := range device.Points {
 		if _, err := tx.Exec(
-			"INSERT INTO point (device_id, name, address, data_type, interval_ms, scale) VALUES (?, ?, ?, ?, ?, ?)",
-			device.ID, point.Name, point.Address, string(point.DataType), point.IntervalMs, point.Scale,
+			"INSERT INTO point (device_id, name, address, data_type, scale) VALUES (?, ?, ?, ?, ?)",
+			device.ID, point.Name, point.Address, string(point.DataType), point.Scale,
 		); err != nil {
 			return fmt.Errorf("insert point %q: %w", point.Name, err)
 		}

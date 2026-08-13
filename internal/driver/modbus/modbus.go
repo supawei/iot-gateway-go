@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,10 @@ const (
 	defaultDataBits = 8
 	defaultParity   = "N"
 	defaultStopBits = 1
+
+	// Modbus 协议单次读取上限(规范):寄存器 125,线圈/离散输入 2000
+	maxRegistersPerRead = 125
+	maxCoilsPerRead     = 2000
 )
 
 var errShortResponse = errors.New("modbus response too short")
@@ -56,32 +61,117 @@ type modbusConn struct {
 	closer   io.Closer
 }
 
-func (c *modbusConn) Read(ctx context.Context, point model.Point) (model.DataPoint, error) {
-	function, register, err := parseAddress(point.Address)
-	if err != nil {
-		return model.DataPoint{}, err
-	}
-	raw, err := c.readRaw(ctx, function, register, quantityOf(point.DataType))
+// Read 批量读取点位:同 function 的连续/相邻地址合并成少数 Modbus 请求(连读),
+// 减少多点设备的请求往返。返回 DataPoint 与输入 points 顺序一一对应。
+// 单点通信失败/解码异常用 Quality 表达,不阻断同批其他点;error 仅用于配置级错误。
+func (c *modbusConn) Read(ctx context.Context, points []model.Point) ([]model.DataPoint, error) {
 	timestamp := time.Now()
-	if err != nil {
-		// 通信失败:产出 bad 数据点,让北向感知设备异常
-		return model.DataPoint{DeviceID: c.deviceID, Point: point.Name, Timestamp: timestamp, Quality: model.QualityBad}, nil
+	results := make([]model.DataPoint, len(points))
+	for index, point := range points {
+		results[index] = model.DataPoint{
+			DeviceID:  c.deviceID,
+			Point:     point.Name,
+			Timestamp: timestamp,
+			Quality:   model.QualityBad,
+		}
 	}
-	value, err := decodeValue(point.DataType, raw)
-	if err != nil {
-		return model.DataPoint{DeviceID: c.deviceID, Point: point.Name, Timestamp: timestamp, Quality: model.QualityUncertain}, nil
+	itemsByFunction := map[string][]pointItem{}
+	for index, point := range points {
+		function, register, err := parseAddress(point.Address)
+		if err != nil {
+			continue // 解析失败:该点保持 bad,跳过不阻断
+		}
+		itemsByFunction[function] = append(itemsByFunction[function], pointItem{
+			index:    index,
+			point:    point,
+			function: function,
+			register: register,
+			quantity: quantityOf(point.DataType),
+		})
 	}
-	return model.DataPoint{
-		DeviceID:  c.deviceID,
-		Point:     point.Name,
-		Value:     applyScale(value, point.Scale, point.DataType),
-		Timestamp: timestamp,
-		Quality:   model.QualityGood,
-	}, nil
+	for function, items := range itemsByFunction {
+		c.readGroup(ctx, function, items, results, timestamp)
+	}
+	return results, nil
 }
 
 func (c *modbusConn) Close() error {
 	return c.closer.Close()
+}
+
+// pointItem 关联点位与其解析后的地址信息,供连读分组与结果回填。
+type pointItem struct {
+	index    int
+	point    model.Point
+	function string
+	register uint16
+	quantity uint16
+}
+
+// readGroup 按 planBlocks 划分的合并块逐块请求,读回后按偏移解码回填 results。
+func (c *modbusConn) readGroup(ctx context.Context, function string, items []pointItem, results []model.DataPoint, timestamp time.Time) {
+	for _, blk := range planBlocks(items, maxQuantity(function)) {
+		raw, err := c.readRaw(ctx, function, blk.startRegister, blk.quantity)
+		if err != nil {
+			continue // 块失败:块内点保持默认 bad
+		}
+		for _, item := range blk.items {
+			c.fillResult(item, raw, blk.startRegister, results, timestamp)
+		}
+	}
+}
+
+// block 是一次 Modbus 请求覆盖的点位合并块。
+type block struct {
+	startRegister uint16
+	quantity      uint16
+	items         []pointItem
+}
+
+// planBlocks 将同 function 的点位按地址排序后贪心合并:连续或相邻(允许间隙)
+// 的地址并入同一块,直到总跨度超过单次读取上限。返回的块数即请求数。
+func planBlocks(items []pointItem, maxQty int) []block {
+	sort.Slice(items, func(i, j int) bool { return items[i].register < items[j].register })
+	var blocks []block
+	for start := 0; start < len(items); {
+		blockStart := items[start].register
+		blockEnd := items[start].register + items[start].quantity
+		end := start + 1
+		for end < len(items) {
+			next := items[end]
+			if int(next.register-blockStart)+int(next.quantity) > maxQty {
+				break
+			}
+			if next.register+next.quantity > blockEnd {
+				blockEnd = next.register + next.quantity
+			}
+			end++
+		}
+		blocks = append(blocks, block{
+			startRegister: blockStart,
+			quantity:      blockEnd - blockStart,
+			items:         items[start:end],
+		})
+		start = end
+	}
+	return blocks
+}
+
+func (c *modbusConn) fillResult(item pointItem, raw []byte, blockStart uint16, results []model.DataPoint, timestamp time.Time) {
+	value, err := decodePoint(item, raw, blockStart)
+	if err != nil {
+		results[item.index] = model.DataPoint{
+			DeviceID: c.deviceID, Point: item.point.Name, Timestamp: timestamp, Quality: model.QualityUncertain,
+		}
+		return
+	}
+	results[item.index] = model.DataPoint{
+		DeviceID:  c.deviceID,
+		Point:     item.point.Name,
+		Value:     applyScale(value, item.point.Scale, item.point.DataType),
+		Timestamp: timestamp,
+		Quality:   model.QualityGood,
+	}
 }
 
 func (c *modbusConn) readRaw(ctx context.Context, function string, register, quantity uint16) ([]byte, error) {
@@ -96,6 +186,34 @@ func (c *modbusConn) readRaw(ctx context.Context, function string, register, qua
 		return c.client.ReadDiscreteInputs(ctx, register, quantity)
 	default:
 		return nil, fmt.Errorf("unsupported modbus function %q", function)
+	}
+}
+
+// decodePoint 从连读块 raw 中按点位偏移解码单个值。
+// holding/input 按寄存器(2 字节)切片;coil/discrete 按位取。
+func decodePoint(item pointItem, raw []byte, blockStart uint16) (interface{}, error) {
+	if item.function == "coil" || item.function == "discrete" {
+		bitIndex := int(item.register - blockStart)
+		byteIndex := bitIndex / 8
+		if byteIndex >= len(raw) {
+			return nil, errShortResponse
+		}
+		return raw[byteIndex]>>(bitIndex%8)&1 != 0, nil
+	}
+	offset := int(item.register-blockStart) * 2
+	endByte := offset + int(item.quantity)*2
+	if endByte > len(raw) {
+		return nil, errShortResponse
+	}
+	return decodeValue(item.point.DataType, raw[offset:endByte])
+}
+
+func maxQuantity(function string) int {
+	switch function {
+	case "coil", "discrete":
+		return maxCoilsPerRead
+	default:
+		return maxRegistersPerRead
 	}
 }
 

@@ -13,7 +13,7 @@ import (
 
 const defaultInterval = 5 * time.Second
 
-// Scheduler 按各点位 Interval 周期采集设备,产 DataPoint 到 output channel;
+// Scheduler 按设备级 Interval 周期批量采集,产 DataPoint 到 output channel;
 // 配置变更时全量重载(停旧采集、按新配置重启),MVP 暂不增量 diff。
 type Scheduler struct {
 	store         *store.Store
@@ -96,20 +96,18 @@ func (s *Scheduler) startDevice(ctx context.Context, device model.Device) {
 	s.mu.Lock()
 	s.conns = append(s.conns, conn)
 	s.mu.Unlock()
-	for _, point := range device.Points {
-		s.startPoint(ctx, conn, point)
+	if len(device.Points) == 0 {
+		return
 	}
+	// 每设备一个采集循环,按设备级 Interval 批量连读所有点位
+	go s.collectLoop(ctx, conn, device.Points, device.IntervalMs)
 }
 
-func (s *Scheduler) startPoint(ctx context.Context, conn driver.Conn, point model.Point) {
-	interval := time.Duration(point.IntervalMs) * time.Millisecond
+func (s *Scheduler) collectLoop(ctx context.Context, conn driver.Conn, points []model.Point, intervalMs int) {
+	interval := time.Duration(intervalMs) * time.Millisecond
 	if interval <= 0 {
 		interval = defaultInterval
 	}
-	go s.collectLoop(ctx, conn, point, interval)
-}
-
-func (s *Scheduler) collectLoop(ctx context.Context, conn driver.Conn, point model.Point, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -117,20 +115,23 @@ func (s *Scheduler) collectLoop(ctx context.Context, conn driver.Conn, point mod
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.collectOnce(ctx, conn, point)
+			s.collectOnce(ctx, conn, points)
 		}
 	}
 }
 
-func (s *Scheduler) collectOnce(ctx context.Context, conn driver.Conn, point model.Point) {
-	dataPoint, err := conn.Read(ctx, point)
+func (s *Scheduler) collectOnce(ctx context.Context, conn driver.Conn, points []model.Point) {
+	dataPoints, err := conn.Read(ctx, points)
 	if err != nil {
-		// 配置级错误(地址无法解析等):数据点无效,跳过不发
-		log.Printf("read point %q failed: %v", point.Name, err)
+		// 配置级错误(整批无效):跳过本次,不发送
+		log.Printf("read %d points failed: %v", len(points), err)
 		return
 	}
-	select {
-	case s.output <- dataPoint:
-	case <-ctx.Done():
+	for _, dp := range dataPoints {
+		select {
+		case s.output <- dp:
+		case <-ctx.Done():
+			return
+		}
 	}
 }

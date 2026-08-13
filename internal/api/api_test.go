@@ -44,9 +44,10 @@ func sampleDevice() model.Device {
 		Name:       "温湿度",
 		Driver:     "modbus",
 		Connection: json.RawMessage(`{"mode":"tcp","address":"127.0.0.1:502"}`),
+		IntervalMs: 1000,
 		Enabled:    true,
 		Points: []model.Point{
-			{Name: "temperature", Address: "holding:0", DataType: model.DataTypeInt16, IntervalMs: 1000, Scale: 0.1},
+			{Name: "temperature", Address: "holding:0", DataType: model.DataTypeInt16, Scale: 0.1},
 		},
 	}
 }
@@ -127,7 +128,7 @@ func TestUpdateDeviceReplacesPoints(t *testing.T) {
 	doRequest(t, handler, "POST", "/api/v1/devices", sampleDevice())
 
 	updated := sampleDevice()
-	updated.Points = []model.Point{{Name: "pressure", Address: "holding:2", DataType: model.DataTypeFloat, IntervalMs: 500}}
+	updated.Points = []model.Point{{Name: "pressure", Address: "holding:2", DataType: model.DataTypeFloat}}
 	rec := doRequest(t, handler, "PUT", "/api/v1/devices/sensor-01", updated)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("update: got %d want %d", rec.Code, http.StatusOK)
@@ -167,7 +168,7 @@ func TestAddAndDeletePoint(t *testing.T) {
 	device.Points = nil
 	doRequest(t, handler, "POST", "/api/v1/devices", device)
 
-	point := model.Point{Name: "pressure", Address: "holding:2", DataType: model.DataTypeFloat, IntervalMs: 500}
+	point := model.Point{Name: "pressure", Address: "holding:2", DataType: model.DataTypeFloat}
 	rec := doRequest(t, handler, "POST", "/api/v1/devices/sensor-01/points", point)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("add point: got %d want %d", rec.Code, http.StatusCreated)

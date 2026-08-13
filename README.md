@@ -41,10 +41,11 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
   "name": "温湿度传感器",
   "driver": "modbus",
   "connection": {"mode":"tcp","address":"192.168.1.5:502","slaveId":1},
+  "intervalMs": 1000,
   "enabled": true,
   "points": [
-    {"name":"temperature","address":"holding:0","dataType":"int16","intervalMs":1000,"scale":0.1},
-    {"name":"humidity","address":"holding:1","dataType":"int16","intervalMs":1000,"scale":0.1}
+    {"name":"temperature","address":"holding:0","dataType":"int16","scale":0.1},
+    {"name":"humidity","address":"holding:1","dataType":"int16","scale":0.1}
   ]
 }'
 ```

@@ -21,8 +21,9 @@
   "name": "温湿度传感器",
   "driver": "modbus",
   "connection": { "mode": "tcp", "address": "192.168.1.5:502", "slaveId": 1 },
+  "intervalMs": 1000,
   "enabled": true,
-  "points": [ { "name": "temperature", "address": "holding:0", "dataType": "int16", "intervalMs": 1000, "scale": 0.1 } ]
+  "points": [ { "name": "temperature", "address": "holding:0", "dataType": "int16", "scale": 0.1 } ]
 }
 ```
 
@@ -32,13 +33,14 @@
 | `name` | string | 否 | 可读名称 |
 | `driver` | string | 是 | 驱动名,目前支持 `modbus` |
 | `connection` | object | 是 | 驱动连接参数,结构见[连接配置](#连接配置modbus) |
+| `intervalMs` | int | 否 | 设备级采集周期(毫秒),默认 `5000` |
 | `enabled` | bool | 否 | 是否启用采集,默认 `false` |
 | `points` | Point[] | 否 | 采集点位列表 |
 
 ### Point
 
 ```json
-{ "name": "temperature", "address": "holding:0", "dataType": "int16", "intervalMs": 1000, "scale": 0.1 }
+{ "name": "temperature", "address": "holding:0", "dataType": "int16", "scale": 0.1 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -46,7 +48,6 @@
 | `name` | string | 是 | 点位名,设备内唯一 |
 | `address` | string | 是 | 协议地址,格式见[点位地址](#点位地址) |
 | `dataType` | string | 是 | 数据类型,见[枚举](#枚举值) |
-| `intervalMs` | int | 是 | 采集周期(毫秒) |
 | `scale` | float | 否 | 缩放系数,`0` 表示不缩放 |
 
 ### 枚举值
@@ -121,10 +122,11 @@ curl -X POST http://localhost:8080/api/v1/devices \
     "name": "温湿度传感器",
     "driver": "modbus",
     "connection": {"mode":"tcp","address":"192.168.1.5:502","slaveId":1},
+    "intervalMs": 1000,
     "enabled": true,
     "points": [
-      {"name":"temperature","address":"holding:0","dataType":"int16","intervalMs":1000,"scale":0.1},
-      {"name":"humidity","address":"holding:1","dataType":"int16","intervalMs":1000,"scale":0.1}
+      {"name":"temperature","address":"holding:0","dataType":"int16","scale":0.1},
+      {"name":"humidity","address":"holding:1","dataType":"int16","scale":0.1}
     ]
   }'
 ```
@@ -166,9 +168,10 @@ curl -X PUT http://localhost:8080/api/v1/devices/sensor-01 \
     "name": "温湿度传感器(改名)",
     "driver": "modbus",
     "connection": {"mode":"tcp","address":"192.168.1.5:502","slaveId":1},
+    "intervalMs": 2000,
     "enabled": true,
     "points": [
-      {"name":"temperature","address":"holding:0","dataType":"int16","intervalMs":2000,"scale":0.1}
+      {"name":"temperature","address":"holding:0","dataType":"int16","scale":0.1}
     ]
   }'
 ```
@@ -198,7 +201,7 @@ curl -X DELETE http://localhost:8080/api/v1/devices/sensor-01
 ```bash
 curl -X POST http://localhost:8080/api/v1/devices/sensor-01/points \
   -H 'Content-Type: application/json' \
-  -d '{"name":"pressure","address":"holding:2","dataType":"float32","intervalMs":500,"scale":0}'
+  -d '{"name":"pressure","address":"holding:2","dataType":"float32","scale":0}'
 ```
 
 ### 删除点位
@@ -240,10 +243,11 @@ BASE=http://localhost:8080/api/v1
 curl -s -X POST $BASE/devices -H 'Content-Type: application/json' -d '{
   "id":"sensor-01","name":"温湿度","driver":"modbus",
   "connection":{"mode":"tcp","address":"192.168.1.5:502","slaveId":1},
+  "intervalMs":1000,
   "enabled":true,
   "points":[
-    {"name":"temperature","address":"holding:0","dataType":"int16","intervalMs":1000,"scale":0.1},
-    {"name":"humidity","address":"holding:1","dataType":"int16","intervalMs":1000,"scale":0.1}
+    {"name":"temperature","address":"holding:0","dataType":"int16","scale":0.1},
+    {"name":"humidity","address":"holding:1","dataType":"int16","scale":0.1}
   ]
 }'
 
@@ -255,7 +259,7 @@ curl -s $BASE/devices/sensor-01
 
 # 4. 追加一个点位
 curl -s -X POST $BASE/devices/sensor-01/points -H 'Content-Type: application/json' \
-  -d '{"name":"pressure","address":"holding:2","dataType":"float32","intervalMs":500,"scale":0}'
+  -d '{"name":"pressure","address":"holding:2","dataType":"float32","scale":0}'
 
 # 5. 确认点位已追加(应看到 3 个点位)
 curl -s $BASE/devices/sensor-01
@@ -268,8 +272,9 @@ curl -s -o /dev/null -w "%{http_code}\n" -X DELETE $BASE/devices/sensor-01/point
 curl -s -X PUT $BASE/devices/sensor-01 -H 'Content-Type: application/json' -d '{
   "name":"温湿度","driver":"modbus",
   "connection":{"mode":"tcp","address":"192.168.1.5:502","slaveId":1},
+  "intervalMs":2000,
   "enabled":true,
-  "points":[{"name":"temperature","address":"holding:0","dataType":"int16","intervalMs":2000,"scale":0.1}]
+  "points":[{"name":"temperature","address":"holding:0","dataType":"int16","scale":0.1}]
 }'
 
 # 8. 删除设备
@@ -289,4 +294,4 @@ curl -s -o /dev/null -w "%{http_code}\n" $BASE/devices/sensor-01
 mosquitto_sub -t 'gateway/+/device/+/data' -v
 ```
 
-修改 `intervalMs` 或增删点位后,采集周期与新点位立即生效,无需重启网关。
+修改设备 `intervalMs` 或增删点位后,采集周期与新点位立即生效,无需重启网关。

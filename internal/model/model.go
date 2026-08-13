@@ -6,22 +6,23 @@ import (
 )
 
 // Device 表示一个物理或逻辑设备,对应一个协议连接实例。
+// IntervalMs 为设备级采集周期,连读时按此周期批量读取所有点位。
 type Device struct {
 	ID         string          `json:"id"`
 	Name       string          `json:"name"`
 	Driver     string          `json:"driver"`
 	Connection json.RawMessage `json:"connection"`
 	Points     []Point         `json:"points"`
+	IntervalMs int             `json:"intervalMs"`
 	Enabled    bool            `json:"enabled"`
 }
 
-// Point 描述单个采集点:采什么、怎么采、多久采一次。
+// Point 描述单个采集点:采什么、怎么采。
 type Point struct {
-	Name       string   `json:"name"`
-	Address    string   `json:"address"`
-	DataType   DataType `json:"dataType"`
-	IntervalMs int      `json:"intervalMs"`
-	Scale      float64  `json:"scale"`
+	Name     string   `json:"name"`
+	Address  string   `json:"address"`
+	DataType DataType `json:"dataType"`
+	Scale    float64  `json:"scale"`
 }
 
 // DataPoint 是采集的标准化结果,贯穿 Core 与北向输出,协议无关。

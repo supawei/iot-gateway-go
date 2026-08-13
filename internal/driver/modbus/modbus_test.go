@@ -106,3 +106,62 @@ func TestParseConnConfig(t *testing.T) {
 		t.Fatal("expected error for missing mode")
 	}
 }
+
+func TestMaxQuantity(t *testing.T) {
+	if maxQuantity("holding") != maxRegistersPerRead {
+		t.Fatalf("holding max = %d want %d", maxQuantity("holding"), maxRegistersPerRead)
+	}
+	if maxQuantity("coil") != maxCoilsPerRead {
+		t.Fatalf("coil max = %d want %d", maxQuantity("coil"), maxCoilsPerRead)
+	}
+}
+
+func TestPlanBlocks(t *testing.T) {
+	items := func(regs ...uint16) []pointItem {
+		out := make([]pointItem, len(regs))
+		for i, r := range regs {
+			out[i] = pointItem{register: r, quantity: 1}
+		}
+		return out
+	}
+	// 连续地址合并成一块
+	blocks := planBlocks(items(0, 1, 2), maxRegistersPerRead)
+	if len(blocks) != 1 || blocks[0].startRegister != 0 || blocks[0].quantity != 3 {
+		t.Fatalf("continuous merge: %+v", blocks)
+	}
+	// 间隙允许合并(跨度不超上限)
+	blocks = planBlocks(items(0, 5), maxRegistersPerRead)
+	if len(blocks) != 1 || blocks[0].quantity != 6 {
+		t.Fatalf("gap merge: %+v", blocks)
+	}
+	// 跨度超上限拆分(0 与 125:跨度 126 > 125)
+	blocks = planBlocks(items(0, 125), maxRegistersPerRead)
+	if len(blocks) != 2 {
+		t.Fatalf("split over max: %+v", blocks)
+	}
+	// 乱序输入应排序后合并
+	blocks = planBlocks(items(2, 0, 1), maxRegistersPerRead)
+	if len(blocks) != 1 || len(blocks[0].items) != 3 {
+		t.Fatalf("unsorted input: %+v", blocks)
+	}
+}
+
+func TestDecodePointHolding(t *testing.T) {
+	// 块从寄存器 0 读回 4 字节:0x0001 0x0002,寄存器 1 = 2
+	raw := []byte{0x00, 0x01, 0x00, 0x02}
+	item := pointItem{register: 1, quantity: 1, function: "holding", point: model.Point{DataType: model.DataTypeInt16}}
+	v, err := decodePoint(item, raw, 0)
+	if err != nil || v != int16(2) {
+		t.Fatalf("holding offset decode: %v err=%v", v, err)
+	}
+}
+
+func TestDecodePointCoil(t *testing.T) {
+	// 块从线圈 0 读回 1 字节:0b00000100,线圈 2 为 1
+	raw := []byte{0x04}
+	item := pointItem{register: 2, quantity: 1, function: "coil", point: model.Point{DataType: model.DataTypeBool}}
+	v, err := decodePoint(item, raw, 0)
+	if err != nil || v != true {
+		t.Fatalf("coil bit decode: %v err=%v", v, err)
+	}
+}

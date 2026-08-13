@@ -22,10 +22,11 @@ func sampleDevice(id string) model.Device {
 		Name:       id,
 		Driver:     "modbus",
 		Connection: []byte(`{"mode":"tcp","address":"127.0.0.1:502"}`),
+		IntervalMs: 1000,
 		Enabled:    true,
 		Points: []model.Point{
-			{Name: "temperature", Address: "holding:0", DataType: model.DataTypeInt16, IntervalMs: 1000, Scale: 0.1},
-			{Name: "humidity", Address: "holding:1", DataType: model.DataTypeInt16, IntervalMs: 1000, Scale: 0.1},
+			{Name: "temperature", Address: "holding:0", DataType: model.DataTypeInt16, Scale: 0.1},
+			{Name: "humidity", Address: "holding:1", DataType: model.DataTypeInt16, Scale: 0.1},
 		},
 	}
 }
@@ -61,7 +62,7 @@ func TestSaveDeviceReplacesPoints(t *testing.T) {
 	st := newTestStore(t)
 	st.SaveDevice(sampleDevice("d1"))
 	replaced := sampleDevice("d1")
-	replaced.Points = []model.Point{{Name: "pressure", Address: "holding:2", DataType: model.DataTypeFloat, IntervalMs: 500}}
+	replaced.Points = []model.Point{{Name: "pressure", Address: "holding:2", DataType: model.DataTypeFloat}}
 	st.SaveDevice(replaced)
 	got, _ := st.GetDevice("d1")
 	if len(got.Points) != 1 || got.Points[0].Name != "pressure" {
@@ -85,7 +86,7 @@ func TestAddAndDeletePoint(t *testing.T) {
 	device := sampleDevice("d1")
 	device.Points = nil
 	st.SaveDevice(device)
-	if err := st.AddPoint("d1", model.Point{Name: "p1", Address: "holding:0", DataType: model.DataTypeInt16, IntervalMs: 1000}); err != nil {
+	if err := st.AddPoint("d1", model.Point{Name: "p1", Address: "holding:0", DataType: model.DataTypeInt16}); err != nil {
 		t.Fatalf("add point: %v", err)
 	}
 	got, _ := st.GetDevice("d1")
