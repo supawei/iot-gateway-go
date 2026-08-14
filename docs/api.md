@@ -310,6 +310,37 @@ curl -X POST http://localhost:8080/api/v1/devices/sensor-01/clone \
   -d '{"id":"sensor-02","name":"温湿度-2","params":{"slaveId":2}}'
 ```
 
+#### 写入设备点位
+
+`POST /api/v1/devices/{deviceId}/write`
+
+即时下发单点写值,不走采集循环。驱动须支持写(modbus/opcua 支持),否则返回 `501`。连接复用驱动的 ConnectionID 池(写完即释放,采集在用则不关)。
+
+**请求体**:
+
+```json
+{"point": "setpoint", "value": 42}
+```
+
+- `point`:设备上已配置的点位名(按其 `address`/`dataType` 编码下发)
+- `value`:工程值。modbus 寄存器写时 `scale` 非零则反向缩放(value/scale)为寄存器原始值;opcua 节点值即工程值,忽略 scale
+
+**响应**:`200 OK` + 写结果数组
+
+```json
+[{"point": "setpoint", "ok": true}]
+```
+
+- `ok=false`:该点写失败(地址错误/类型不匹配/协议拒绝),不阻断同批其他点
+
+**错误码**:`404` 设备不存在;`400` 点位不存在;`501` 驱动不支持写;`502` 连接或写失败
+
+```bash
+curl -X POST http://localhost:8080/api/v1/devices/sensor-01/write \
+  -H 'Content-Type: application/json' \
+  -d '{"point":"setpoint","value":42}'
+```
+
 ### 点位
 
 #### 添加点位
