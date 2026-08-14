@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/grid-x/modbus"
@@ -34,12 +34,17 @@ const (
 var errShortResponse = errors.New("modbus response too short")
 
 func init() {
-	driver.Register("modbus", modbusDriver{})
+	driver.Register("modbus", &modbusDriver{pool: make(map[string]*sharedConn)})
 }
 
-type modbusDriver struct{}
+// modbusDriver 维护按 ConnectionID 复用的连接池:同连接(同串口/DTU)的多个从机
+// 设备共享底层 handler,经 sharedConn.mu 串行化请求以契合 RTU/DTU 半双工总线。
+type modbusDriver struct {
+	mu   sync.Mutex
+	pool map[string]*sharedConn
+}
 
-func (modbusDriver) Open(ctx context.Context, req driver.OpenRequest) (driver.Conn, error) {
+func (d *modbusDriver) Open(ctx context.Context, req driver.OpenRequest) (driver.Conn, error) {
 	cfg, err := parseConnConfig(req.ConnConfig)
 	if err != nil {
 		return nil, err
@@ -48,21 +53,66 @@ func (modbusDriver) Open(ctx context.Context, req driver.OpenRequest) (driver.Co
 	if err != nil {
 		return nil, err
 	}
-	client, closer, err := buildClient(ctx, cfg, params.SlaveID)
+	shared, err := d.acquire(ctx, req.ConnectionID, cfg)
 	if err != nil {
 		return nil, err
 	}
 	return &modbusConn{
 		deviceID: req.DeviceID,
-		client:   client,
-		closer:   closer,
+		slaveID:  params.SlaveID,
+		shared:   shared,
+		driver:   d,
 	}, nil
+}
+
+// acquire 取或建共享连接:同 ConnectionID 复用并增引用计数,否则建新连接入池。
+func (d *modbusDriver) acquire(ctx context.Context, connectionID string, cfg connConfig) (*sharedConn, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if shared, ok := d.pool[connectionID]; ok {
+		shared.refCount++
+		return shared, nil
+	}
+	client, handler, err := buildClient(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	shared := &sharedConn{
+		connectionID: connectionID,
+		handler:      handler,
+		client:       client,
+		refCount:     1,
+	}
+	d.pool[connectionID] = shared
+	return shared, nil
+}
+
+// release 减引用计数,归零则关底层连接并移出池。
+func (d *modbusDriver) release(shared *sharedConn) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	shared.refCount--
+	if shared.refCount > 0 {
+		return nil
+	}
+	delete(d.pool, shared.connectionID)
+	return shared.handler.Close()
+}
+
+// sharedConn 是被多设备共享的底层连接:mu 串行化请求(半双工),refCount 管生命周期。
+type sharedConn struct {
+	connectionID string
+	handler      modbus.ClientHandler
+	client       modbus.Client
+	mu           sync.Mutex
+	refCount     int
 }
 
 type modbusConn struct {
 	deviceID string
-	client   modbus.Client
-	closer   io.Closer
+	slaveID  byte
+	shared   *sharedConn
+	driver   *modbusDriver
 }
 
 // Read 批量读取点位:同 function 的连续/相邻地址合并成少数 Modbus 请求(连读),
@@ -100,7 +150,7 @@ func (c *modbusConn) Read(ctx context.Context, points []model.Point) ([]model.Da
 }
 
 func (c *modbusConn) Close() error {
-	return c.closer.Close()
+	return c.driver.release(c.shared)
 }
 
 // pointItem 关联点位与其解析后的地址信息,供连读分组与结果回填。
@@ -178,16 +228,21 @@ func (c *modbusConn) fillResult(item pointItem, raw []byte, blockStart uint16, r
 	}
 }
 
+// readRaw 在共享连接上串行执行单次请求:SetSlave 切到本设备从机地址后读取,
+// mu 保证同连接请求不并发(RTU/DTU 半双工总线不允许帧交错)。
 func (c *modbusConn) readRaw(ctx context.Context, function string, register, quantity uint16) ([]byte, error) {
+	c.shared.mu.Lock()
+	defer c.shared.mu.Unlock()
+	c.shared.handler.SetSlave(c.slaveID)
 	switch function {
 	case "holding":
-		return c.client.ReadHoldingRegisters(ctx, register, quantity)
+		return c.shared.client.ReadHoldingRegisters(ctx, register, quantity)
 	case "input":
-		return c.client.ReadInputRegisters(ctx, register, quantity)
+		return c.shared.client.ReadInputRegisters(ctx, register, quantity)
 	case "coil":
-		return c.client.ReadCoils(ctx, register, quantity)
+		return c.shared.client.ReadCoils(ctx, register, quantity)
 	case "discrete":
-		return c.client.ReadDiscreteInputs(ctx, register, quantity)
+		return c.shared.client.ReadDiscreteInputs(ctx, register, quantity)
 	default:
 		return nil, fmt.Errorf("unsupported modbus function %q", function)
 	}
@@ -345,9 +400,9 @@ func parseDeviceParams(raw json.RawMessage) (deviceParams, error) {
 	return params, nil
 }
 
-// buildClient 按配置创建具体 handler 并建立连接,返回 client 与可关闭句柄。
-// Connect/Close 在具体 handler 类型上,ClientHandler 接口不暴露,故用 io.Closer 持有。
-func buildClient(ctx context.Context, cfg connConfig, slaveID byte) (modbus.Client, io.Closer, error) {
+// buildClient 按配置创建具体 handler 并建立连接,返回 client 与 handler。
+// handler 暴露 ClientHandler 接口(SetSlave 运行时切从机,Close 关连接),供连接复用。
+func buildClient(ctx context.Context, cfg connConfig) (modbus.Client, modbus.ClientHandler, error) {
 	timeout, err := time.ParseDuration(cfg.Timeout)
 	if err != nil || timeout == 0 {
 		timeout = defaultTimeout
@@ -359,7 +414,6 @@ func buildClient(ctx context.Context, cfg connConfig, slaveID byte) (modbus.Clie
 		handler.DataBits = cfg.DataBits
 		handler.Parity = cfg.Parity
 		handler.StopBits = cfg.StopBits
-		handler.SlaveID = slaveID
 		handler.Timeout = timeout
 		if err := handler.Connect(ctx); err != nil {
 			return nil, nil, fmt.Errorf("modbus rtu connect: %w", err)
@@ -368,7 +422,6 @@ func buildClient(ctx context.Context, cfg connConfig, slaveID byte) (modbus.Clie
 	case "rtu-over-tcp":
 		// RTU 帧(带 CRC)走 TCP 传输,常见于 RS-485 串口服务器透传
 		handler := modbus.NewRTUOverTCPClientHandler(cfg.Address)
-		handler.SlaveID = slaveID
 		handler.Timeout = timeout
 		if err := handler.Connect(ctx); err != nil {
 			return nil, nil, fmt.Errorf("modbus rtu-over-tcp connect: %w", err)
@@ -376,7 +429,6 @@ func buildClient(ctx context.Context, cfg connConfig, slaveID byte) (modbus.Clie
 		return modbus.NewClient(handler), handler, nil
 	case "tcp":
 		handler := modbus.NewTCPClientHandler(cfg.Address)
-		handler.SlaveID = slaveID
 		handler.Timeout = timeout
 		if err := handler.Connect(ctx); err != nil {
 			return nil, nil, fmt.Errorf("modbus tcp connect: %w", err)

@@ -1,6 +1,7 @@
 package modbus
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -174,5 +175,28 @@ func TestDecodePointCoil(t *testing.T) {
 	v, err := decodePoint(item, raw, 0)
 	if err != nil || v != true {
 		t.Fatalf("coil bit decode: %v err=%v", v, err)
+	}
+}
+
+func TestConnectionPoolAcquireRelease(t *testing.T) {
+	d := &modbusDriver{pool: make(map[string]*sharedConn)}
+	shared := &sharedConn{connectionID: "c1", refCount: 1}
+	d.pool["c1"] = shared
+
+	// 同 ConnectionID acquire 复用,refCount 递增,不建新连接
+	got, err := d.acquire(context.Background(), "c1", connConfig{})
+	if err != nil || got != shared || shared.refCount != 2 {
+		t.Fatalf("acquire reuse: got=%v refCount=%d err=%v", got, shared.refCount, err)
+	}
+
+	// release 减计数,未归零则池保留连接
+	if err := d.release(shared); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if shared.refCount != 1 {
+		t.Fatalf("refCount after release: %d want 1", shared.refCount)
+	}
+	if _, ok := d.pool["c1"]; !ok {
+		t.Fatal("pool should keep connection while refCount > 0")
 	}
 }
