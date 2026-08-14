@@ -9,6 +9,14 @@ import (
 	"iot-gateway-go/internal/output/mqtt"
 )
 
+const (
+	defaultLogLevel   = "info"
+	defaultLogFormat  = "text"
+	defaultMaxSizeMB  = 100
+	defaultMaxBackups = 7
+	defaultMaxAgeDays = 30
+)
+
 // Config 是网关自身配置,来自 YAML 文件。
 type Config struct {
 	Gateway struct {
@@ -24,6 +32,17 @@ type Config struct {
 	Scheduler struct {
 		PoolSize int `yaml:"poolSize"`
 	} `yaml:"scheduler"`
+	Log struct {
+		Level  string `yaml:"level"`
+		Format string `yaml:"format"`
+		File   struct {
+			Path       string `yaml:"path"`
+			MaxSize    int    `yaml:"maxSize"`
+			MaxBackups int    `yaml:"maxBackups"`
+			MaxAge     int    `yaml:"maxAge"`
+			Compress   bool   `yaml:"compress"`
+		} `yaml:"file"`
+	} `yaml:"log"`
 }
 
 func Load(path string) (Config, error) {
@@ -51,5 +70,22 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Scheduler.PoolSize <= 0 {
 		cfg.Scheduler.PoolSize = 16
+	}
+	if cfg.Log.Level == "" {
+		cfg.Log.Level = defaultLogLevel
+	}
+	if cfg.Log.Format == "" {
+		cfg.Log.Format = defaultLogFormat
+	}
+	if cfg.Log.File.Path != "" {
+		if cfg.Log.File.MaxSize == 0 {
+			cfg.Log.File.MaxSize = defaultMaxSizeMB
+		}
+		if cfg.Log.File.MaxBackups == 0 {
+			cfg.Log.File.MaxBackups = defaultMaxBackups
+		}
+		if cfg.Log.File.MaxAge == 0 {
+			cfg.Log.File.MaxAge = defaultMaxAgeDays
+		}
 	}
 }
