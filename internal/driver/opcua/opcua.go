@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -264,11 +265,19 @@ func parseConnConfig(raw json.RawMessage) (connConfig, error) {
 	return cfg, nil
 }
 
+const opcuaReconnectInterval = 5 * time.Second
+
+// buildClient 建立启用了自动重连的 OPC UA client:连接断开后库自动重连,
+// 状态变更经 stateCh 输出供 monitorConnState 记录离线/恢复。
 func buildClient(ctx context.Context, cfg connConfig) (*opcua.Client, error) {
 	timeout, _ := time.ParseDuration(cfg.Timeout)
+	stateCh := make(chan opcua.ConnState, 8)
 	opts := []opcua.Option{
 		opcua.SecurityMode(ua.MessageSecurityModeNone),
 		opcua.RequestTimeout(timeout),
+		opcua.AutoReconnect(true),
+		opcua.ReconnectInterval(opcuaReconnectInterval),
+		opcua.StateChangedCh(stateCh),
 	}
 	if cfg.Username != "" {
 		opts = append(opts, opcua.AuthUsername(cfg.Username, cfg.Password))
@@ -282,5 +291,30 @@ func buildClient(ctx context.Context, cfg connConfig) (*opcua.Client, error) {
 	if err := client.Connect(ctx); err != nil {
 		return nil, fmt.Errorf("connect opcua %q: %w", cfg.Endpoint, err)
 	}
+	go monitorConnState(ctx, cfg.Endpoint, stateCh)
 	return client, nil
+}
+
+// monitorConnState 记录连接状态变更(离线/重连/恢复),ctx 取消或连接 Closed 时退出。
+func monitorConnState(ctx context.Context, endpoint string, stateCh <-chan opcua.ConnState) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case state, ok := <-stateCh:
+			if !ok {
+				return
+			}
+			switch state {
+			case opcua.Connected:
+				slog.Info("opcua connected", "endpoint", endpoint)
+			case opcua.Disconnected:
+				slog.Warn("opcua disconnected, auto-reconnecting", "endpoint", endpoint)
+			case opcua.Reconnecting:
+				slog.Info("opcua reconnecting", "endpoint", endpoint)
+			case opcua.Closed:
+				return
+			}
+		}
+	}
 }

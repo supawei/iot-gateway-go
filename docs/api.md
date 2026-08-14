@@ -145,6 +145,16 @@ PollBlock:
 
 > OPC UA 设备级 `params` 默认空 `{}`(无从机地址概念);一个 endpoint 可挂多个 Device,共享 session。驱动轮询读取,订阅(Subscription)留作未来扩展。
 
+## 连接容错与重连
+
+驱动内置自动重连,无需应用层干预,连接断开后自动恢复采集:
+
+- **OPC UA**:gopcua `AutoReconnect`,断开后每 `5s` 重试并自动恢复 session;状态变更(connected/disconnected/reconnecting)写入日志。
+- **Modbus TCP / RTU-over-TCP**:连接断开或协议错乱时,单次请求在 `10s` 恢复窗口内重连重试;`IdleTimeout=-1` 保持持久连接,连接断后下次请求自动重新拨号。
+- **Modbus RTU(串口)**:`IdleTimeout=-1` 持久占用串口。串口设备节点消失(如 USB-485 拔出)属物理离线,需重新打开串口,当前不自动重开(触发配置 reload 或重启恢复)。
+
+> 重连参数为内置默认,暂未暴露配置项;实采验证后可按需开放。
+
 ## 点位地址
 
 **Modbus**:格式 `function:register`,如 `holding:0`、`coil:2`。

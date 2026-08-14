@@ -30,6 +30,11 @@ const (
 	// Modbus 协议单次读取上限(规范):寄存器 125,线圈/离散输入 2000
 	maxRegistersPerRead = 125
 	maxCoilsPerRead     = 2000
+
+	// TCP 类连接的链路/协议恢复窗口:单次请求内连接断开或协议错乱时,
+	// 在此窗口内重连重试,避免等到下个采集周期才恢复。
+	modbusLinkRecoveryTimeout     = 10 * time.Second
+	modbusProtocolRecoveryTimeout = 10 * time.Second
 )
 
 var errShortResponse = errors.New("modbus response too short")
@@ -485,6 +490,7 @@ func buildClient(ctx context.Context, cfg connConfig) (modbus.Client, modbus.Cli
 		handler.Parity = cfg.Parity
 		handler.StopBits = cfg.StopBits
 		handler.Timeout = timeout
+		handler.IdleTimeout = -1 // 持久占用串口,不因空闲关闭
 		if err := handler.Connect(ctx); err != nil {
 			return nil, nil, fmt.Errorf("modbus rtu connect: %w", err)
 		}
@@ -493,6 +499,9 @@ func buildClient(ctx context.Context, cfg connConfig) (modbus.Client, modbus.Cli
 		// RTU 帧(带 CRC)走 TCP 传输,常见于 RS-485 串口服务器透传
 		handler := modbus.NewRTUOverTCPClientHandler(cfg.Address)
 		handler.Timeout = timeout
+		handler.IdleTimeout = -1
+		handler.LinkRecoveryTimeout = modbusLinkRecoveryTimeout
+		handler.ProtocolRecoveryTimeout = modbusProtocolRecoveryTimeout
 		if err := handler.Connect(ctx); err != nil {
 			return nil, nil, fmt.Errorf("modbus rtu-over-tcp connect: %w", err)
 		}
@@ -500,6 +509,9 @@ func buildClient(ctx context.Context, cfg connConfig) (modbus.Client, modbus.Cli
 	case "tcp":
 		handler := modbus.NewTCPClientHandler(cfg.Address)
 		handler.Timeout = timeout
+		handler.IdleTimeout = -1
+		handler.LinkRecoveryTimeout = modbusLinkRecoveryTimeout
+		handler.ProtocolRecoveryTimeout = modbusProtocolRecoveryTimeout
 		if err := handler.Connect(ctx); err != nil {
 			return nil, nil, fmt.Errorf("modbus tcp connect: %w", err)
 		}
