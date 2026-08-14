@@ -83,12 +83,22 @@ func (s *Scheduler) stopCollectors() {
 }
 
 func (s *Scheduler) startDevice(ctx context.Context, device model.Device) {
-	drv, err := driver.Get(device.Driver)
+	connection, err := s.store.GetConnection(device.ConnectionID)
 	if err != nil {
-		log.Printf("device %q: driver %q not registered: %v", device.ID, device.Driver, err)
+		log.Printf("device %q: get connection %q failed: %v", device.ID, device.ConnectionID, err)
 		return
 	}
-	conn, err := drv.Open(ctx, device.ID, device.Connection)
+	drv, err := driver.Get(connection.Driver)
+	if err != nil {
+		log.Printf("device %q: driver %q not registered: %v", device.ID, connection.Driver, err)
+		return
+	}
+	conn, err := drv.Open(ctx, driver.OpenRequest{
+		DeviceID:     device.ID,
+		ConnectionID: device.ConnectionID,
+		ConnConfig:   connection.Config,
+		DeviceParams: device.Params,
+	})
 	if err != nil {
 		log.Printf("device %q: open failed: %v", device.ID, err)
 		return

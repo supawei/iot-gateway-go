@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"testing"
 
 	"iot-gateway-go/internal/model"
@@ -16,14 +17,30 @@ func newTestStore(t *testing.T) *Store {
 	return st
 }
 
+func sampleConnection() model.Connection {
+	return model.Connection{
+		ID:     "conn-1",
+		Name:   "conn-1",
+		Driver: "modbus",
+		Config: []byte(`{"mode":"tcp","address":"127.0.0.1:502"}`),
+	}
+}
+
+func saveSampleConnection(t *testing.T, st *Store) {
+	t.Helper()
+	if err := st.SaveConnection(sampleConnection()); err != nil {
+		t.Fatalf("save connection: %v", err)
+	}
+}
+
 func sampleDevice(id string) model.Device {
 	return model.Device{
-		ID:         id,
-		Name:       id,
-		Driver:     "modbus",
-		Connection: []byte(`{"mode":"tcp","address":"127.0.0.1:502"}`),
-		IntervalMs: 1000,
-		Enabled:    true,
+		ID:           id,
+		Name:         id,
+		ConnectionID: "conn-1",
+		Params:       []byte(`{"slaveId":1}`),
+		IntervalMs:   1000,
+		Enabled:      true,
 		Points: []model.Point{
 			{Name: "temperature", Address: "holding:0", DataType: model.DataTypeInt16, Scale: 0.1},
 			{Name: "humidity", Address: "holding:1", DataType: model.DataTypeInt16, Scale: 0.1},
@@ -31,8 +48,46 @@ func sampleDevice(id string) model.Device {
 	}
 }
 
+func TestSaveAndGetConnection(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.SaveConnection(sampleConnection()); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := st.GetConnection("conn-1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Driver != "modbus" || string(got.Config) == "" {
+		t.Fatalf("unexpected connection: %+v", got)
+	}
+}
+
+func TestListConnections(t *testing.T) {
+	st := newTestStore(t)
+	st.SaveConnection(sampleConnection())
+	conns, err := st.ListConnections()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(conns) != 1 {
+		t.Fatalf("want 1 connection got %d", len(conns))
+	}
+}
+
+func TestDeleteConnectionBlockedByDevice(t *testing.T) {
+	st := newTestStore(t)
+	saveSampleConnection(t, st)
+	if err := st.SaveDevice(sampleDevice("d1")); err != nil {
+		t.Fatalf("save device: %v", err)
+	}
+	if err := st.DeleteConnection("conn-1"); !errors.Is(err, ErrConnectionInUse) {
+		t.Fatalf("expected ErrConnectionInUse got %v", err)
+	}
+}
+
 func TestSaveAndGetDevice(t *testing.T) {
 	st := newTestStore(t)
+	saveSampleConnection(t, st)
 	if err := st.SaveDevice(sampleDevice("sensor-01")); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -40,13 +95,14 @@ func TestSaveAndGetDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if len(got.Points) != 2 || !got.Enabled {
+	if len(got.Points) != 2 || !got.Enabled || got.ConnectionID != "conn-1" {
 		t.Fatalf("unexpected device: %+v", got)
 	}
 }
 
 func TestListDevices(t *testing.T) {
 	st := newTestStore(t)
+	saveSampleConnection(t, st)
 	st.SaveDevice(sampleDevice("d1"))
 	st.SaveDevice(sampleDevice("d2"))
 	devices, err := st.ListDevices()
@@ -60,6 +116,7 @@ func TestListDevices(t *testing.T) {
 
 func TestSaveDeviceReplacesPoints(t *testing.T) {
 	st := newTestStore(t)
+	saveSampleConnection(t, st)
 	st.SaveDevice(sampleDevice("d1"))
 	replaced := sampleDevice("d1")
 	replaced.Points = []model.Point{{Name: "pressure", Address: "holding:2", DataType: model.DataTypeFloat}}
@@ -72,6 +129,7 @@ func TestSaveDeviceReplacesPoints(t *testing.T) {
 
 func TestDeleteDevice(t *testing.T) {
 	st := newTestStore(t)
+	saveSampleConnection(t, st)
 	st.SaveDevice(sampleDevice("d1"))
 	if err := st.DeleteDevice("d1"); err != nil {
 		t.Fatalf("delete: %v", err)
@@ -83,6 +141,7 @@ func TestDeleteDevice(t *testing.T) {
 
 func TestAddAndDeletePoint(t *testing.T) {
 	st := newTestStore(t)
+	saveSampleConnection(t, st)
 	device := sampleDevice("d1")
 	device.Points = nil
 	st.SaveDevice(device)
@@ -104,6 +163,7 @@ func TestAddAndDeletePoint(t *testing.T) {
 
 func TestOnChange(t *testing.T) {
 	st := newTestStore(t)
+	saveSampleConnection(t, st)
 	select {
 	case <-st.OnChange():
 	default:

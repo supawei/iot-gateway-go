@@ -9,10 +9,18 @@ import (
 	"iot-gateway-go/internal/model"
 )
 
-// Driver 是南向协议驱动的无状态工厂;每个设备 Open 出独立 Conn,
-// 这样同一驱动类型可服务多个设备实例(如多个 Modbus 从站)。
+// OpenRequest 汇聚打开设备连接所需的全部上下文:传输参数(ConnConfig,来自 Connection)
+// 与设备级协议参数(DeviceParams,来自 Device)。ConnectionID 用作驱动内部连接复用的池 key。
+type OpenRequest struct {
+	DeviceID     string
+	ConnectionID string
+	ConnConfig   json.RawMessage
+	DeviceParams json.RawMessage
+}
+
+// Driver 是南向协议驱动的无状态工厂;Open 出绑定单个设备的 Conn。
 type Driver interface {
-	Open(ctx context.Context, deviceID string, connection json.RawMessage) (Conn, error)
+	Open(ctx context.Context, req OpenRequest) (Conn, error)
 }
 
 // Conn 绑定单个设备连接,批量读取点位并返回协议无关的 DataPoint。

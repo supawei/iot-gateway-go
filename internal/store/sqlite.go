@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	_ "modernc.org/sqlite"
@@ -11,13 +12,20 @@ import (
 )
 
 const schema = `
+CREATE TABLE IF NOT EXISTS connection (
+    id     TEXT PRIMARY KEY,
+    name   TEXT NOT NULL,
+    driver TEXT NOT NULL,
+    config TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS device (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    driver      TEXT NOT NULL,
-    connection  TEXT NOT NULL,
-    interval_ms INTEGER NOT NULL,
-    enabled     INTEGER NOT NULL DEFAULT 1
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    connection_id TEXT NOT NULL,
+    params        TEXT NOT NULL DEFAULT '{}',
+    interval_ms   INTEGER NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    FOREIGN KEY (connection_id) REFERENCES connection(id) ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS point (
     device_id   TEXT NOT NULL,
@@ -29,7 +37,10 @@ CREATE TABLE IF NOT EXISTS point (
     FOREIGN KEY (device_id) REFERENCES device(id) ON DELETE CASCADE
 );`
 
-// Store 负责设备/点位配置的持久化与变更通知。
+// ErrConnectionInUse 表示连接仍被设备引用,不可删除。
+var ErrConnectionInUse = errors.New("connection is referenced by devices")
+
+// Store 负责连接/设备/点位配置的持久化与变更通知。
 type Store struct {
 	db       *sql.DB
 	changeCh chan struct{}
@@ -63,8 +74,66 @@ func (s *Store) notify() {
 	}
 }
 
+func (s *Store) SaveConnection(conn model.Connection) error {
+	_, err := s.db.Exec(
+		`INSERT INTO connection (id, name, driver, config) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, driver=excluded.driver, config=excluded.config`,
+		conn.ID, conn.Name, conn.Driver, string(conn.Config),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert connection: %w", err)
+	}
+	s.notify()
+	return nil
+}
+
+func (s *Store) ListConnections() ([]model.Connection, error) {
+	rows, err := s.db.Query("SELECT id, name, driver, config FROM connection")
+	if err != nil {
+		return nil, fmt.Errorf("query connections: %w", err)
+	}
+	defer rows.Close()
+	var conns []model.Connection
+	for rows.Next() {
+		conn, err := scanConnection(rows)
+		if err != nil {
+			return nil, err
+		}
+		conns = append(conns, conn)
+	}
+	return conns, rows.Err()
+}
+
+func (s *Store) GetConnection(id string) (model.Connection, error) {
+	row := s.db.QueryRow("SELECT id, name, driver, config FROM connection WHERE id = ?", id)
+	conn, err := scanConnection(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Connection{}, fmt.Errorf("connection %q not found", id)
+		}
+		return model.Connection{}, fmt.Errorf("get connection: %w", err)
+	}
+	return conn, nil
+}
+
+// DeleteConnection 删除连接;若有 device 引用则返回 ErrConnectionInUse。
+func (s *Store) DeleteConnection(id string) error {
+	var refCount int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM device WHERE connection_id = ?", id).Scan(&refCount); err != nil {
+		return fmt.Errorf("check connection references: %w", err)
+	}
+	if refCount > 0 {
+		return fmt.Errorf("%w: %d device(s)", ErrConnectionInUse, refCount)
+	}
+	if _, err := s.db.Exec("DELETE FROM connection WHERE id = ?", id); err != nil {
+		return fmt.Errorf("delete connection: %w", err)
+	}
+	s.notify()
+	return nil
+}
+
 func (s *Store) ListDevices() ([]model.Device, error) {
-	devices, err := s.queryDevices("SELECT id, name, driver, connection, interval_ms, enabled FROM device")
+	devices, err := s.queryDevices("SELECT id, name, connection_id, params, interval_ms, enabled FROM device")
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +148,7 @@ func (s *Store) ListDevices() ([]model.Device, error) {
 }
 
 func (s *Store) GetDevice(id string) (model.Device, error) {
-	devices, err := s.queryDevices("SELECT id, name, driver, connection, interval_ms, enabled FROM device WHERE id = ?", id)
+	devices, err := s.queryDevices("SELECT id, name, connection_id, params, interval_ms, enabled FROM device WHERE id = ?", id)
 	if err != nil {
 		return model.Device{}, err
 	}
@@ -207,14 +276,25 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+func scanConnection(row rowScanner) (model.Connection, error) {
+	var conn model.Connection
+	var config string
+	if err := row.Scan(&conn.ID, &conn.Name, &conn.Driver, &config); err != nil {
+		return model.Connection{}, fmt.Errorf("scan connection: %w", err)
+	}
+	conn.Config = json.RawMessage(config)
+	return conn, nil
+}
+
 func scanDevice(row rowScanner) (model.Device, error) {
 	var device model.Device
-	var connection string
+	var connectionID, params string
 	var enabled int
-	if err := row.Scan(&device.ID, &device.Name, &device.Driver, &connection, &device.IntervalMs, &enabled); err != nil {
+	if err := row.Scan(&device.ID, &device.Name, &connectionID, &params, &device.IntervalMs, &enabled); err != nil {
 		return model.Device{}, fmt.Errorf("scan device: %w", err)
 	}
-	device.Connection = json.RawMessage(connection)
+	device.ConnectionID = connectionID
+	device.Params = json.RawMessage(params)
 	device.Enabled = enabled != 0
 	return device, nil
 }
@@ -234,10 +314,14 @@ func saveDeviceTx(tx *sql.Tx, device model.Device) error {
 	if device.Enabled {
 		enabled = 1
 	}
+	params := device.Params
+	if len(params) == 0 {
+		params = json.RawMessage(`{}`)
+	}
 	_, err := tx.Exec(
-		`INSERT INTO device (id, name, driver, connection, interval_ms, enabled) VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, driver=excluded.driver, connection=excluded.connection, interval_ms=excluded.interval_ms, enabled=excluded.enabled`,
-		device.ID, device.Name, device.Driver, string(device.Connection), device.IntervalMs, enabled,
+		`INSERT INTO device (id, name, connection_id, params, interval_ms, enabled) VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, connection_id=excluded.connection_id, params=excluded.params, interval_ms=excluded.interval_ms, enabled=excluded.enabled`,
+		device.ID, device.Name, device.ConnectionID, string(params), device.IntervalMs, enabled,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert device: %w", err)

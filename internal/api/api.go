@@ -21,6 +21,11 @@ func New(st *store.Store) *API {
 // Routes 返回挂载好路由的 ServeMux,由 main 直接用作 http.Server Handler。
 func (a *API) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/connections", a.createConnection)
+	mux.HandleFunc("GET /api/v1/connections", a.listConnections)
+	mux.HandleFunc("GET /api/v1/connections/{connectionId}", a.getConnection)
+	mux.HandleFunc("PUT /api/v1/connections/{connectionId}", a.putConnection)
+	mux.HandleFunc("DELETE /api/v1/connections/{connectionId}", a.deleteConnection)
 	mux.HandleFunc("POST /api/v1/devices", a.createDevice)
 	mux.HandleFunc("GET /api/v1/devices", a.listDevices)
 	mux.HandleFunc("GET /api/v1/devices/{deviceId}", a.getDevice)
@@ -29,6 +34,74 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/devices/{deviceId}/points", a.addPoint)
 	mux.HandleFunc("DELETE /api/v1/devices/{deviceId}/points/{name}", a.deletePoint)
 	return mux
+}
+
+func (a *API) createConnection(w http.ResponseWriter, r *http.Request) {
+	conn, ok := decodeConnection(w, r)
+	if !ok {
+		return
+	}
+	if conn.ID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("connection id is required"))
+		return
+	}
+	if err := a.store.SaveConnection(conn); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, conn)
+}
+
+func (a *API) listConnections(w http.ResponseWriter, r *http.Request) {
+	conns, err := a.store.ListConnections()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, conns)
+}
+
+func (a *API) getConnection(w http.ResponseWriter, r *http.Request) {
+	conn, err := a.store.GetConnection(r.PathValue("connectionId"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, conn)
+}
+
+func (a *API) putConnection(w http.ResponseWriter, r *http.Request) {
+	conn, ok := decodeConnection(w, r)
+	if !ok {
+		return
+	}
+	conn.ID = r.PathValue("connectionId")
+	if err := a.store.SaveConnection(conn); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, conn)
+}
+
+func (a *API) deleteConnection(w http.ResponseWriter, r *http.Request) {
+	if err := a.store.DeleteConnection(r.PathValue("connectionId")); err != nil {
+		if errors.Is(err, store.ErrConnectionInUse) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func decodeConnection(w http.ResponseWriter, r *http.Request) (model.Connection, bool) {
+	var conn model.Connection
+	if err := json.NewDecoder(r.Body).Decode(&conn); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return model.Connection{}, false
+	}
+	return conn, true
 }
 
 func (a *API) createDevice(w http.ResponseWriter, r *http.Request) {

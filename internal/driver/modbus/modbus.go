@@ -39,17 +39,21 @@ func init() {
 
 type modbusDriver struct{}
 
-func (modbusDriver) Open(ctx context.Context, deviceID string, connection json.RawMessage) (driver.Conn, error) {
-	cfg, err := parseConnConfig(connection)
+func (modbusDriver) Open(ctx context.Context, req driver.OpenRequest) (driver.Conn, error) {
+	cfg, err := parseConnConfig(req.ConnConfig)
 	if err != nil {
 		return nil, err
 	}
-	client, closer, err := buildClient(ctx, cfg)
+	params, err := parseDeviceParams(req.DeviceParams)
+	if err != nil {
+		return nil, err
+	}
+	client, closer, err := buildClient(ctx, cfg, params.SlaveID)
 	if err != nil {
 		return nil, err
 	}
 	return &modbusConn{
-		deviceID: deviceID,
+		deviceID: req.DeviceID,
 		client:   client,
 		closer:   closer,
 	}, nil
@@ -297,9 +301,9 @@ func applyScale(value interface{}, scale float64, dt model.DataType) interface{}
 	}
 }
 
+// connConfig 是传输层参数(怎么到达总线),不含从机地址。
 type connConfig struct {
 	Mode       string `json:"mode"`
-	SlaveID    byte   `json:"slaveId"`
 	Timeout    string `json:"timeout"`
 	SerialPort string `json:"serialPort"`
 	BaudRate   int    `json:"baudRate"`
@@ -325,9 +329,25 @@ func parseConnConfig(connection json.RawMessage) (connConfig, error) {
 	return cfg, nil
 }
 
+// deviceParams 是设备级协议参数(总线上怎么寻址该设备)。
+type deviceParams struct {
+	SlaveID byte `json:"slaveId"`
+}
+
+func parseDeviceParams(raw json.RawMessage) (deviceParams, error) {
+	params := deviceParams{}
+	if len(raw) == 0 {
+		return params, nil
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return deviceParams{}, fmt.Errorf("parse modbus device params: %w", err)
+	}
+	return params, nil
+}
+
 // buildClient 按配置创建具体 handler 并建立连接,返回 client 与可关闭句柄。
 // Connect/Close 在具体 handler 类型上,ClientHandler 接口不暴露,故用 io.Closer 持有。
-func buildClient(ctx context.Context, cfg connConfig) (modbus.Client, io.Closer, error) {
+func buildClient(ctx context.Context, cfg connConfig, slaveID byte) (modbus.Client, io.Closer, error) {
 	timeout, err := time.ParseDuration(cfg.Timeout)
 	if err != nil || timeout == 0 {
 		timeout = defaultTimeout
@@ -339,7 +359,7 @@ func buildClient(ctx context.Context, cfg connConfig) (modbus.Client, io.Closer,
 		handler.DataBits = cfg.DataBits
 		handler.Parity = cfg.Parity
 		handler.StopBits = cfg.StopBits
-		handler.SlaveID = cfg.SlaveID
+		handler.SlaveID = slaveID
 		handler.Timeout = timeout
 		if err := handler.Connect(ctx); err != nil {
 			return nil, nil, fmt.Errorf("modbus rtu connect: %w", err)
@@ -348,7 +368,7 @@ func buildClient(ctx context.Context, cfg connConfig) (modbus.Client, io.Closer,
 	case "rtu-over-tcp":
 		// RTU 帧(带 CRC)走 TCP 传输,常见于 RS-485 串口服务器透传
 		handler := modbus.NewRTUOverTCPClientHandler(cfg.Address)
-		handler.SlaveID = cfg.SlaveID
+		handler.SlaveID = slaveID
 		handler.Timeout = timeout
 		if err := handler.Connect(ctx); err != nil {
 			return nil, nil, fmt.Errorf("modbus rtu-over-tcp connect: %w", err)
@@ -356,7 +376,7 @@ func buildClient(ctx context.Context, cfg connConfig) (modbus.Client, io.Closer,
 		return modbus.NewClient(handler), handler, nil
 	case "tcp":
 		handler := modbus.NewTCPClientHandler(cfg.Address)
-		handler.SlaveID = cfg.SlaveID
+		handler.SlaveID = slaveID
 		handler.Timeout = timeout
 		if err := handler.Connect(ctx); err != nil {
 			return nil, nil, fmt.Errorf("modbus tcp connect: %w", err)

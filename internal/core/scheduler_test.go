@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -35,8 +34,8 @@ func (c *mockConn) Close() error { return nil }
 
 type mockDriver struct{}
 
-func (mockDriver) Open(_ context.Context, deviceID string, _ json.RawMessage) (driver.Conn, error) {
-	return &mockConn{deviceID: deviceID}, nil
+func (mockDriver) Open(_ context.Context, req driver.OpenRequest) (driver.Conn, error) {
+	return &mockConn{deviceID: req.DeviceID}, nil
 }
 
 func TestSchedulerCollects(t *testing.T) {
@@ -47,12 +46,18 @@ func TestSchedulerCollects(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
+	st.SaveConnection(model.Connection{
+		ID:     "c1",
+		Name:   "c1",
+		Driver: "testdriver",
+		Config: []byte(`{}`),
+	})
 	st.SaveDevice(model.Device{
-		ID:         "d1",
-		Driver:     "testdriver",
-		Connection: []byte(`{}`),
-		IntervalMs: 50,
-		Enabled:    true,
+		ID:           "d1",
+		ConnectionID: "c1",
+		Params:       []byte(`{}`),
+		IntervalMs:   50,
+		Enabled:      true,
 		Points: []model.Point{
 			{Name: "p1", Address: "holding:0", DataType: model.DataTypeInt16},
 		},

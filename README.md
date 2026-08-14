@@ -36,11 +36,20 @@ go build -o gateway ./cmd/gateway
 通过 REST API 配置一个 Modbus TCP 设备:
 
 ```bash
+# 1. 先建连接(传输参数,可被多个从机设备共享)
+curl -X POST http://localhost:8080/api/v1/connections -H 'Content-Type: application/json' -d '{
+  "id": "conn-1",
+  "name": "车间 Modbus TCP",
+  "driver": "modbus",
+  "config": {"mode":"tcp","address":"192.168.1.5:502"}
+}'
+
+# 2. 再建设备,引用连接并配从机地址
 curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/json' -d '{
   "id": "sensor-01",
   "name": "温湿度传感器",
-  "driver": "modbus",
-  "connection": {"mode":"tcp","address":"192.168.1.5:502","slaveId":1},
+  "connectionId": "conn-1",
+  "params": {"slaveId":1},
   "intervalMs": 1000,
   "enabled": true,
   "points": [
@@ -54,13 +63,13 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 
 ## Modbus 驱动
 
-**连接配置** (`connection` 字段):
+**连接配置** (`Connection.config` 字段,传输参数;从机地址 `slaveId` 在 `Device.params`):
 
-| 模式 | 字段 |
+| 模式 | config 字段 |
 |---|---|
-| TCP | `mode:"tcp"`, `address:"host:502"`, `slaveId` |
-| RTU | `mode:"rtu"`, `serialPort:"/dev/ttyS0"`, `baudRate`, `dataBits`, `parity`, `stopBits`, `slaveId` |
-| RTU over TCP | `mode:"rtu-over-tcp"`, `address:"host:502"`, `slaveId` |
+| TCP | `mode:"tcp"`, `address:"host:502"` |
+| RTU | `mode:"rtu"`, `serialPort:"/dev/ttyS0"`, `baudRate`, `dataBits`, `parity`, `stopBits` |
+| RTU over TCP | `mode:"rtu-over-tcp"`, `address:"host:502"` |
 
 **点位地址** (`address` 字段):`function:register`,function 为 `holding`/`input`/`coil`/`discrete`。
 
@@ -70,6 +79,11 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| POST | `/api/v1/connections` | 创建连接 |
+| GET | `/api/v1/connections` | 列出连接 |
+| GET | `/api/v1/connections/{connectionId}` | 获取连接 |
+| PUT | `/api/v1/connections/{connectionId}` | 更新连接 |
+| DELETE | `/api/v1/connections/{connectionId}` | 删除连接(被设备引用时 409) |
 | POST | `/api/v1/devices` | 创建设备(含点位) |
 | GET | `/api/v1/devices` | 列出设备 |
 | GET | `/api/v1/devices/{deviceId}` | 获取设备 |
@@ -91,7 +105,7 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 ```
 cmd/gateway/          入口
 internal/
-  model/              Device/Point/DataPoint 数据模型
+  model/              Connection/Device/Point/DataPoint 数据模型
   driver/             Driver/Conn 接口 + registry
     modbus/           Modbus 驱动
   output/             Output 接口

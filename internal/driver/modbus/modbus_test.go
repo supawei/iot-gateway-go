@@ -85,25 +85,36 @@ func TestApplyScale(t *testing.T) {
 }
 
 func TestParseConnConfig(t *testing.T) {
-	cfg, err := parseConnConfig(json.RawMessage(`{"mode":"tcp","address":"192.168.1.5:502","slaveId":1}`))
+	cfg, err := parseConnConfig(json.RawMessage(`{"mode":"tcp","address":"192.168.1.5:502"}`))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if cfg.Mode != "tcp" || cfg.Address != "192.168.1.5:502" || cfg.SlaveID != 1 {
+	if cfg.Mode != "tcp" || cfg.Address != "192.168.1.5:502" {
 		t.Fatalf("unexpected cfg: %+v", cfg)
 	}
 	if cfg.BaudRate != defaultBaudRate {
 		t.Fatalf("default baud rate: %d want %d", cfg.BaudRate, defaultBaudRate)
 	}
-	rtuOverTCP, err := parseConnConfig(json.RawMessage(`{"mode":"rtu-over-tcp","address":"192.168.1.5:502","slaveId":2}`))
+	rtuOverTCP, err := parseConnConfig(json.RawMessage(`{"mode":"rtu-over-tcp","address":"192.168.1.5:502"}`))
 	if err != nil {
 		t.Fatalf("rtu-over-tcp err: %v", err)
 	}
-	if rtuOverTCP.Mode != "rtu-over-tcp" || rtuOverTCP.Address != "192.168.1.5:502" || rtuOverTCP.SlaveID != 2 {
+	if rtuOverTCP.Mode != "rtu-over-tcp" || rtuOverTCP.Address != "192.168.1.5:502" {
 		t.Fatalf("unexpected rtu-over-tcp cfg: %+v", rtuOverTCP)
 	}
 	if _, err := parseConnConfig(json.RawMessage(`{}`)); err == nil {
 		t.Fatal("expected error for missing mode")
+	}
+}
+
+func TestParseDeviceParams(t *testing.T) {
+	params, err := parseDeviceParams(json.RawMessage(`{"slaveId":3}`))
+	if err != nil || params.SlaveID != 3 {
+		t.Fatalf("parse device params: %+v err=%v", params, err)
+	}
+	empty, err := parseDeviceParams(nil)
+	if err != nil || empty.SlaveID != 0 {
+		t.Fatalf("empty params: %+v err=%v", empty, err)
 	}
 }
 

@@ -5,16 +5,25 @@ import (
 	"time"
 )
 
-// Device 表示一个物理或逻辑设备,对应一个协议连接实例。
+// Connection 是传输层连接,可被多个设备共享(如同一串口或 DTU 下的多个 Modbus 从站)。
+// Config 只含传输参数(怎么到达总线);设备级协议参数(从机地址等)归 Device.Params。
+type Connection struct {
+	ID     string          `json:"id"`
+	Name   string          `json:"name"`
+	Driver string          `json:"driver"`
+	Config json.RawMessage `json:"config"`
+}
+
+// Device 表示一个物理或逻辑设备,引用一个 Connection 并携带设备级协议参数。
 // IntervalMs 为设备级采集周期,连读时按此周期批量读取所有点位。
 type Device struct {
-	ID         string          `json:"id"`
-	Name       string          `json:"name"`
-	Driver     string          `json:"driver"`
-	Connection json.RawMessage `json:"connection"`
-	Points     []Point         `json:"points"`
-	IntervalMs int             `json:"intervalMs"`
-	Enabled    bool            `json:"enabled"`
+	ID           string          `json:"id"`
+	Name         string          `json:"name"`
+	ConnectionID string          `json:"connectionId"`
+	Params       json.RawMessage `json:"params"`
+	Points       []Point         `json:"points"`
+	IntervalMs   int             `json:"intervalMs"`
+	Enabled      bool            `json:"enabled"`
 }
 
 // Point 描述单个采集点:采什么、怎么采。

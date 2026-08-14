@@ -38,17 +38,69 @@ func doRequest(t *testing.T, handler http.Handler, method, path string, body int
 	return rec
 }
 
+func sampleConnection() model.Connection {
+	return model.Connection{
+		ID:     "conn-1",
+		Name:   "modbus-tcp",
+		Driver: "modbus",
+		Config: json.RawMessage(`{"mode":"tcp","address":"127.0.0.1:502"}`),
+	}
+}
+
+// seedConnection 预置连接,device 测试依赖 connection_id 存在。
+func seedConnection(t *testing.T, handler http.Handler) {
+	t.Helper()
+	rec := doRequest(t, handler, "POST", "/api/v1/connections", sampleConnection())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("seed connection: got %d", rec.Code)
+	}
+}
+
 func sampleDevice() model.Device {
 	return model.Device{
-		ID:         "sensor-01",
-		Name:       "温湿度",
-		Driver:     "modbus",
-		Connection: json.RawMessage(`{"mode":"tcp","address":"127.0.0.1:502"}`),
-		IntervalMs: 1000,
-		Enabled:    true,
+		ID:           "sensor-01",
+		Name:         "温湿度",
+		ConnectionID: "conn-1",
+		Params:       json.RawMessage(`{"slaveId":1}`),
+		IntervalMs:   1000,
+		Enabled:      true,
 		Points: []model.Point{
 			{Name: "temperature", Address: "holding:0", DataType: model.DataTypeInt16, Scale: 0.1},
 		},
+	}
+}
+
+func TestCreateAndGetConnection(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
+	rec := doRequest(t, handler, "POST", "/api/v1/connections", sampleConnection())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: got %d want %d", rec.Code, http.StatusCreated)
+	}
+	rec = doRequest(t, handler, "GET", "/api/v1/connections/conn-1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get: got %d want %d", rec.Code, http.StatusOK)
+	}
+	var got model.Connection
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Driver != "modbus" {
+		t.Fatalf("unexpected connection: %+v", got)
+	}
+}
+
+func TestDeleteConnectionBlockedByDevice(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
+	seedConnection(t, handler)
+	doRequest(t, handler, "POST", "/api/v1/devices", sampleDevice())
+
+	rec := doRequest(t, handler, "DELETE", "/api/v1/connections/conn-1", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("delete referenced connection: got %d want %d", rec.Code, http.StatusConflict)
 	}
 }
 
@@ -57,6 +109,7 @@ func sampleDevice() model.Device {
 func TestCreateAndGetDevice(t *testing.T) {
 	apiInstance := newTestAPI(t)
 	handler := apiInstance.Routes()
+	seedConnection(t, handler)
 
 	rec := doRequest(t, handler, "POST", "/api/v1/devices", sampleDevice())
 	if rec.Code != http.StatusCreated {
@@ -89,6 +142,7 @@ func TestGetDeviceNotFound(t *testing.T) {
 func TestCreateDeviceMissingID(t *testing.T) {
 	apiInstance := newTestAPI(t)
 	handler := apiInstance.Routes()
+	seedConnection(t, handler)
 
 	device := sampleDevice()
 	device.ID = ""
@@ -101,6 +155,7 @@ func TestCreateDeviceMissingID(t *testing.T) {
 func TestListDevices(t *testing.T) {
 	apiInstance := newTestAPI(t)
 	handler := apiInstance.Routes()
+	seedConnection(t, handler)
 
 	doRequest(t, handler, "POST", "/api/v1/devices", sampleDevice())
 	second := sampleDevice()
@@ -124,6 +179,7 @@ func TestListDevices(t *testing.T) {
 func TestUpdateDeviceReplacesPoints(t *testing.T) {
 	apiInstance := newTestAPI(t)
 	handler := apiInstance.Routes()
+	seedConnection(t, handler)
 
 	doRequest(t, handler, "POST", "/api/v1/devices", sampleDevice())
 
@@ -145,6 +201,7 @@ func TestUpdateDeviceReplacesPoints(t *testing.T) {
 func TestDeleteDevice(t *testing.T) {
 	apiInstance := newTestAPI(t)
 	handler := apiInstance.Routes()
+	seedConnection(t, handler)
 
 	doRequest(t, handler, "POST", "/api/v1/devices", sampleDevice())
 
@@ -163,6 +220,7 @@ func TestDeleteDevice(t *testing.T) {
 func TestAddAndDeletePoint(t *testing.T) {
 	apiInstance := newTestAPI(t)
 	handler := apiInstance.Routes()
+	seedConnection(t, handler)
 
 	device := sampleDevice()
 	device.Points = nil

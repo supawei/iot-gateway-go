@@ -102,3 +102,4 @@
 | 热加载 | 全量重载 | MVP 简化,增量 diff 留 P3 |
 | Read 语义 | error 表配置级错误,Quality 表数据质量 | 让北向能感知设备异常(bad/uncertain) |
 | Modbus 库 | grid-x/modbus | 原生 RTU over TCP;Client/Connect 带 ctx,阻塞读可取消;纯 Go 不影响交叉编译 |
+| 连接实体化 | Connection 与 Device 分离 | 同串口/DTU 多从机共享传输配置不冗余;连接复用以 ConnectionID 为 key |
