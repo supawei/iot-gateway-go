@@ -173,15 +173,15 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 
 ## Web 管理界面
 
-独立前端工程,基于 Vue 3 + Element Plus,提供概览、连接管理、设备管理(点位/克隆/写值)。详见 [web/README.md](web/README.md)。
+基于 Vue 3 + Element Plus 的前端(独立工程,位于 `web/`),提供概览、连接管理、设备管理(点位/克隆/写值)。**构建产物经 `go:embed` 打进网关二进制**,启动网关后访问 `http://<网关IP>:8080/` 即为管理界面,无需额外静态服务器或 nginx。
 
 ```bash
-cd web
-npm install
-npm run dev        # http://localhost:5173, /api 代理到 :8080
+make build          # 先编译前端再编译二进制(前端已内嵌)
+# 或前端开发模式:
+cd web && npm install && npm run dev   # http://localhost:5173, /api 代理到 :8080
 ```
 
-生产构建 `npm run build` 产出 `dist/`,由静态服务器托管并将 `/api` 反代到网关即可。
+详见 [web/README.md](web/README.md)。
 
 ## 扩展开发
 
@@ -206,5 +206,5 @@ internal/
   api/                REST 配置 API
   status/             设备运行时状态
   config/             YAML 配置
-web/                  管理界面(Vue 3 + Element Plus,独立工程)
+web/                  管理界面(Vue 3 + Element Plus,dist 经 go:embed 内嵌)
 ```

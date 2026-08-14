@@ -16,15 +16,19 @@ LDFLAGS := -s -w
 # arm32 软浮点 ABI 版本：7 = Cortex-A 系列（工业网关主流），6 = 旧款 ARMv6
 ARM32_GOARM := 7
 
-.PHONY: all build build-all linux-amd64 linux-arm64 linux-arm32 \
+.PHONY: all build build-all web linux-amd64 linux-arm64 linux-arm32 \
         run test vet fmt fmt-check tidy check clean help
 
 all: build
 
-build: ## 构建当前平台，产物置于仓库根目录
+# 前端产物经 go:embed 打进二进制,构建前先编译前端
+build: web ## 构建当前平台，产物置于仓库根目录
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) $(MAIN_PACKAGE)
 
-build-all: linux-amd64 linux-arm64 linux-arm32 ## 交叉编译三平台，产物置于 dist/<platform>/
+build-all: web linux-amd64 linux-arm64 linux-arm32 ## 交叉编译三平台，产物置于 dist/<platform>/
+
+web: ## 构建前端 (web/dist,供 go:embed 内嵌)
+	cd web && npm install && npm run build
 
 # 产物布局：dist/<platform>/gateway —— 用目录区分架构，二进制名始终保持一致
 # 部署时整目录拷贝到目标机，systemd/Docker 路径跨架构统一

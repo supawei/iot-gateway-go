@@ -21,6 +21,7 @@ import (
 	"iot-gateway-go/internal/output/mqtt"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
+	"iot-gateway-go/web"
 
 	_ "iot-gateway-go/internal/driver/modbus"        // 注册 modbus 驱动
 	_ "iot-gateway-go/internal/driver/modbus_listen" // 注册 modbus 监听驱动
@@ -75,9 +76,14 @@ func main() {
 		close(schedulerDone)
 	}()
 
-	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: api.New(st, statusReg).Routes()}
+	// 根路由挂内嵌前端(SPA),/api/ 挂 REST 接口,单端口同时提供界面与 API。
+	mux := http.NewServeMux()
+	mux.Handle("/", web.Handler())
+	mux.Handle("/api/", api.New(st, statusReg).Routes())
+
+	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: mux}
 	go func() {
-		slog.Info("HTTP API listening", "addr", cfg.HTTP.Addr)
+		slog.Info("HTTP server listening", "addr", cfg.HTTP.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			fatal("http server failed", "err", err)
 		}

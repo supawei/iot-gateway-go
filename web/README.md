@@ -23,20 +23,18 @@ npm run dev        # http://localhost:5173, /api 代理到 http://localhost:8080
 npm run build      # 产物在 dist/
 ```
 
-`dist/` 是纯静态资源,任意静态服务器或反向代理托管即可,**并需把 `/api` 反向代理到网关**:
+`dist/` 会被 Go 侧的 `web/embed.go` 通过 `go:embed` **打进网关二进制**,由网关进程在同端口直接提供界面与 API,部署时**无需 nginx / 静态服务器**:
 
-nginx 示例:
-
-```nginx
-server {
-  listen 80;
-  root /path/to/web/dist;
-  index index.html;
-
-  location / { try_files $uri $uri/ /index.html; }
-  location /api/ { proxy_pass http://127.0.0.1:8080; }
-}
+```bash
+# 在仓库根目录:构建前端 + 编译二进制(前端产物已内嵌)
+make build
+# 或分步:
+make web && go build -o gateway ./cmd/gateway
 ```
+
+启动 `./gateway` 后,浏览器访问 `http://<网关IP>:8080/` 即为管理界面,API 在同端口的 `/api/v1`。
+
+> 注:`go build` 依赖 `web/dist` 存在(仓库已提交构建产物,克隆后可直接编译);改动前端源码后先 `npm run build`(或 `make web`)再编译。
 
 ## 目录
 
