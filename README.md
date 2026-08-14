@@ -31,6 +31,18 @@ go build -o gateway ./cmd/gateway
 ./gateway
 ```
 
+## 网关配置
+
+`config.yaml` 配置网关自身参数(设备/点位配置走 REST API + SQLite):
+
+| 字段 | 说明 | 默认 |
+|---|---|---|
+| `gateway.id` | 网关 ID,用于 MQTT topic | `iot-gateway` |
+| `http.addr` | REST API 监听地址 | `:8080` |
+| `mqtt.*` | MQTT broker 连接 | - |
+| `storage.sqlitePath` | SQLite 路径 | `./gateway.db` |
+| `scheduler.poolSize` | 采集 worker 池大小(最大并发采集数) | `16` |
+
 ## 配置设备
 
 通过 REST API 配置一个 Modbus TCP 设备:

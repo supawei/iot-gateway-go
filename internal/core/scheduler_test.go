@@ -56,7 +56,7 @@ func TestSchedulerCollects(t *testing.T) {
 		ID:           "d1",
 		ConnectionID: "c1",
 		Params:       []byte(`{}`),
-		IntervalMs:   50,
+		IntervalMs:   100,
 		Enabled:      true,
 		Points: []model.Point{
 			{Name: "p1", Address: "holding:0", DataType: model.DataTypeInt16},
@@ -64,7 +64,7 @@ func TestSchedulerCollects(t *testing.T) {
 	})
 
 	dataPoints := make(chan model.DataPoint, 10)
-	scheduler := NewScheduler(st, dataPoints)
+	scheduler := NewScheduler(st, dataPoints, 4)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
@@ -74,7 +74,7 @@ func TestSchedulerCollects(t *testing.T) {
 		if dp.DeviceID != "d1" || dp.Point != "p1" {
 			t.Fatalf("unexpected datapoint: %+v", dp)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for datapoint")
 	}
 	cancel()

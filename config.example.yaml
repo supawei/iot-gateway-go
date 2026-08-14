@@ -11,3 +11,6 @@ mqtt:
 
 storage:
   sqlitePath: "./gateway.db"
+
+scheduler:
+  poolSize: 16

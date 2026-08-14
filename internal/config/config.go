@@ -21,6 +21,9 @@ type Config struct {
 	Storage struct {
 		SqlitePath string `yaml:"sqlitePath"`
 	} `yaml:"storage"`
+	Scheduler struct {
+		PoolSize int `yaml:"poolSize"`
+	} `yaml:"scheduler"`
 }
 
 func Load(path string) (Config, error) {
@@ -45,5 +48,8 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Storage.SqlitePath == "" {
 		cfg.Storage.SqlitePath = "gateway.db"
+	}
+	if cfg.Scheduler.PoolSize <= 0 {
+		cfg.Scheduler.PoolSize = 16
 	}
 }

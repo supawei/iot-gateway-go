@@ -106,3 +106,4 @@
 | Modbus 库 | grid-x/modbus | 原生 RTU over TCP;Client/Connect 带 ctx,阻塞读可取消;纯 Go 不影响交叉编译 |
 | 连接实体化 | Connection 与 Device 分离 | 同串口/DTU 多从机共享传输配置不冗余;连接复用以 ConnectionID 为 key |
 | OPC UA 库 | gopcua/opcua | 纯 Go 无 CGO,符合交叉编译;轮询 Read 复用 scheduler 模型;订阅留未来 |
+| 调度模型 | cron 统一调度 + worker pool | 常驻 goroutine 与设备数解耦;pool 限流保护下游;reload 全量重建(增量留 P3) |
