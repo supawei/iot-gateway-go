@@ -166,6 +166,66 @@ func (c *modbusConn) Close() error {
 	return c.driver.release(c.shared)
 }
 
+// Write 下发点位值:holding 寄存器写(16/32 位 + float32),coil 线圈写(bool)。
+// input/discrete 只读,标记 Ok=false。单点失败不阻断同批。
+func (c *modbusConn) Write(ctx context.Context, items []model.WriteItem) ([]driver.WriteResult, error) {
+	results := make([]driver.WriteResult, len(items))
+	for index, item := range items {
+		results[index] = driver.WriteResult{Point: item.Point.Name}
+		function, register, err := parseAddress(item.Point.Address)
+		if err != nil {
+			continue
+		}
+		if err := c.writeOne(ctx, function, register, item.Point, item.Value); err != nil {
+			continue
+		}
+		results[index].Ok = true
+	}
+	return results, nil
+}
+
+// writeOne 在共享连接上串行执行单次写(SetSlave 切从机,mu 保证不与读并发)。
+func (c *modbusConn) writeOne(ctx context.Context, function string, register uint16, point model.Point, value interface{}) error {
+	c.shared.mu.Lock()
+	defer c.shared.mu.Unlock()
+	c.shared.handler.SetSlave(c.slaveID)
+	switch function {
+	case "coil":
+		return c.writeCoil(ctx, register, value)
+	case "holding":
+		return c.writeHolding(ctx, register, point, value)
+	default:
+		return fmt.Errorf("modbus function %q not writable", function)
+	}
+}
+
+func (c *modbusConn) writeCoil(ctx context.Context, register uint16, value interface{}) error {
+	on, ok := value.(bool)
+	if !ok {
+		return fmt.Errorf("coil value must be bool, got %T", value)
+	}
+	coilValue := uint16(0)
+	if on {
+		coilValue = 0xFF00
+	}
+	_, err := c.shared.client.WriteSingleCoil(ctx, register, coilValue)
+	return err
+}
+
+func (c *modbusConn) writeHolding(ctx context.Context, register uint16, point model.Point, value interface{}) error {
+	raw, ok := encodeWriteValue(value, point.DataType, point.Scale)
+	if !ok {
+		return fmt.Errorf("cannot encode %v as %s", value, point.DataType)
+	}
+	quantity := uint16(len(raw) / 2)
+	if quantity == 1 {
+		_, err := c.shared.client.WriteSingleRegister(ctx, register, binary.BigEndian.Uint16(raw))
+		return err
+	}
+	_, err := c.shared.client.WriteMultipleRegisters(ctx, register, quantity, raw)
+	return err
+}
+
 // pointItem 关联点位与其解析后的地址信息,供连读分组与结果回填。
 type pointItem struct {
 	index    int
@@ -420,6 +480,78 @@ func applyScale(value interface{}, scale float64, dt model.DataType) interface{}
 		return float64(v) * scale
 	default:
 		return value
+	}
+}
+
+// encodeWriteValue 把工程值按 dataType 编码为 Modbus 大端字节序(寄存器写)。
+// scale 非零时反向:rawValue = value / scale。不支持 bool/int64/double/string(返回 ok=false)。
+func encodeWriteValue(value interface{}, dataType model.DataType, scale float64) ([]byte, bool) {
+	raw, ok := unscaleValue(value, scale)
+	if !ok {
+		return nil, false
+	}
+	switch dataType {
+	case model.DataTypeInt16:
+		b := make([]byte, 2)
+		binary.BigEndian.PutUint16(b, uint16(int16(raw)))
+		return b, true
+	case model.DataTypeUInt16:
+		b := make([]byte, 2)
+		binary.BigEndian.PutUint16(b, uint16(raw))
+		return b, true
+	case model.DataTypeInt32:
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, uint32(int32(raw)))
+		return b, true
+	case model.DataTypeUInt32:
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, uint32(raw))
+		return b, true
+	case model.DataTypeFloat:
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, math.Float32bits(float32(raw)))
+		return b, true
+	default:
+		return nil, false
+	}
+}
+
+// unscaleValue 把值转为 float64 并反向缩放(scale!=0 时除以 scale,把工程值还原为寄存器原始值)。
+func unscaleValue(value interface{}, scale float64) (float64, bool) {
+	raw, ok := toFloat64(value)
+	if !ok {
+		return 0, false
+	}
+	if scale != 0 {
+		raw /= scale
+	}
+	return raw, true
+}
+
+func toFloat64(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int16:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case uint:
+		return float64(v), true
+	case uint16:
+		return float64(v), true
+	case uint32:
+		return float64(v), true
+	case uint64:
+		return float64(v), true
+	default:
+		return 0, false
 	}
 }
 

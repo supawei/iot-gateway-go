@@ -43,6 +43,12 @@ type DataPoint struct {
 	Quality   Quality     `json:"quality"`
 }
 
+// WriteItem 是下发写操作的输入:复用 Point 的地址/类型/缩放信息,携带工程值。
+type WriteItem struct {
+	Point Point
+	Value interface{}
+}
+
 type DataType string
 
 const (

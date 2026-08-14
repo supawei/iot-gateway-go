@@ -103,6 +103,51 @@ func (c *opcuaConn) Close() error {
 	return c.driver.release(c.shared)
 }
 
+// Write 下发点位值:解析 NodeID 后构造批量 WriteRequest,按 server 返回 status 标记各点。
+// 单点 NodeID 解析失败或类型不匹配标记 Ok=false,不阻断同批。
+func (c *opcuaConn) Write(ctx context.Context, items []model.WriteItem) ([]driver.WriteResult, error) {
+	results := make([]driver.WriteResult, len(items))
+	var nodes []*ua.WriteValue
+	var indices []int
+	for index, item := range items {
+		results[index] = driver.WriteResult{Point: item.Point.Name}
+		nodeID, err := ua.ParseNodeID(item.Point.Address)
+		if err != nil {
+			continue
+		}
+		val, ok := encodeValue(item.Value, item.Point.DataType)
+		if !ok {
+			continue
+		}
+		variant, err := ua.NewVariant(val)
+		if err != nil {
+			continue
+		}
+		nodes = append(nodes, &ua.WriteValue{
+			NodeID:      nodeID,
+			AttributeID: ua.AttributeIDValue,
+			Value:       &ua.DataValue{Value: variant},
+		})
+		indices = append(indices, index)
+	}
+	if len(nodes) == 0 {
+		return results, nil
+	}
+	resp, err := c.shared.client.Write(ctx, &ua.WriteRequest{NodesToWrite: nodes})
+	if err != nil {
+		return results, err
+	}
+	for row, status := range resp.Results {
+		if row >= len(indices) {
+			break
+		}
+		if status == ua.StatusOK {
+			results[indices[row]].Ok = true
+		}
+	}
+	return results, nil
+}
+
 // planReads 解析每个点位的 NodeID 地址;解析失败的点跳过(保持 bad),成功的收集为批量读请求。
 func planReads(points []model.Point) ([]*ua.ReadValueID, []int) {
 	var nodes []*ua.ReadValueID
@@ -167,6 +212,41 @@ func decodeValue(raw interface{}, dataType model.DataType, scale float64) (inter
 		return value, true
 	default:
 		return raw, true
+	}
+}
+
+// encodeValue 把 JSON 解码的值按 dataType 转为 Go 原生类型,供 ua.NewVariant 构造写请求。
+func encodeValue(value interface{}, dataType model.DataType) (interface{}, bool) {
+	switch dataType {
+	case model.DataTypeBool:
+		b, ok := value.(bool)
+		return b, ok
+	case model.DataTypeString:
+		s, ok := value.(string)
+		return s, ok
+	case model.DataTypeInt16:
+		v, ok := toFloat64(value)
+		return int16(v), ok
+	case model.DataTypeUInt16:
+		v, ok := toFloat64(value)
+		return uint16(v), ok
+	case model.DataTypeInt32:
+		v, ok := toFloat64(value)
+		return int32(v), ok
+	case model.DataTypeUInt32:
+		v, ok := toFloat64(value)
+		return uint32(v), ok
+	case model.DataTypeInt64:
+		v, ok := toFloat64(value)
+		return int64(v), ok
+	case model.DataTypeFloat:
+		v, ok := toFloat64(value)
+		return float32(v), ok
+	case model.DataTypeDouble:
+		v, ok := toFloat64(value)
+		return float64(v), ok
+	default:
+		return nil, false
 	}
 }
 

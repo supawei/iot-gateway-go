@@ -1,6 +1,7 @@
 package modbus
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
@@ -229,5 +230,40 @@ func TestIndexPollBlocks(t *testing.T) {
 	}
 	if indexPollBlocks(nil) != nil {
 		t.Fatal("nil blocks should return nil")
+	}
+}
+
+func TestEncodeWriteValue(t *testing.T) {
+	// int16: 258 -> 0x0102
+	b, ok := encodeWriteValue(float64(258), model.DataTypeInt16, 0)
+	if !ok || !bytes.Equal(b, []byte{0x01, 0x02}) {
+		t.Fatalf("int16 encode: %x ok=%v", b, ok)
+	}
+	// uint16
+	b, ok = encodeWriteValue(float64(258), model.DataTypeUInt16, 0)
+	if !ok || !bytes.Equal(b, []byte{0x01, 0x02}) {
+		t.Fatalf("uint16 encode: %x ok=%v", b, ok)
+	}
+	// int32: 258 -> 0x00000102
+	b, ok = encodeWriteValue(float64(258), model.DataTypeInt32, 0)
+	if !ok || !bytes.Equal(b, []byte{0x00, 0x00, 0x01, 0x02}) {
+		t.Fatalf("int32 encode: %x ok=%v", b, ok)
+	}
+	// float32: 250.0 -> 0x437A0000
+	b, ok = encodeWriteValue(float64(250), model.DataTypeFloat, 0)
+	if !ok || !bytes.Equal(b, []byte{0x43, 0x7A, 0x00, 0x00}) {
+		t.Fatalf("float32 encode: %x ok=%v", b, ok)
+	}
+	// scale 反向:工程值 25.0,scale 0.1 -> 原始 250 -> float32 0x437A0000
+	b, ok = encodeWriteValue(float64(25), model.DataTypeFloat, 0.1)
+	if !ok || !bytes.Equal(b, []byte{0x43, 0x7A, 0x00, 0x00}) {
+		t.Fatalf("scale reverse encode: %x ok=%v", b, ok)
+	}
+	// 不支持的类型
+	if _, ok := encodeWriteValue(float64(1), model.DataTypeDouble, 0); ok {
+		t.Fatal("double should not be encodable")
+	}
+	if _, ok := encodeWriteValue("str", model.DataTypeInt16, 0); ok {
+		t.Fatal("string value for int16 should fail")
 	}
 }

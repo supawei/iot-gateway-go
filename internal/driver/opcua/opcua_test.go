@@ -121,3 +121,32 @@ func TestConnectionPoolAcquireRelease(t *testing.T) {
 		t.Fatalf("refCount=%d want 1", shared.refCount)
 	}
 }
+
+func TestEncodeValue(t *testing.T) {
+	if v, ok := encodeValue(true, model.DataTypeBool); !ok || v != true {
+		t.Fatalf("bool: %v ok=%v", v, ok)
+	}
+	if v, ok := encodeValue("temp", model.DataTypeString); !ok || v != "temp" {
+		t.Fatalf("string: %v ok=%v", v, ok)
+	}
+	if v, ok := encodeValue(float64(258), model.DataTypeInt16); !ok || v != int16(258) {
+		t.Fatalf("int16: %v ok=%v", v, ok)
+	}
+	if v, ok := encodeValue(float64(258), model.DataTypeInt32); !ok || v != int32(258) {
+		t.Fatalf("int32: %v ok=%v", v, ok)
+	}
+	if v, ok := encodeValue(float64(3.14), model.DataTypeFloat); !ok {
+		t.Fatalf("float32 ok=%v", ok)
+	} else if f, _ := v.(float32); math.Abs(float64(f)-3.14) > 1e-6 {
+		t.Fatalf("float32 value: %v", v)
+	}
+	if v, ok := encodeValue(float64(3.14), model.DataTypeDouble); !ok || v != float64(3.14) {
+		t.Fatalf("double: %v ok=%v", v, ok)
+	}
+	if _, ok := encodeValue("str", model.DataTypeInt16); ok {
+		t.Fatal("string as int16 should fail")
+	}
+	if _, ok := encodeValue(float64(1), model.DataTypeBool); ok {
+		t.Fatal("float as bool should fail")
+	}
+}

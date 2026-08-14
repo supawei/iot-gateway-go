@@ -32,6 +32,18 @@ type Conn interface {
 	Close() error
 }
 
+// Writer 是可选能力:支持写入的驱动实现此接口。调用方通过类型断言(conn.(Writer))检测。
+type Writer interface {
+	Write(ctx context.Context, items []model.WriteItem) ([]WriteResult, error)
+}
+
+// WriteResult 是单点写结果:Ok=false 表示该点写失败(地址错误/类型不匹配/协议拒绝),
+// 不阻断同批其他点,语义对齐 Read 的 Quality。
+type WriteResult struct {
+	Point string
+	Ok    bool
+}
+
 var (
 	registry   = map[string]Driver{}
 	registryMu sync.RWMutex
