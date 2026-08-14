@@ -37,6 +37,15 @@ type Writer interface {
 	Write(ctx context.Context, items []model.WriteItem) ([]WriteResult, error)
 }
 
+// Subscriber 是南向驱动的可选推送能力:支持订阅式采集的 Conn 实现此接口。
+// scheduler 检测到该能力后,不再按 intervalMs 定时调用 Read,而是注册一次
+// Subscribe,数据变化时经 onData 回调推送协议无关的 DataPoint。
+// ctx 取消(配置变更/进程关闭)后,实现须停止推送并释放订阅资源。
+// 协议差异(订阅参数、回调解码)封死在实现内部,Core 只面对统一的 DataPoint。
+type Subscriber interface {
+	Subscribe(ctx context.Context, points []model.Point, onData func(model.DataPoint)) error
+}
+
 // WriteResult 是单点写结果:Ok=false 表示该点写失败(地址错误/类型不匹配/协议拒绝),
 // 不阻断同批其他点,语义对齐 Read 的 Quality。
 type WriteResult struct {

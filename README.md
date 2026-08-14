@@ -100,12 +100,26 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 | `securityMode` | 安全模式,目前仅支持 `none`(默认) |
 | `username`/`password` | 可选,留空则匿名 |
 | `timeout` | 请求超时,默认 `5s` |
+| `mode` | 采集模式:`poll`(默认,按周期轮询)或 `subscribe`(订阅,数据变化即推送) |
+| `publishInterval` | 订阅发布间隔,如 `1s`、`500ms`,默认 `1s`(仅 `subscribe` 生效) |
+| `samplingInterval` | 监控项采样间隔(毫秒),`0` 表示沿用发布间隔(仅 `subscribe` 生效) |
+| `queueSize` | 每个点位在服务端的队列长度,默认 `10`(仅 `subscribe` 生效) |
 
 **点位地址** (`address` 字段):OPC UA NodeID,如 `ns=2;s=Temperature`、`ns=0;i=2258`、`i=1234`。
 
 **数据类型**:`bool` `int16` `uint16` `int32` `uint32` `int64` `float32` `float64` `string`。`scale` 非零时数值类型按系数缩放为 float64。
 
-> OPC UA 驱动轮询读取(与 Modbus 同模型);订阅(Subscription)留作未来扩展。
+### 轮询与订阅
+
+- **轮询(`poll`,默认)**:与 Modbus 同模型,scheduler 按 `intervalMs` 定时调用 `Read` 批量读取。
+- **订阅(`subscribe`)**:driver 实现 `driver.Subscriber` 推送能力,scheduler 检测到后注册一次 OPC UA 订阅,数据变化即上送,不再按 `intervalMs` 轮询(该字段在订阅模式下被忽略)。**同一 `endpoint` 下的多个设备共享一个订阅**,按 ClientHandle 分派回各自设备;单点被服务端拒绝(bad status)只记日志不阻断同批;连接断开由 gopcua 自动重连并重建订阅。
+
+订阅连接配置示例:
+
+```json
+{ "endpoint": "opc.tcp://192.168.1.5:4840", "mode": "subscribe",
+  "publishInterval": "1s", "samplingInterval": 250, "queueSize": 10 }
+```
 
 ## REST API
 

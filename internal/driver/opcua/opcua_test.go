@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/gopcua/opcua/ua"
 
@@ -98,6 +99,112 @@ func TestDecodeValue(t *testing.T) {
 	}
 	if floatValue, _ := got.(float64); math.Abs(floatValue-4.2) > 1e-9 {
 		t.Fatalf("int32 scaled value: %v want 4.2", got)
+	}
+}
+
+func TestParseConnConfigSubscribe(t *testing.T) {
+	cfg, err := parseConnConfig(json.RawMessage(`{"endpoint":"opc.tcp://x:4840","mode":"subscribe"}`))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if cfg.Mode != modeSubscribe {
+		t.Fatalf("mode=%q", cfg.Mode)
+	}
+	if cfg.PublishInterval != defaultPublishInterval.String() {
+		t.Fatalf("publishInterval=%q want %q", cfg.PublishInterval, defaultPublishInterval.String())
+	}
+	if cfg.QueueSize != defaultQueueSize {
+		t.Fatalf("queueSize=%d want %d", cfg.QueueSize, defaultQueueSize)
+	}
+	if cfg.SamplingInterval != 0 {
+		t.Fatalf("samplingInterval=%v want 0", cfg.SamplingInterval)
+	}
+
+	cfg, err = parseConnConfig(json.RawMessage(`{"endpoint":"opc.tcp://x:4840","mode":"subscribe","publishInterval":"500ms","samplingInterval":250,"queueSize":20}`))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if cfg.PublishInterval != "500ms" || cfg.SamplingInterval != 250 || cfg.QueueSize != 20 {
+		t.Fatalf("subscribe fields not applied: %+v", cfg)
+	}
+}
+
+func TestParseConnConfigSubscribeErrors(t *testing.T) {
+	for _, raw := range []string{
+		`{"endpoint":"opc.tcp://x:4840","mode":"bogus"}`,
+		`{"endpoint":"opc.tcp://x:4840","mode":"subscribe","publishInterval":"abc"}`,
+	} {
+		if _, err := parseConnConfig(json.RawMessage(raw)); err == nil {
+			t.Fatalf("want error for %s", raw)
+		}
+	}
+}
+
+func TestBuildMonitoredItems(t *testing.T) {
+	points := []model.Point{
+		{Name: "p1", Address: "ns=2;s=T"},
+		{Name: "p2", Address: "i=1234"},
+	}
+	items, indices, handles := buildMonitoredItems(points, 250, 20, 5)
+	if len(items) != 2 || len(indices) != 2 || len(handles) != 2 {
+		t.Fatalf("items=%d indices=%d handles=%d", len(items), len(indices), len(handles))
+	}
+	if indices[0] != 0 || indices[1] != 1 {
+		t.Fatalf("indices=%v", indices)
+	}
+	// ClientHandle 从 nextHandle 起递增分配(跨设备全局唯一)
+	if handles[0] != 5 || handles[1] != 6 {
+		t.Fatalf("handles=%v", handles)
+	}
+	if items[0].RequestedParameters.ClientHandle != 5 || items[1].RequestedParameters.ClientHandle != 6 {
+		t.Fatalf("client handles wrong: %d %d", items[0].RequestedParameters.ClientHandle, items[1].RequestedParameters.ClientHandle)
+	}
+	if items[0].RequestedParameters.SamplingInterval != 250 || items[0].RequestedParameters.QueueSize != 20 {
+		t.Fatalf("sampling/queue override not applied: %+v", items[0].RequestedParameters)
+	}
+
+	items, indices, handles = buildMonitoredItems(nil, 0, 0, 0)
+	if len(items) != 0 || len(indices) != 0 || len(handles) != 0 {
+		t.Fatalf("empty points should yield no items")
+	}
+}
+
+func TestNotificationToDataPoint(t *testing.T) {
+	point := model.Point{Name: "t", Address: "ns=2;s=T", DataType: model.DataTypeInt32}
+
+	v, err := ua.NewVariant(int32(42))
+	if err != nil {
+		t.Fatalf("variant: %v", err)
+	}
+	ts := time.Now().Add(-time.Second)
+	dp := notificationToDataPoint("d1", point, &ua.DataValue{Value: v, Status: ua.StatusOK, SourceTimestamp: ts})
+	if dp.DeviceID != "d1" || dp.Point != "t" || dp.Quality != model.QualityGood {
+		t.Fatalf("dp: %+v", dp)
+	}
+	if dp.Value != int64(42) {
+		t.Fatalf("value: %v", dp.Value)
+	}
+	if !dp.Timestamp.Equal(ts) {
+		t.Fatalf("timestamp: %v want %v", dp.Timestamp, ts)
+	}
+
+	// 坏状态 -> quality bad
+	dp = notificationToDataPoint("d1", point, &ua.DataValue{Status: ua.StatusBad, SourceTimestamp: ts})
+	if dp.Quality != model.QualityBad {
+		t.Fatalf("bad status quality: %v", dp.Quality)
+	}
+
+	// nil 值 -> quality bad
+	dp = notificationToDataPoint("d1", point, nil)
+	if dp.Quality != model.QualityBad {
+		t.Fatalf("nil quality: %v", dp.Quality)
+	}
+
+	// 类型不匹配 -> quality uncertain
+	v2, _ := ua.NewVariant("not an int")
+	dp = notificationToDataPoint("d1", point, &ua.DataValue{Value: v2, Status: ua.StatusOK})
+	if dp.Quality != model.QualityUncertain {
+		t.Fatalf("type mismatch quality: %v", dp.Quality)
 	}
 }
 

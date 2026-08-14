@@ -142,8 +142,24 @@ PollBlock:
 | `username` | string | 否 | - | 非空则用户名密码认证,否则匿名 |
 | `password` | string | 否 | - | 配合 `username` |
 | `timeout` | string | 否 | `5s` | 请求超时 |
+| `mode` | string | 否 | `poll` | 采集模式:`poll`(按周期轮询)或 `subscribe`(订阅,数据变化即推送) |
+| `publishInterval` | string | 否 | `1s` | 订阅发布间隔,如 `1s`、`500ms`(仅 `subscribe` 生效) |
+| `samplingInterval` | float | 否 | `0` | 监控项采样间隔(毫秒),`0` 表示沿用发布间隔(仅 `subscribe` 生效) |
+| `queueSize` | int | 否 | `10` | 每个点位在服务端的队列长度(仅 `subscribe` 生效) |
 
-> OPC UA 设备级 `params` 默认空 `{}`(无从机地址概念);一个 endpoint 可挂多个 Device,共享 session。驱动轮询读取,订阅(Subscription)留作未来扩展。
+### 轮询 vs 订阅
+
+- **`poll`(默认)**:与 Modbus 同模型,scheduler 按 `intervalMs` 定时批量读取。
+- **`subscribe`**:driver 实现 `driver.Subscriber` 推送能力,scheduler 检测到后注册一次 OPC UA 订阅,数据变化即上送,不再按 `intervalMs` 轮询(该字段在订阅模式下被忽略)。**同一 `endpoint` 下的多个设备共享一个订阅**,按 ClientHandle 分派回各自设备;单点被服务端拒绝(bad status)只记日志不阻断同批;断线由 gopcua 自动重连并重建订阅。
+
+订阅连接配置示例:
+
+```json
+{ "endpoint": "opc.tcp://192.168.1.5:4840", "mode": "subscribe",
+  "publishInterval": "1s", "samplingInterval": 250, "queueSize": 10 }
+```
+
+> OPC UA 设备级 `params` 默认空 `{}`(无从机地址概念);一个 endpoint 可挂多个 Device,共享 session。
 
 ## 连接容错与重连
 

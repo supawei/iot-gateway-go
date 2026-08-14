@@ -82,6 +82,17 @@ func (s *Scheduler) reload() error {
 		if !ok || len(device.Points) == 0 {
 			continue
 		}
+		// 订阅模式:驱动实现了 Subscriber 能力,则注册一次订阅,数据变化即推送,
+		// 不再按 intervalMs 定时 Read(intervalMs 在订阅模式下被忽略)。
+		if sub, isSub := conn.(driver.Subscriber); isSub {
+			if err := sub.Subscribe(collectCtx, device.Points, func(dp model.DataPoint) {
+				s.emit(collectCtx, dp)
+			}); err != nil {
+				slog.Error("subscribe failed", "device", device.ID, "err", err)
+				continue
+			}
+			continue
+		}
 		job := &deviceJob{
 			taskCh:   taskCh,
 			conn:     conn,
@@ -183,6 +194,17 @@ func (s *Scheduler) startWorkers(taskCh <-chan collectTask) <-chan struct{} {
 	return done
 }
 
+// emit 把单个 DataPoint 投递到输出 channel;ctx 取消时返回 false。
+// 轮询与订阅两条采集路径共用此投递入口。
+func (s *Scheduler) emit(ctx context.Context, dp model.DataPoint) bool {
+	select {
+	case s.output <- dp:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func (s *Scheduler) collectOnce(ctx context.Context, conn driver.Conn, points []model.Point) {
 	dataPoints, err := conn.Read(ctx, points)
 	if err != nil {
@@ -191,9 +213,7 @@ func (s *Scheduler) collectOnce(ctx context.Context, conn driver.Conn, points []
 		return
 	}
 	for _, dp := range dataPoints {
-		select {
-		case s.output <- dp:
-		case <-ctx.Done():
+		if !s.emit(ctx, dp) {
 			return
 		}
 	}

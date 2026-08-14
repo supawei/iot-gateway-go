@@ -27,16 +27,40 @@ type opcuaDriver struct {
 
 // sharedSession 是按 ConnectionID 共享的 OPC UA client/session,引用计数管理生命周期。
 // OPC UA 走 TCP 全双工且 gopcua Client 支持并发请求,故同连接多设备可并发 Read,无需串行化。
+// 订阅模式下,同一 endpoint 的所有设备共享一个 gopcua 订阅(sub),按 ClientHandle 分派到
+// 各设备的回调;subCtx/subCancel 管订阅分发 goroutine 的生命周期,随 session 释放一并撤销。
 type sharedSession struct {
 	connectionID string
 	client       *opcua.Client
 	refCount     int
+
+	subMu      sync.Mutex
+	sub        *opcua.Subscription
+	subCtx     context.Context
+	subCancel  context.CancelFunc
+	targets    map[uint32]subTarget
+	nextHandle uint32
+}
+
+// subTarget 是订阅分派目标:ClientHandle 反查到的设备点位及其回调。
+type subTarget struct {
+	deviceID string
+	point    model.Point
+	onData   func(model.DataPoint)
 }
 
 type opcuaConn struct {
 	deviceID string
 	shared   *sharedSession
 	driver   *opcuaDriver
+}
+
+// opcuaSubConn 是订阅模式的设备连接:内嵌 opcuaConn 复用 Read/Write/Close,
+// 额外实现 driver.Subscriber。Open 仅在连接配置 mode=subscribe 时返回此类型,
+// scheduler 据此类型断言切换到推送采集。
+type opcuaSubConn struct {
+	*opcuaConn
+	cfg connConfig
 }
 
 func (d *opcuaDriver) Open(ctx context.Context, req driver.OpenRequest) (driver.Conn, error) {
@@ -48,7 +72,11 @@ func (d *opcuaDriver) Open(ctx context.Context, req driver.OpenRequest) (driver.
 	if err != nil {
 		return nil, err
 	}
-	return &opcuaConn{deviceID: req.DeviceID, shared: shared, driver: d}, nil
+	base := &opcuaConn{deviceID: req.DeviceID, shared: shared, driver: d}
+	if cfg.Mode == modeSubscribe {
+		return &opcuaSubConn{opcuaConn: base, cfg: cfg}, nil
+	}
+	return base, nil
 }
 
 func (d *opcuaDriver) acquire(ctx context.Context, connectionID string, cfg connConfig) (*sharedSession, error) {
@@ -62,7 +90,14 @@ func (d *opcuaDriver) acquire(ctx context.Context, connectionID string, cfg conn
 	if err != nil {
 		return nil, err
 	}
-	shared := &sharedSession{connectionID: connectionID, client: client, refCount: 1}
+	subCtx, subCancel := context.WithCancel(context.Background())
+	shared := &sharedSession{
+		connectionID: connectionID,
+		client:       client,
+		refCount:     1,
+		subCancel:    subCancel,
+		subCtx:       subCtx,
+	}
 	d.pool[connectionID] = shared
 	return shared, nil
 }
@@ -75,6 +110,11 @@ func (d *opcuaDriver) release(shared *sharedSession) error {
 		return nil
 	}
 	delete(d.pool, shared.connectionID)
+	// 先撤销订阅分发 goroutine(subCancel 触发其 defer 里 sub.Cancel),再关 client;
+	// 顺序保证撤销订阅时 client 尚可用。
+	if shared.subCancel != nil {
+		shared.subCancel()
+	}
 	return shared.client.Close(context.Background())
 }
 
@@ -312,16 +352,177 @@ func toInt64(raw interface{}) (int64, bool) {
 	}
 }
 
+// notifyBufSize 是订阅通知 channel 的缓冲长度:吸收发布突发,避免阻塞 gopcua 的
+// publish 循环;缓冲满时 gopcua 的 notify 会阻塞,故保持足够的余量。
+const notifyBufSize = 128
+
+// Subscribe 把设备点位注册进共享订阅:首次调用创建 gopcua 订阅并启动分发 goroutine,
+// 后续调用复用同一订阅,只为新点位分配 ClientHandle 并登记。协议差异封死在此,
+// Core 只经 onData 收到统一的 DataPoint。
+func (c *opcuaSubConn) Subscribe(ctx context.Context, points []model.Point, onData func(model.DataPoint)) error {
+	return c.shared.subscribe(ctx, c.deviceID, c.cfg, points, onData)
+}
+
+// subscribe 在共享 session 上登记设备点位:同一 endpoint 的多个设备共用一个 gopcua
+// 订阅(sub),首次创建、后续复用;ClientHandle 从 nextHandle 递增分配(跨设备全局唯一),
+// targets 记录 handle -> 设备点位回调,供分发 goroutine 反查。
+func (s *sharedSession) subscribe(ctx context.Context, deviceID string, cfg connConfig, points []model.Point, onData func(model.DataPoint)) error {
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+
+	items, indices, handles := buildMonitoredItems(points, cfg.SamplingInterval, cfg.QueueSize, s.nextHandle)
+	if len(items) == 0 {
+		return errors.New("opcua subscribe: no valid point addresses")
+	}
+
+	if s.sub == nil {
+		publishInterval, _ := time.ParseDuration(cfg.PublishInterval)
+		params := &opcua.SubscriptionParameters{Interval: publishInterval}
+		notifyCh := make(chan *opcua.PublishNotificationData, notifyBufSize)
+		sub, err := s.client.Subscribe(ctx, params, notifyCh)
+		if err != nil {
+			return fmt.Errorf("opcua subscribe: %w", err)
+		}
+		s.sub = sub
+		s.targets = make(map[uint32]subTarget)
+		go s.dispatch(sub, notifyCh)
+	}
+
+	resp, err := s.sub.Monitor(ctx, ua.TimestampsToReturnBoth, items...)
+	if err != nil {
+		return fmt.Errorf("opcua monitor: %w", err)
+	}
+	for row := range items {
+		handle := handles[row]
+		pointIndex := indices[row]
+		// Monitor 不因单点失败而报错:结果中的 bad status 记日志且不登记 target,
+		// 该点后续不会被推送,语义对齐 Read(单点失败不阻断同批)。
+		if row < len(resp.Results) && resp.Results[row].StatusCode != ua.StatusOK {
+			slog.Warn("opcua monitored item rejected", "device", deviceID, "point", points[pointIndex].Name, "status", resp.Results[row].StatusCode)
+			continue
+		}
+		s.targets[handle] = subTarget{deviceID: deviceID, point: points[pointIndex], onData: onData}
+	}
+	s.nextHandle += uint32(len(items))
+	slog.Info("opcua subscription points registered", "device", deviceID, "connection", s.connectionID, "points", len(items))
+	return nil
+}
+
+// dispatch 消费共享订阅的通知,把 DataChangeNotification 里的监控项按 ClientHandle
+// 反查 target 并回调。subCtx 取消(session 释放)或通知通道关闭时退出并撤销订阅。
+func (s *sharedSession) dispatch(sub *opcua.Subscription, notifyCh <-chan *opcua.PublishNotificationData) {
+	defer sub.Cancel(context.Background())
+	for {
+		select {
+		case <-s.subCtx.Done():
+			return
+		case notif, ok := <-notifyCh:
+			if !ok {
+				return
+			}
+			if notif.Error != nil {
+				slog.Error("opcua subscription notification error", "connection", s.connectionID, "err", notif.Error)
+				continue
+			}
+			dc, ok := notif.Value.(*ua.DataChangeNotification)
+			if !ok {
+				continue // 状态变更/事件通知,本实现只关心数据变化
+			}
+			for _, item := range dc.MonitoredItems {
+				s.subMu.Lock()
+				target, ok := s.targets[item.ClientHandle]
+				s.subMu.Unlock()
+				if !ok {
+					continue
+				}
+				target.onData(notificationToDataPoint(target.deviceID, target.point, item.Value))
+			}
+		}
+	}
+}
+
+// buildMonitoredItems 为每个点位构造监控项:解析 NodeID 地址,失败的点跳过。
+// ClientHandle 从 nextHandle 起递增分配(跨设备全局唯一),handles 与 items 一一对应;
+// indices 记录 item 行对应的原点位下标,供 Monitor 结果状态回写日志。
+func buildMonitoredItems(points []model.Point, samplingInterval float64, queueSize uint32, nextHandle uint32) ([]*ua.MonitoredItemCreateRequest, []int, []uint32) {
+	var items []*ua.MonitoredItemCreateRequest
+	var indices []int
+	var handles []uint32
+	handle := nextHandle
+	for index, point := range points {
+		nodeID, err := ua.ParseNodeID(point.Address)
+		if err != nil {
+			continue
+		}
+		item := opcua.NewMonitoredItemCreateRequestWithDefaults(nodeID, ua.AttributeIDValue, handle)
+		if samplingInterval > 0 {
+			item.RequestedParameters.SamplingInterval = samplingInterval
+		}
+		if queueSize > 0 {
+			item.RequestedParameters.QueueSize = queueSize
+		}
+		items = append(items, item)
+		indices = append(indices, index)
+		handles = append(handles, handle)
+		handle++
+	}
+	return items, indices, handles
+}
+
+// notificationToDataPoint 把单条数据变化通知转成 DataPoint:取数据源时间戳,校验
+// status 与类型,失败用 Quality 表达(bad/uncertain),语义对齐 Read 的结果。
+func notificationToDataPoint(deviceID string, point model.Point, dv *ua.DataValue) model.DataPoint {
+	dp := model.DataPoint{DeviceID: deviceID, Point: point.Name, Quality: model.QualityBad}
+	if dv == nil {
+		return dp
+	}
+	switch {
+	case !dv.SourceTimestamp.IsZero():
+		dp.Timestamp = dv.SourceTimestamp
+	case !dv.ServerTimestamp.IsZero():
+		dp.Timestamp = dv.ServerTimestamp
+	default:
+		dp.Timestamp = time.Now()
+	}
+	if dv.Status != ua.StatusOK || dv.Value == nil {
+		return dp
+	}
+	decoded, ok := decodeValue(dv.Value.Value(), point.DataType, point.Scale)
+	if !ok {
+		dp.Quality = model.QualityUncertain
+		return dp
+	}
+	dp.Value = decoded
+	dp.Quality = model.QualityGood
+	return dp
+}
+
 type connConfig struct {
 	Endpoint     string `json:"endpoint"`
 	SecurityMode string `json:"securityMode"`
 	Username     string `json:"username"`
 	Password     string `json:"password"`
 	Timeout      string `json:"timeout"`
+	// Mode 采集模式:"poll"(默认,按周期轮询) 或 "subscribe"(订阅,数据变化即推送)。
+	Mode string `json:"mode"`
+	// PublishInterval 订阅发布间隔(如 "1s"、"500ms");仅 Mode=subscribe 时生效。
+	PublishInterval string `json:"publishInterval"`
+	// SamplingInterval 监控项采样间隔(毫秒),0 表示沿用发布间隔;仅订阅模式生效。
+	SamplingInterval float64 `json:"samplingInterval"`
+	// QueueSize 每个监控项在服务端的队列长度;仅订阅模式生效。
+	QueueSize uint32 `json:"queueSize"`
 }
 
+const (
+	modePoll      = "poll"
+	modeSubscribe = "subscribe"
+
+	defaultPublishInterval = 1 * time.Second
+	defaultQueueSize       = 10
+)
+
 func parseConnConfig(raw json.RawMessage) (connConfig, error) {
-	cfg := connConfig{SecurityMode: "none", Timeout: "5s"}
+	cfg := connConfig{SecurityMode: "none", Timeout: "5s", Mode: modePoll}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			return connConfig{}, fmt.Errorf("parse opcua conn config: %w", err)
@@ -341,6 +542,22 @@ func parseConnConfig(raw json.RawMessage) (connConfig, error) {
 	}
 	if _, err := time.ParseDuration(cfg.Timeout); err != nil {
 		return connConfig{}, fmt.Errorf("invalid timeout %q: %w", cfg.Timeout, err)
+	}
+	switch cfg.Mode {
+	case modePoll, modeSubscribe:
+	default:
+		return connConfig{}, fmt.Errorf("opcua mode %q not supported (only %q or %q)", cfg.Mode, modePoll, modeSubscribe)
+	}
+	if cfg.Mode == modeSubscribe {
+		if cfg.PublishInterval == "" {
+			cfg.PublishInterval = defaultPublishInterval.String()
+		}
+		if _, err := time.ParseDuration(cfg.PublishInterval); err != nil {
+			return connConfig{}, fmt.Errorf("invalid publishInterval %q: %w", cfg.PublishInterval, err)
+		}
+		if cfg.QueueSize == 0 {
+			cfg.QueueSize = defaultQueueSize
+		}
 	}
 	return cfg, nil
 }
