@@ -3,8 +3,10 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
+	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/store"
 )
@@ -32,6 +34,7 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("PUT /api/v1/devices/{deviceId}", a.putDevice)
 	mux.HandleFunc("DELETE /api/v1/devices/{deviceId}", a.deleteDevice)
 	mux.HandleFunc("POST /api/v1/devices/{deviceId}/clone", a.cloneDevice)
+	mux.HandleFunc("POST /api/v1/devices/{deviceId}/write", a.writeDevice)
 	mux.HandleFunc("POST /api/v1/devices/{deviceId}/points", a.addPoint)
 	mux.HandleFunc("DELETE /api/v1/devices/{deviceId}/points/{name}", a.deletePoint)
 	return mux
@@ -172,6 +175,77 @@ func (a *API) cloneDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, cloned)
+}
+
+// writeRequest 是下发写操作的请求体:点位名 + 工程值。
+type writeRequest struct {
+	Point string      `json:"point"`
+	Value interface{} `json:"value"`
+}
+
+// writeDevice 下发单点写:查设备点位 -> 复用驱动连接 -> 类型断言 Writer -> Write。
+// 写是即时操作,不走采集循环;连接复用驱动 ConnectionID 池(写完 release)。
+func (a *API) writeDevice(w http.ResponseWriter, r *http.Request) {
+	device, err := a.store.GetDevice(r.PathValue("deviceId"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	var req writeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Point == "" {
+		writeError(w, http.StatusBadRequest, errors.New("point is required"))
+		return
+	}
+	point, ok := findPoint(device.Points, req.Point)
+	if !ok {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("point %q not found on device %q", req.Point, device.ID))
+		return
+	}
+	connection, err := a.store.GetConnection(device.ConnectionID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	drv, err := driver.Get(connection.Driver)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	conn, err := drv.Open(r.Context(), driver.OpenRequest{
+		DeviceID:     device.ID,
+		ConnectionID: device.ConnectionID,
+		ConnConfig:   connection.Config,
+		DeviceParams: device.Params,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	defer conn.Close()
+	writer, ok := conn.(driver.Writer)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, fmt.Errorf("driver %q does not support write", connection.Driver))
+		return
+	}
+	results, err := writer.Write(r.Context(), []model.WriteItem{{Point: point, Value: req.Value}})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+func findPoint(points []model.Point, name string) (model.Point, bool) {
+	for _, point := range points {
+		if point.Name == name {
+			return point, true
+		}
+	}
+	return model.Point{}, false
 }
 
 func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {

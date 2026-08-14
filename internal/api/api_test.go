@@ -2,12 +2,14 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/store"
 )
@@ -308,5 +310,110 @@ func TestCloneDeviceMissingName(t *testing.T) {
 		map[string]any{"id": "sensor-02"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("clone missing name: got %d want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+// mockDriver 返回预设 conn,供写测试脱离真协议驱动。
+type mockDriver struct{ conn driver.Conn }
+
+func (m *mockDriver) Open(context.Context, driver.OpenRequest) (driver.Conn, error) {
+	return m.conn, nil
+}
+
+// writableConn 实现 Conn + Writer,Write 恒成功。
+type writableConn struct{}
+
+func (c *writableConn) Read(context.Context, []model.Point) ([]model.DataPoint, error) {
+	return nil, nil
+}
+func (c *writableConn) Close() error { return nil }
+func (c *writableConn) Write(_ context.Context, items []model.WriteItem) ([]driver.WriteResult, error) {
+	results := make([]driver.WriteResult, len(items))
+	for i, item := range items {
+		results[i] = driver.WriteResult{Point: item.Point.Name, Ok: true}
+	}
+	return results, nil
+}
+
+// readonlyConn 仅实现 Conn,不实现 Writer(类型断言失败 -> 501)。
+type readonlyConn struct{}
+
+func (c *readonlyConn) Read(context.Context, []model.Point) ([]model.DataPoint, error) {
+	return nil, nil
+}
+func (c *readonlyConn) Close() error { return nil }
+
+func seedWritableDevice(t *testing.T, handler http.Handler, deviceID string) {
+	t.Helper()
+	doRequest(t, handler, "POST", "/api/v1/connections", model.Connection{
+		ID: "c1", Name: "mock", Driver: "mock-writable", Config: json.RawMessage(`{}`),
+	})
+	doRequest(t, handler, "POST", "/api/v1/devices", model.Device{
+		ID: deviceID, Name: "dev", ConnectionID: "c1",
+		Points: []model.Point{{Name: "setpoint", Address: "holding:0", DataType: model.DataTypeInt16}},
+	})
+}
+
+func TestWriteDevice(t *testing.T) {
+	driver.Register("mock-writable", &mockDriver{conn: &writableConn{}})
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+	seedWritableDevice(t, handler, "d1")
+
+	rec := doRequest(t, handler, "POST", "/api/v1/devices/d1/write",
+		map[string]any{"point": "setpoint", "value": 42})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("write: got %d want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var results []driver.WriteResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(results) != 1 || !results[0].Ok || results[0].Point != "setpoint" {
+		t.Fatalf("write result: %+v", results)
+	}
+}
+
+func TestWriteDeviceNotFound(t *testing.T) {
+	driver.Register("mock-writable", &mockDriver{conn: &writableConn{}})
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
+	rec := doRequest(t, handler, "POST", "/api/v1/devices/nonexistent/write",
+		map[string]any{"point": "setpoint", "value": 1})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("device not found: got %d want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestWriteDevicePointNotFound(t *testing.T) {
+	driver.Register("mock-writable", &mockDriver{conn: &writableConn{}})
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+	seedWritableDevice(t, handler, "d1")
+
+	rec := doRequest(t, handler, "POST", "/api/v1/devices/d1/write",
+		map[string]any{"point": "missing", "value": 1})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("point not found: got %d want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestWriteDeviceDriverNotWritable(t *testing.T) {
+	driver.Register("mock-readonly", &mockDriver{conn: &readonlyConn{}})
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+	doRequest(t, handler, "POST", "/api/v1/connections", model.Connection{
+		ID: "c1", Name: "mock", Driver: "mock-readonly", Config: json.RawMessage(`{}`),
+	})
+	doRequest(t, handler, "POST", "/api/v1/devices", model.Device{
+		ID: "d1", Name: "dev", ConnectionID: "c1",
+		Points: []model.Point{{Name: "setpoint", Address: "holding:0", DataType: model.DataTypeInt16}},
+	})
+
+	rec := doRequest(t, handler, "POST", "/api/v1/devices/d1/write",
+		map[string]any{"point": "setpoint", "value": 1})
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("readonly driver: got %d want %d", rec.Code, http.StatusNotImplemented)
 	}
 }
