@@ -93,6 +93,17 @@ func (s *Scheduler) reload() error {
 			}
 			continue
 		}
+		// 监听模式:驱动实现了 Listener 能力,则网关被动 listen,设备连入上报数据
+		// 即推送,同样忽略 intervalMs。
+		if lis, isListen := conn.(driver.Listener); isListen {
+			if err := lis.Listen(collectCtx, device.Points, func(dp model.DataPoint) {
+				s.emit(collectCtx, dp)
+			}); err != nil {
+				slog.Error("listen failed", "device", device.ID, "err", err)
+				continue
+			}
+			continue
+		}
 		job := &deviceJob{
 			taskCh:   taskCh,
 			conn:     conn,

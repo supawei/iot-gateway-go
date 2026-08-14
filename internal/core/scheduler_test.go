@@ -108,6 +108,76 @@ func TestSchedulerSubscribes(t *testing.T) {
 	cancel()
 }
 
+// mockListenConn 实现 driver.Listener,验证 scheduler 对监听能力走推送而非轮询。
+type mockListenConn struct {
+	deviceID string
+}
+
+func (c *mockListenConn) Read(_ context.Context, _ []model.Point) ([]model.DataPoint, error) {
+	return nil, nil
+}
+
+func (c *mockListenConn) Close() error { return nil }
+
+func (c *mockListenConn) Listen(_ context.Context, points []model.Point, onData func(model.DataPoint)) error {
+	for _, p := range points {
+		onData(model.DataPoint{
+			DeviceID: c.deviceID, Point: p.Name, Value: 1,
+			Timestamp: time.Now(), Quality: model.QualityGood,
+		})
+	}
+	return nil
+}
+
+type mockListenDriver struct{}
+
+func (mockListenDriver) Open(_ context.Context, req driver.OpenRequest) (driver.Conn, error) {
+	return &mockListenConn{deviceID: req.DeviceID}, nil
+}
+
+func TestSchedulerListens(t *testing.T) {
+	driver.Register("listendriver", mockListenDriver{})
+
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	st.SaveConnection(model.Connection{
+		ID:     "c1",
+		Name:   "c1",
+		Driver: "listendriver",
+		Config: []byte(`{}`),
+	})
+	// IntervalMs 设很大:若误走轮询则测试必超时,证明走的是监听推送
+	st.SaveDevice(model.Device{
+		ID:           "d1",
+		ConnectionID: "c1",
+		Params:       []byte(`{}`),
+		IntervalMs:   3600_000,
+		Enabled:      true,
+		Points: []model.Point{
+			{Name: "p1", Address: "0", DataType: model.DataTypeInt16},
+		},
+	})
+
+	dataPoints := make(chan model.DataPoint, 10)
+	scheduler := NewScheduler(st, dataPoints, 4)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go scheduler.Run(ctx)
+
+	select {
+	case dp := <-dataPoints:
+		if dp.DeviceID != "d1" || dp.Point != "p1" {
+			t.Fatalf("unexpected datapoint: %+v", dp)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for listened datapoint")
+	}
+	cancel()
+}
+
 func TestSchedulerCollects(t *testing.T) {
 	driver.Register("testdriver", mockDriver{})
 

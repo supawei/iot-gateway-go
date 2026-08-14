@@ -46,6 +46,17 @@ type Subscriber interface {
 	Subscribe(ctx context.Context, points []model.Point, onData func(model.DataPoint)) error
 }
 
+// Listener 是南向驱动的可选监听能力:实现它的 Conn 表示网关被动 listen,
+// 设备主动连入并上报数据(与 Subscriber 的"网关主动订阅"相对)。
+// scheduler 检测到该能力后,不再按 intervalMs 定时调用 Read,而是注册一次
+// Listen,数据到达时经 onData 回调推送协议无关的 DataPoint。
+// 设备路由信息(如从机地址)在 Open 时经 DeviceParams 传入并封存在 Conn 内,
+// Listen 只注册该设备的点位;同一 Connection 的多个设备共享底层监听 socket。
+// ctx 取消(配置变更/进程关闭)后,实现须停止监听并释放资源。
+type Listener interface {
+	Listen(ctx context.Context, points []model.Point, onData func(model.DataPoint)) error
+}
+
 // WriteResult 是单点写结果:Ok=false 表示该点写失败(地址错误/类型不匹配/协议拒绝),
 // 不阻断同批其他点,语义对齐 Read 的 Quality。
 type WriteResult struct {
