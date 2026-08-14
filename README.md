@@ -89,6 +89,7 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 | GET | `/api/v1/devices/{deviceId}` | 获取设备 |
 | PUT | `/api/v1/devices/{deviceId}` | 更新设备 |
 | DELETE | `/api/v1/devices/{deviceId}` | 删除设备 |
+| POST | `/api/v1/devices/{deviceId}/clone` | 复制设备(点表整体拷贝) |
 | POST | `/api/v1/devices/{deviceId}/points` | 添加点位 |
 | DELETE | `/api/v1/devices/{deviceId}/points/{name}` | 删除点位 |
 

@@ -31,6 +31,7 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/devices/{deviceId}", a.getDevice)
 	mux.HandleFunc("PUT /api/v1/devices/{deviceId}", a.putDevice)
 	mux.HandleFunc("DELETE /api/v1/devices/{deviceId}", a.deleteDevice)
+	mux.HandleFunc("POST /api/v1/devices/{deviceId}/clone", a.cloneDevice)
 	mux.HandleFunc("POST /api/v1/devices/{deviceId}/points", a.addPoint)
 	mux.HandleFunc("DELETE /api/v1/devices/{deviceId}/points/{name}", a.deletePoint)
 	return mux
@@ -118,6 +119,59 @@ func (a *API) createDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, device)
+}
+
+// cloneRequest 描述复制设备时的覆盖字段;未提供的字段从源设备继承,points 始终整体拷贝。
+type cloneRequest struct {
+	ID           string          `json:"id"`
+	Name         string          `json:"name"`
+	ConnectionID string          `json:"connectionId"`
+	Params       json.RawMessage `json:"params"`
+	IntervalMs   int             `json:"intervalMs"`
+	Enabled      *bool           `json:"enabled"`
+}
+
+func (a *API) cloneDevice(w http.ResponseWriter, r *http.Request) {
+	source, err := a.store.GetDevice(r.PathValue("deviceId"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	var req cloneRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.ID == "" || req.Name == "" {
+		writeError(w, http.StatusBadRequest, errors.New("clone requires id and name"))
+		return
+	}
+	cloned := model.Device{
+		ID:           req.ID,
+		Name:         req.Name,
+		ConnectionID: source.ConnectionID,
+		Params:       source.Params,
+		Points:       source.Points,
+		IntervalMs:   source.IntervalMs,
+		Enabled:      source.Enabled,
+	}
+	if req.ConnectionID != "" {
+		cloned.ConnectionID = req.ConnectionID
+	}
+	if len(req.Params) > 0 {
+		cloned.Params = req.Params
+	}
+	if req.IntervalMs > 0 {
+		cloned.IntervalMs = req.IntervalMs
+	}
+	if req.Enabled != nil {
+		cloned.Enabled = *req.Enabled
+	}
+	if err := a.store.SaveDevice(cloned); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, cloned)
 }
 
 func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {

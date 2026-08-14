@@ -256,6 +256,30 @@ curl -X POST http://localhost:8080/api/v1/devices \
 
 **响应**:`204 No Content`(无响应体)
 
+#### 复制设备
+
+`POST /api/v1/devices/{deviceId}/clone`
+
+基于源设备复制出新设备,点表(`points`)整体拷贝,避免同型号设备重复配点。请求体提供新设备的 `id` 与 `name`(必填),其余字段未提供则从源设备继承、提供则覆盖。
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `id` | 是 | 新设备 ID |
+| `name` | 是 | 新设备名称 |
+| `connectionId` | 否 | 不传则继承源设备 |
+| `params` | 否 | 不传则继承源设备(常用于改 `slaveId`) |
+| `intervalMs` | 否 | 不传则继承源设备 |
+| `enabled` | 否 | 不传则继承源设备 |
+
+**响应**:`201 Created` + 新建的 Device;源设备不存在则 `404`
+
+```bash
+# 复制 sensor-01 为 sensor-02,仅改从机地址
+curl -X POST http://localhost:8080/api/v1/devices/sensor-01/clone \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"sensor-02","name":"温湿度-2","params":{"slaveId":2}}'
+```
+
 ### 点位
 
 #### 添加点位

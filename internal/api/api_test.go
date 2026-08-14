@@ -250,3 +250,63 @@ func TestAddAndDeletePoint(t *testing.T) {
 		t.Fatalf("point not deleted: %+v", got.Points)
 	}
 }
+
+// TestCloneDevice 验证复制:未提供字段继承源设备,points 整体拷贝,params 可覆盖。
+func TestCloneDevice(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+	seedConnection(t, handler)
+	doRequest(t, handler, "POST", "/api/v1/devices", sampleDevice())
+
+	cloneBody := map[string]any{
+		"id":     "sensor-02",
+		"name":   "温湿度-2",
+		"params": map[string]any{"slaveId": 2},
+	}
+	rec := doRequest(t, handler, "POST", "/api/v1/devices/sensor-01/clone", cloneBody)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("clone: got %d want %d", rec.Code, http.StatusCreated)
+	}
+	var cloned model.Device
+	if err := json.Unmarshal(rec.Body.Bytes(), &cloned); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cloned.ID != "sensor-02" || cloned.Name != "温湿度-2" {
+		t.Fatalf("unexpected clone identity: %+v", cloned)
+	}
+	if cloned.ConnectionID != "conn-1" || cloned.IntervalMs != 1000 || !cloned.Enabled {
+		t.Fatalf("clone did not inherit from source: %+v", cloned)
+	}
+	if len(cloned.Points) != 1 || cloned.Points[0].Name != "temperature" {
+		t.Fatalf("clone did not copy points: %+v", cloned.Points)
+	}
+	var params map[string]any
+	json.Unmarshal(cloned.Params, &params)
+	if params["slaveId"] != float64(2) {
+		t.Fatalf("clone params not overridden: %s", cloned.Params)
+	}
+}
+
+func TestCloneDeviceMissingSource(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
+	rec := doRequest(t, handler, "POST", "/api/v1/devices/nonexistent/clone",
+		map[string]any{"id": "x", "name": "x"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("clone missing source: got %d want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestCloneDeviceMissingName(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+	seedConnection(t, handler)
+	doRequest(t, handler, "POST", "/api/v1/devices", sampleDevice())
+
+	rec := doRequest(t, handler, "POST", "/api/v1/devices/sensor-01/clone",
+		map[string]any{"id": "sensor-02"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("clone missing name: got %d want %d", rec.Code, http.StatusBadRequest)
+	}
+}
