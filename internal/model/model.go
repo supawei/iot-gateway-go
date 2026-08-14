@@ -52,6 +52,9 @@ const (
 	DataTypeInt32  DataType = "int32"
 	DataTypeUInt32 DataType = "uint32"
 	DataTypeFloat  DataType = "float32"
+	DataTypeDouble DataType = "float64"
+	DataTypeInt64  DataType = "int64"
+	DataTypeString DataType = "string"
 )
 
 type Quality string

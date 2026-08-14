@@ -9,7 +9,7 @@
 | 阶段 | 目标 | 状态 |
 |---|---|---|
 | **P1** | MVP:Modbus→MQTT 端到端链路 + REST 配置 + SQLite | ✅ 已完成 (2026-08-13) |
-| **P2** | 验证扩展性:加第二协议,检验插件化承诺 | ⬜ 待开始 |
+| **P2** | 验证扩展性:加第二协议,检验插件化承诺 | 🟡 进行中(OPC UA 已接入,第二北向输出待做) |
 | **P3** | 增强:边缘计算、断网补传、云平台对接 | ⬜ 待开始 |
 | **P4** | 产品化:Web UI、更多协议、运维监控 | ⬜ 待开始 |
 
@@ -46,11 +46,13 @@
 
 目标:加第二个协议,验证"加一个子包即可、Core/北向零改动"的插件化承诺。
 
-- [ ] 选定第二协议(候选:OPC UA / 自定义串口协议)
-- [ ] 实现 `internal/driver/{protocol}` 子包
-- [ ] 验证 scheduler / pipeline / output 接入新协议无需改动
+- [x] 选定第二协议:OPC UA(2026-08-13)
+- [x] 实现 `internal/driver/opcua` 子包(轮询读取,gopcua 库)
+- [x] 验证 scheduler / pipeline / output 接入新协议无需改动(仅 model 加 3 个类型常量,core/store/api/config 零改动)
 - [ ] 加第二个北向输出(候选:时序数据库 InfluxDB / TDengine),验证 Output 接口
 - [ ] 若扩展中暴露接口缺陷,回填修正 P1
+
+**OPC UA 接入验收(2026-08-13)**:加子包 + main.go 一行 import 即接入;`make check` + `make build-all`(三平台静态)通过;同 ConnectionID 共享 session(引用计数)。实采验证待连真实 OPC UA server。
 
 **退出标准**:新增协议与输出均在不改动 Core 的前提下接入并通过测试。
 
@@ -103,3 +105,4 @@
 | Read 语义 | error 表配置级错误,Quality 表数据质量 | 让北向能感知设备异常(bad/uncertain) |
 | Modbus 库 | grid-x/modbus | 原生 RTU over TCP;Client/Connect 带 ctx,阻塞读可取消;纯 Go 不影响交叉编译 |
 | 连接实体化 | Connection 与 Device 分离 | 同串口/DTU 多从机共享传输配置不冗余;连接复用以 ConnectionID 为 key |
+| OPC UA 库 | gopcua/opcua | 纯 Go 无 CGO,符合交叉编译;轮询 Read 复用 scheduler 模型;订阅留未来 |

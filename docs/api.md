@@ -72,7 +72,7 @@
 
 ### 枚举值
 
-**dataType**:`bool` `int16` `uint16` `int32` `uint32` `float32`
+**dataType**:`bool` `int16` `uint16` `int32` `uint32` `int64` `float32` `float64` `string`
 
 **quality**(采集结果,非配置项):`good` `bad` `uncertain`
 
@@ -127,9 +127,27 @@ PollBlock:
 
 > 某些设备必须按固定边界/数量读取,自动连读合出的块会触发异常码或数据错位;为该 function 声明 `pollBlocks` 后按固定块读,块外点位标记 bad。
 
+## 连接配置(OPC UA)
+
+`Connection.config`(`driver` 设为 `opcua`):
+
+```json
+{ "endpoint": "opc.tcp://192.168.1.5:4840", "securityMode": "none", "timeout": "5s" }
+```
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `endpoint` | string | 是 | - | OPC UA 端点 |
+| `securityMode` | string | 否 | `none` | 安全模式,目前仅支持 `none`(签名/加密需证书,留未来) |
+| `username` | string | 否 | - | 非空则用户名密码认证,否则匿名 |
+| `password` | string | 否 | - | 配合 `username` |
+| `timeout` | string | 否 | `5s` | 请求超时 |
+
+> OPC UA 设备级 `params` 默认空 `{}`(无从机地址概念);一个 endpoint 可挂多个 Device,共享 session。驱动轮询读取,订阅(Subscription)留作未来扩展。
+
 ## 点位地址
 
-格式 `function:register`,如 `holding:0`、`coil:2`。
+**Modbus**:格式 `function:register`,如 `holding:0`、`coil:2`。
 
 | function | Modbus 功能码 | 适用 dataType |
 |---|---|---|
@@ -139,6 +157,8 @@ PollBlock:
 | `discrete` | 02 读离散输入 | bool |
 
 > `int32`/`uint32`/`float32` 占 2 个寄存器,按大端(ABCD)解析。
+
+**OPC UA**:`address` 直接用 NodeID 字符串,如 `ns=2;s=Temperature`、`ns=0;i=2258`、`i=1234`、`s=Foo`(ns=0 的 string node 可省略 `s=`)。非法 NodeID 在运行时由 server 返回 bad quality。
 
 ---
 

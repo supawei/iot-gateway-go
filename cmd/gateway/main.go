@@ -18,6 +18,7 @@ import (
 	"iot-gateway-go/internal/store"
 
 	_ "iot-gateway-go/internal/driver/modbus" // 注册 modbus 驱动
+	_ "iot-gateway-go/internal/driver/opcua"  // 注册 opcua 驱动
 )
 
 const (

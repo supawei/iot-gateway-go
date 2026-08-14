@@ -15,7 +15,7 @@ Go 实现的开源工业物联网边缘网关。插件化架构,南向接入工�
 │           + REST配置API + SQLite              │
 ├──────────────────────────────────────────────┤
 │  Southbound 南向接入层（驱动插件）              │
-│  已实现: Modbus      预留: OPC UA/总线/以太网    │
+│  已实现: Modbus/OPC UA  预留: 总线/以太网          │
 └──────────────────────────────────────────────┘
 ```
 
@@ -75,6 +75,23 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 
 **数据类型**:`bool` `int16` `uint16` `int32` `uint32` `float32`。`scale` 非零时数值类型按系数缩放为 float64。
 
+## OPC UA 驱动
+
+**连接配置** (`Connection.config`,`driver` 设为 `opcua`):
+
+| 字段 | 说明 |
+|---|---|
+| `endpoint` | OPC UA 端点,如 `opc.tcp://192.168.1.5:4840` |
+| `securityMode` | 安全模式,目前仅支持 `none`(默认) |
+| `username`/`password` | 可选,留空则匿名 |
+| `timeout` | 请求超时,默认 `5s` |
+
+**点位地址** (`address` 字段):OPC UA NodeID,如 `ns=2;s=Temperature`、`ns=0;i=2258`、`i=1234`。
+
+**数据类型**:`bool` `int16` `uint16` `int32` `uint32` `int64` `float32` `float64` `string`。`scale` 非零时数值类型按系数缩放为 float64。
+
+> OPC UA 驱动轮询读取(与 Modbus 同模型);订阅(Subscription)留作未来扩展。
+
 ## REST API
 
 | 方法 | 路径 | 说明 |
@@ -109,6 +126,7 @@ internal/
   model/              Connection/Device/Point/DataPoint 数据模型
   driver/             Driver/Conn 接口 + registry
     modbus/           Modbus 驱动
+    opcua/            OPC UA 驱动
   output/             Output 接口
     mqtt/             MQTT 输出
   core/               scheduler + pipeline
