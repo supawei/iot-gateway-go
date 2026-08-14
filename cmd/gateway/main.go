@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
-	"log"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 
 	"iot-gateway-go/internal/api"
 	"iot-gateway-go/internal/config"
@@ -34,18 +38,19 @@ func main() {
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		fatal("load config failed", "err", err)
 	}
+	slog.SetDefault(initLogger(cfg))
 
 	st, err := store.Open(cfg.Storage.SqlitePath)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		fatal("open store failed", "err", err)
 	}
 	defer st.Close()
 
 	outputs, err := buildOutputs(cfg)
 	if err != nil {
-		log.Fatalf("build outputs: %v", err)
+		fatal("build outputs failed", "err", err)
 	}
 
 	dataPoints := make(chan model.DataPoint, datapointBufferSize)
@@ -62,21 +67,21 @@ func main() {
 	schedulerDone := make(chan struct{})
 	go func() {
 		if err := core.NewScheduler(st, dataPoints, cfg.Scheduler.PoolSize).Run(ctx); err != nil {
-			log.Printf("scheduler exited: %v", err)
+			slog.Error("scheduler exited", "err", err)
 		}
 		close(schedulerDone)
 	}()
 
 	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: api.New(st).Routes()}
 	go func() {
-		log.Printf("HTTP API listening on %s", cfg.HTTP.Addr)
+		slog.Info("HTTP API listening", "addr", cfg.HTTP.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("http server: %v", err)
+			fatal("http server failed", "err", err)
 		}
 	}()
 
 	<-ctx.Done()
-	log.Println("shutting down...")
+	slog.Info("shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -87,6 +92,47 @@ func main() {
 	for _, out := range outputs {
 		out.Close()
 	}
+}
+
+// initLogger 按 config 构造 slog logger:level 控制级别,format 选 text/json,
+// file.path 非空时同时写 stdout 与轮转文件(防爆盘)。
+func initLogger(cfg config.Config) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: parseLogLevel(cfg.Log.Level)}
+
+	writer := io.Writer(os.Stdout)
+	if cfg.Log.File.Path != "" {
+		writer = io.MultiWriter(os.Stdout, &lumberjack.Logger{
+			Filename:   cfg.Log.File.Path,
+			MaxSize:    cfg.Log.File.MaxSize,
+			MaxBackups: cfg.Log.File.MaxBackups,
+			MaxAge:     cfg.Log.File.MaxAge,
+			LocalTime:  true,
+			Compress:   cfg.Log.File.Compress,
+		})
+	}
+
+	if strings.EqualFold(cfg.Log.Format, "json") {
+		return slog.New(slog.NewJSONHandler(writer, opts))
+	}
+	return slog.New(slog.NewTextHandler(writer, opts))
+}
+
+func parseLogLevel(level string) slog.Level {
+	switch strings.ToLower(level) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func fatal(msg string, args ...any) {
+	slog.Error(msg, args...)
+	os.Exit(1)
 }
 
 func buildOutputs(cfg config.Config) ([]output.Output, error) {

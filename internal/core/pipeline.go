@@ -2,7 +2,7 @@ package core
 
 import (
 	"context"
-	"log"
+	"log/slog"
 
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output"
@@ -27,7 +27,7 @@ func RunPipeline(ctx context.Context, dataPoints <-chan model.DataPoint, outputs
 func publishToAll(dp model.DataPoint, outputs []output.Output) {
 	for _, out := range outputs {
 		if err := out.Publish(dp); err != nil {
-			log.Printf("publish datapoint failed: %v", err)
+			slog.Error("publish datapoint failed", "err", err)
 		}
 	}
 }

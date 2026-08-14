@@ -2,7 +2,7 @@ package core
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -50,7 +50,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-s.store.OnChange():
 			if err := s.reload(); err != nil {
-				log.Printf("scheduler reload failed: %v", err)
+				slog.Error("scheduler reload failed", "err", err)
 			}
 		}
 	}
@@ -70,7 +70,7 @@ func (s *Scheduler) reload() error {
 	c := cron.New()
 	devices, err := s.store.ListDevices()
 	if err != nil {
-		log.Printf("reload: list devices failed: %v", err)
+		slog.Error("list devices failed", "err", err)
 		s.stopCollectors()
 		return err
 	}
@@ -90,7 +90,7 @@ func (s *Scheduler) reload() error {
 			ctx:      collectCtx,
 		}
 		if _, err := c.AddJob(intervalSpec(device.IntervalMs), job); err != nil {
-			log.Printf("device %q: add cron job failed: %v", device.ID, err)
+			slog.Error("add cron job failed", "device", device.ID, "err", err)
 		}
 	}
 
@@ -132,7 +132,7 @@ func (s *Scheduler) stopCollectors() {
 	}
 	for _, conn := range conns {
 		if err := conn.Close(); err != nil {
-			log.Printf("close device connection failed: %v", err)
+			slog.Error("close device connection failed", "err", err)
 		}
 	}
 }
@@ -140,12 +140,12 @@ func (s *Scheduler) stopCollectors() {
 func (s *Scheduler) openDevice(ctx context.Context, device model.Device) (driver.Conn, bool) {
 	connection, err := s.store.GetConnection(device.ConnectionID)
 	if err != nil {
-		log.Printf("device %q: get connection %q failed: %v", device.ID, device.ConnectionID, err)
+		slog.Error("get connection failed", "device", device.ID, "connection", device.ConnectionID, "err", err)
 		return nil, false
 	}
 	drv, err := driver.Get(connection.Driver)
 	if err != nil {
-		log.Printf("device %q: driver %q not registered: %v", device.ID, connection.Driver, err)
+		slog.Error("driver not registered", "device", device.ID, "driver", connection.Driver, "err", err)
 		return nil, false
 	}
 	conn, err := drv.Open(ctx, driver.OpenRequest{
@@ -155,7 +155,7 @@ func (s *Scheduler) openDevice(ctx context.Context, device model.Device) (driver
 		DeviceParams: device.Params,
 	})
 	if err != nil {
-		log.Printf("device %q: open failed: %v", device.ID, err)
+		slog.Error("open device failed", "device", device.ID, "err", err)
 		return nil, false
 	}
 	s.mu.Lock()
@@ -187,7 +187,7 @@ func (s *Scheduler) collectOnce(ctx context.Context, conn driver.Conn, points []
 	dataPoints, err := conn.Read(ctx, points)
 	if err != nil {
 		// 配置级错误(整批无效):跳过本次,不发送
-		log.Printf("read %d points failed: %v", len(points), err)
+		slog.Error("read points failed", "points", len(points), "err", err)
 		return
 	}
 	for _, dp := range dataPoints {
@@ -218,7 +218,7 @@ func (j *deviceJob) Run() {
 	select {
 	case j.taskCh <- collectTask{ctx: j.ctx, conn: j.conn, points: j.points}:
 	default:
-		log.Printf("device %q: pool busy, skip collect", j.deviceID)
+		slog.Warn("pool busy, skip collect", "device", j.deviceID)
 	}
 }
 

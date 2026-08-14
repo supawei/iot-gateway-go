@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -216,7 +216,7 @@ func (c *modbusConn) warnUncovered(items []pointItem, blocks []pollBlock) {
 	}
 	if len(uncovered) > 0 {
 		c.warnOnce.Do(func() {
-			log.Printf("device %q: points %v not covered by any pollBlock, marked bad", c.deviceID, uncovered)
+			slog.Warn("points not covered by pollBlock, marked bad", "device", c.deviceID, "points", uncovered)
 		})
 	}
 }
