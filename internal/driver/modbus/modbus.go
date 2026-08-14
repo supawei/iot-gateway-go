@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strconv"
@@ -58,10 +59,11 @@ func (d *modbusDriver) Open(ctx context.Context, req driver.OpenRequest) (driver
 		return nil, err
 	}
 	return &modbusConn{
-		deviceID: req.DeviceID,
-		slaveID:  params.SlaveID,
-		shared:   shared,
-		driver:   d,
+		deviceID:   req.DeviceID,
+		slaveID:    params.SlaveID,
+		shared:     shared,
+		driver:     d,
+		pollBlocks: indexPollBlocks(params.PollBlocks),
 	}, nil
 }
 
@@ -109,10 +111,12 @@ type sharedConn struct {
 }
 
 type modbusConn struct {
-	deviceID string
-	slaveID  byte
-	shared   *sharedConn
-	driver   *modbusDriver
+	deviceID   string
+	slaveID    byte
+	shared     *sharedConn
+	driver     *modbusDriver
+	pollBlocks map[string][]pollBlock
+	warnOnce   sync.Once
 }
 
 // Read 批量读取点位:同 function 的连续/相邻地址合并成少数 Modbus 请求(连读),
@@ -144,7 +148,11 @@ func (c *modbusConn) Read(ctx context.Context, points []model.Point) ([]model.Da
 		})
 	}
 	for function, items := range itemsByFunction {
-		c.readGroup(ctx, function, items, results, timestamp)
+		if blocks, ok := c.pollBlocks[function]; ok {
+			c.readPollBlocks(ctx, function, blocks, items, results, timestamp)
+		} else {
+			c.readGroup(ctx, function, items, results, timestamp)
+		}
 	}
 	return results, nil
 }
@@ -173,6 +181,60 @@ func (c *modbusConn) readGroup(ctx context.Context, function string, items []poi
 			c.fillResult(item, raw, blk.startRegister, results, timestamp)
 		}
 	}
+}
+
+// readPollBlocks 按显式声明的固定块读取(绕过自动连读),适配必须整块读的设备。
+// 落在块内的点按偏移解码;不在任何块内的点保持 bad 并首次告警。
+func (c *modbusConn) readPollBlocks(ctx context.Context, function string, blocks []pollBlock, items []pointItem, results []model.DataPoint, timestamp time.Time) {
+	for _, blk := range blocks {
+		raw, err := c.readRaw(ctx, function, blk.Start, blk.Count)
+		if err != nil {
+			continue
+		}
+		for _, item := range items {
+			if pointInBlock(item, blk) {
+				c.fillResult(item, raw, blk.Start, results, timestamp)
+			}
+		}
+	}
+	c.warnUncovered(items, blocks)
+}
+
+func (c *modbusConn) warnUncovered(items []pointItem, blocks []pollBlock) {
+	var uncovered []string
+	for _, item := range items {
+		covered := false
+		for _, blk := range blocks {
+			if pointInBlock(item, blk) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			uncovered = append(uncovered, item.point.Name)
+		}
+	}
+	if len(uncovered) > 0 {
+		c.warnOnce.Do(func() {
+			log.Printf("device %q: points %v not covered by any pollBlock, marked bad", c.deviceID, uncovered)
+		})
+	}
+}
+
+func pointInBlock(item pointItem, blk pollBlock) bool {
+	return item.register >= blk.Start && item.register+item.quantity <= blk.Start+blk.Count
+}
+
+// indexPollBlocks 将 pollBlocks 按 function 索引,便于 Read 时按 function 查块。
+func indexPollBlocks(blocks []pollBlock) map[string][]pollBlock {
+	if len(blocks) == 0 {
+		return nil
+	}
+	indexed := make(map[string][]pollBlock)
+	for _, blk := range blocks {
+		indexed[blk.Function] = append(indexed[blk.Function], blk)
+	}
+	return indexed
 }
 
 // block 是一次 Modbus 请求覆盖的点位合并块。
@@ -386,7 +448,15 @@ func parseConnConfig(connection json.RawMessage) (connConfig, error) {
 
 // deviceParams 是设备级协议参数(总线上怎么寻址该设备)。
 type deviceParams struct {
-	SlaveID byte `json:"slaveId"`
+	SlaveID    byte        `json:"slaveId"`
+	PollBlocks []pollBlock `json:"pollBlocks"`
+}
+
+// pollBlock 声明一个固定读取块,适配必须按固定边界/数量读取的设备(绕过自动连读)。
+type pollBlock struct {
+	Function string `json:"function"`
+	Start    uint16 `json:"start"`
+	Count    uint16 `json:"count"`
 }
 
 func parseDeviceParams(raw json.RawMessage) (deviceParams, error) {

@@ -200,3 +200,34 @@ func TestConnectionPoolAcquireRelease(t *testing.T) {
 		t.Fatal("pool should keep connection while refCount > 0")
 	}
 }
+
+func TestPointInBlock(t *testing.T) {
+	blk := pollBlock{Function: "holding", Start: 0, Count: 12}
+	if !pointInBlock(pointItem{register: 0, quantity: 1}, blk) {
+		t.Fatal("register 0 should be in block 0..12")
+	}
+	if !pointInBlock(pointItem{register: 11, quantity: 1}, blk) {
+		t.Fatal("register 11 should be in block 0..12")
+	}
+	if pointInBlock(pointItem{register: 12, quantity: 1}, blk) {
+		t.Fatal("register 12 should be outside block 0..12")
+	}
+	// int32 占 2 寄存器,11+2 越界
+	if pointInBlock(pointItem{register: 11, quantity: 2}, blk) {
+		t.Fatal("int32 at register 11 should overflow block 0..12")
+	}
+}
+
+func TestIndexPollBlocks(t *testing.T) {
+	indexed := indexPollBlocks([]pollBlock{
+		{Function: "holding", Start: 0, Count: 12},
+		{Function: "holding", Start: 100, Count: 8},
+		{Function: "coil", Start: 0, Count: 16},
+	})
+	if len(indexed["holding"]) != 2 || len(indexed["coil"]) != 1 {
+		t.Fatalf("unexpected index: %+v", indexed)
+	}
+	if indexPollBlocks(nil) != nil {
+		t.Fatal("nil blocks should return nil")
+	}
+}

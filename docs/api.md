@@ -111,6 +111,21 @@
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `slaveId` | int | `0` | Modbus 从机地址 |
+| `pollBlocks` | PollBlock[] | `[]` | 固定读取块;配了块的 function 按块读,未配的自动连读 |
+
+PollBlock:
+
+```json
+{ "function": "holding", "start": 0, "count": 12 }
+```
+
+| 字段 | 说明 |
+|---|---|
+| `function` | `holding`/`input`/`coil`/`discrete` |
+| `start` | 起始寄存器/线圈地址 |
+| `count` | 读取数量(寄存器数或线圈数) |
+
+> 某些设备必须按固定边界/数量读取,自动连读合出的块会触发异常码或数据错位;为该 function 声明 `pollBlocks` 后按固定块读,块外点位标记 bad。
 
 ## 点位地址
 
