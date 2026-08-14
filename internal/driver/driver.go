@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 
 	"iot-gateway-go/internal/model"
@@ -62,6 +63,68 @@ type Listener interface {
 type WriteResult struct {
 	Point string
 	Ok    bool
+}
+
+// FieldType 描述配置字段对应的输入控件类型。
+type FieldType string
+
+const (
+	FieldString FieldType = "string" // 文本
+	FieldInt    FieldType = "int"    // 整数
+	FieldNumber FieldType = "number" // 数值(可小数)
+	FieldBool   FieldType = "bool"   // 开关
+	FieldEnum   FieldType = "enum"   // 下拉选择(配合 Options)
+	FieldJSON   FieldType = "json"   // 复杂嵌套结构,用 JSON 编辑
+)
+
+// Field 描述一个配置字段。驱动借此向 Web UI 暴露自己的配置结构,
+// 前端据此动态渲染表单,实现"新协议零前端改动"。
+type Field struct {
+	Name        string    `json:"name"`                  // JSON key
+	Label       string    `json:"label"`                 // 展示名
+	Type        FieldType `json:"type"`                  // 控件类型
+	Required    bool      `json:"required,omitempty"`    // 是否必填
+	Default     any       `json:"default,omitempty"`     // 默认值
+	Options     []string  `json:"options,omitempty"`     // enum 的可选项
+	Hint        string    `json:"hint,omitempty"`        // 补充说明
+	Placeholder string    `json:"placeholder,omitempty"` // 占位提示
+}
+
+// SchemaProvider 是驱动的可选能力:声明 Connection.config 与 Device.params 的结构。
+// 未实现该能力的驱动,前端退化为原始 JSON 编辑。
+type SchemaProvider interface {
+	ConfigSchema() []Field
+	ParamSchema() []Field
+}
+
+// DriverInfo 是驱动的对外描述(名称 + 配置 schema)。
+type DriverInfo struct {
+	Name   string  `json:"name"`
+	Config []Field `json:"config"`
+	Params []Field `json:"params"`
+}
+
+// List 返回所有已注册驱动的信息,按名称排序。
+func List() []DriverInfo {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	names := make([]string, 0, len(registry))
+	for name := range registry {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	infos := make([]DriverInfo, 0, len(names))
+	for _, name := range names {
+		info := DriverInfo{Name: name}
+		if sp, ok := registry[name].(SchemaProvider); ok {
+			info.Config = sp.ConfigSchema()
+			info.Params = sp.ParamSchema()
+		}
+		infos = append(infos, info)
+	}
+	return infos
 }
 
 var (

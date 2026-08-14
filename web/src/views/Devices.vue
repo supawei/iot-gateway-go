@@ -3,6 +3,8 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import api from '../api'
+import SchemaForm from '../components/SchemaForm.vue'
+import { defaultModel, modelFromValue, valueFromModel } from '../utils/schema'
 
 const DATA_TYPES = [
   'bool', 'int16', 'uint16', 'int32', 'uint32', 'int64',
@@ -11,6 +13,7 @@ const DATA_TYPES = [
 
 const list = ref([])
 const connections = ref([])
+const drivers = ref([])
 const statuses = ref([])
 const loading = ref(false)
 
@@ -22,9 +25,9 @@ const form = reactive({
   connectionId: '',
   intervalMs: 1000,
   enabled: true,
-  params: '{}',
   points: [],
 })
+const paramsModel = ref({})
 
 const statusMap = computed(() => {
   const m = {}
@@ -32,23 +35,32 @@ const statusMap = computed(() => {
   return m
 })
 
-const connectionMap = computed(() => {
+const driverMap = computed(() => {
   const m = {}
-  for (const c of connections.value) m[c.id] = c.name || c.id
+  for (const d of drivers.value) m[d.name] = d
   return m
 })
+
+const connectionDriver = computed(() => {
+  const c = connections.value.find((x) => x.id === form.connectionId)
+  return c?.driver || ''
+})
+
+const paramSchema = computed(() => driverMap.value[connectionDriver.value]?.params || [])
 
 async function load() {
   loading.value = true
   try {
-    const [d, c, s] = await Promise.all([
+    const [d, c, s, drv] = await Promise.all([
       api.listDevices(),
       api.listConnections(),
       api.listStatus(),
+      api.listDrivers(),
     ])
     list.value = d
     connections.value = c
     statuses.value = s
+    drivers.value = drv
   } finally {
     loading.value = false
   }
@@ -62,12 +74,17 @@ function removePoint(i) {
   form.points.splice(i, 1)
 }
 
+function resetParams() {
+  paramsModel.value = defaultModel(paramSchema.value)
+}
+
 function openCreate() {
   editingId.value = ''
   Object.assign(form, {
     id: '', name: '', connectionId: connections.value[0]?.id || '',
-    intervalMs: 1000, enabled: true, params: '{}', points: [],
+    intervalMs: 1000, enabled: true, points: [],
   })
+  resetParams()
   dialogVisible.value = true
 }
 
@@ -78,19 +95,19 @@ function openEdit(row) {
   form.connectionId = row.connectionId
   form.intervalMs = row.intervalMs
   form.enabled = row.enabled
-  form.params = JSON.stringify(row.params ?? {}, null, 2)
   form.points = (row.points ?? []).map((p) => ({
     name: p.name, address: p.address, dataType: p.dataType, scale: p.scale,
   }))
+  paramsModel.value = modelFromValue(paramSchema.value, row.params)
   dialogVisible.value = true
 }
 
 async function save() {
   let params
   try {
-    params = JSON.parse(form.params)
-  } catch {
-    ElMessage.error('设备参数不是合法的 JSON')
+    params = valueFromModel(paramSchema.value, paramsModel.value)
+  } catch (e) {
+    ElMessage.error(e.message)
     return
   }
   const payload = {
@@ -272,7 +289,7 @@ onMounted(load)
         <el-row :gutter="14">
           <el-col :span="12">
             <el-form-item label="连接" required>
-              <el-select v-model="form.connectionId" style="width: 100%" placeholder="选择连接">
+              <el-select v-model="form.connectionId" style="width: 100%" placeholder="选择连接" @change="resetParams">
                 <el-option v-for="c in connections" :key="c.id" :label="`${c.id} (${c.driver})`" :value="c.id" />
               </el-select>
             </el-form-item>
@@ -286,10 +303,14 @@ onMounted(load)
         <el-form-item label="启用">
           <el-switch v-model="form.enabled" />
         </el-form-item>
-        <el-form-item label="参数">
-          <el-input v-model="form.params" type="textarea" :rows="3" class="mono" />
-          <div class="form-hint">设备级协议参数 JSON（如 Modbus 的 {"slaveId":1}）</div>
-        </el-form-item>
+
+        <!-- 设备参数:按所选连接的驱动 schema 动态渲染 -->
+        <template v-if="paramSchema.length">
+          <el-divider content-position="left">设备参数</el-divider>
+          <SchemaForm :schema="paramSchema" :model="paramsModel" />
+        </template>
+
+        <el-divider content-position="left">点位</el-divider>
         <el-form-item label="点位">
           <div style="width: 100%">
             <div class="point-row" style="margin-bottom: 4px; font-size: 12px; color: #9aa1ac">

@@ -385,6 +385,37 @@ curl -X POST http://localhost:8080/api/v1/devices/sensor-01/write \
 | `lastError` | string | 最近一次错误(空=无) |
 | `lastErrorAt` | string | 最近一次错误时间 |
 
+### 驱动
+
+#### 列出驱动及其配置结构
+
+`GET /api/v1/drivers`
+
+返回已注册驱动的名称与配置 schema(由驱动声明,前端据此动态渲染表单):
+
+```json
+[
+  {
+    "name": "modbus",
+    "config": [
+      { "name": "mode", "label": "连接模式", "type": "enum", "required": true, "default": "tcp", "options": ["tcp","rtu","rtu-over-tcp"] }
+    ],
+    "params": [
+      { "name": "slaveId", "label": "从机地址", "type": "int", "default": 1 }
+    ]
+  }
+]
+```
+
+| 字段 | 说明 |
+|---|---|
+| `config` | `Connection.config` 的字段结构 |
+| `params` | `Device.params` 的字段结构 |
+
+Field 字段:`name`(JSON key)、`label`(展示名)、`type`(`string`/`int`/`number`/`bool`/`enum`/`json`)、`required`、`default`、`options`(enum 用)、`hint`、`placeholder`。
+
+> 驱动实现 `driver.SchemaProvider` 接口即提供 schema;未实现的驱动 `config`/`params` 为空。
+
 ### 点位
 
 #### 添加点位

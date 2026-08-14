@@ -466,3 +466,37 @@ func TestGetDeviceStatusNotFound(t *testing.T) {
 		t.Fatalf("status not found: got %d want %d", rec.Code, http.StatusNotFound)
 	}
 }
+
+// schemaDriverMock 实现 Driver + SchemaProvider,供驱动列表端点测试。
+type schemaDriverMock struct{ conn driver.Conn }
+
+func (m *schemaDriverMock) Open(context.Context, driver.OpenRequest) (driver.Conn, error) {
+	return m.conn, nil
+}
+func (m *schemaDriverMock) ConfigSchema() []driver.Field {
+	return []driver.Field{{Name: "endpoint", Label: "端点", Type: driver.FieldString}}
+}
+func (m *schemaDriverMock) ParamSchema() []driver.Field { return nil }
+
+func TestListDriversEndpoint(t *testing.T) {
+	driver.Register("api-schema-driver", &schemaDriverMock{conn: &readonlyConn{}})
+	apiInstance := newTestAPI(t)
+
+	rec := doRequest(t, apiInstance.Routes(), "GET", "/api/v1/drivers", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list drivers: got %d", rec.Code)
+	}
+	var infos []driver.DriverInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &infos); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, info := range infos {
+		if info.Name == "api-schema-driver" {
+			if len(info.Config) != 1 || info.Config[0].Name != "endpoint" {
+				t.Fatalf("config schema: %+v", info.Config)
+			}
+			return
+		}
+	}
+	t.Fatal("api-schema-driver not in response")
+}

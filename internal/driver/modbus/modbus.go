@@ -50,6 +50,29 @@ type modbusDriver struct {
 	pool map[string]*sharedConn
 }
 
+// ConfigSchema 声明 Connection.config 结构,供 Web UI 动态渲染表单。
+func (*modbusDriver) ConfigSchema() []driver.Field {
+	return []driver.Field{
+		{Name: "mode", Label: "连接模式", Type: driver.FieldEnum, Required: true, Default: "tcp",
+			Options: []string{"tcp", "rtu", "rtu-over-tcp"}, Hint: "tcp=网口 / rtu=串口 / rtu-over-tcp=串口服务器透传"},
+		{Name: "address", Label: "地址", Type: driver.FieldString, Placeholder: "192.168.1.5:502", Hint: "tcp / rtu-over-tcp 必填"},
+		{Name: "serialPort", Label: "串口", Type: driver.FieldString, Placeholder: "/dev/ttyS0", Hint: "rtu 必填"},
+		{Name: "baudRate", Label: "波特率", Type: driver.FieldInt, Default: 9600},
+		{Name: "dataBits", Label: "数据位", Type: driver.FieldInt, Default: 8},
+		{Name: "parity", Label: "校验位", Type: driver.FieldEnum, Default: "N", Options: []string{"N", "E", "O"}},
+		{Name: "stopBits", Label: "停止位", Type: driver.FieldInt, Default: 1},
+		{Name: "timeout", Label: "请求超时", Type: driver.FieldString, Default: "1s"},
+	}
+}
+
+// ParamSchema 声明 Device.params 结构。
+func (*modbusDriver) ParamSchema() []driver.Field {
+	return []driver.Field{
+		{Name: "slaveId", Label: "从机地址", Type: driver.FieldInt, Default: 1, Hint: "0-255"},
+		{Name: "pollBlocks", Label: "固定读取块", Type: driver.FieldJSON, Hint: `[{"function":"holding","start":0,"count":12}]`},
+	}
+}
+
 func (d *modbusDriver) Open(ctx context.Context, req driver.OpenRequest) (driver.Conn, error) {
 	cfg, err := parseConnConfig(req.ConnConfig)
 	if err != nil {

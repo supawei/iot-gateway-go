@@ -25,6 +25,26 @@ type opcuaDriver struct {
 	pool map[string]*sharedSession
 }
 
+// ConfigSchema 声明 Connection.config 结构。
+func (*opcuaDriver) ConfigSchema() []driver.Field {
+	return []driver.Field{
+		{Name: "endpoint", Label: "端点", Type: driver.FieldString, Required: true, Placeholder: "opc.tcp://192.168.1.5:4840"},
+		{Name: "mode", Label: "采集模式", Type: driver.FieldEnum, Default: "poll", Options: []string{"poll", "subscribe"}, Hint: "poll=轮询 / subscribe=订阅推送"},
+		{Name: "securityMode", Label: "安全模式", Type: driver.FieldEnum, Default: "none", Options: []string{"none"}},
+		{Name: "username", Label: "用户名", Type: driver.FieldString, Hint: "留空为匿名"},
+		{Name: "password", Label: "密码", Type: driver.FieldString},
+		{Name: "timeout", Label: "请求超时", Type: driver.FieldString, Default: "5s"},
+		{Name: "publishInterval", Label: "发布间隔", Type: driver.FieldString, Default: "1s", Hint: "仅订阅模式生效"},
+		{Name: "samplingInterval", Label: "采样间隔(ms)", Type: driver.FieldNumber, Default: 0, Hint: "0=沿用发布间隔;仅订阅模式生效"},
+		{Name: "queueSize", Label: "队列长度", Type: driver.FieldInt, Default: 10, Hint: "仅订阅模式生效"},
+	}
+}
+
+// ParamSchema 声明 Device.params 结构;OPC UA 无设备级参数。
+func (*opcuaDriver) ParamSchema() []driver.Field {
+	return nil
+}
+
 // sharedSession 是按 ConnectionID 共享的 OPC UA client/session,引用计数管理生命周期。
 // OPC UA 走 TCP 全双工且 gopcua Client 支持并发请求,故同连接多设备可并发 Read,无需串行化。
 // 订阅模式下,同一 endpoint 的所有设备共享一个 gopcua 订阅(sub),按 ClientHandle 分派到

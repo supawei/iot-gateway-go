@@ -1,50 +1,50 @@
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import api from '../api'
-
-const DRIVERS = [
-  { value: 'modbus', label: 'Modbus（轮询）' },
-  { value: 'modbus_listen', label: 'Modbus 监听' },
-  { value: 'opcua', label: 'OPC UA' },
-]
-
-const DRIVER_CONFIG_PLACEHOLDER = {
-  modbus: '{"mode":"tcp","address":"192.168.1.5:502"}',
-  modbus_listen: '{"listen":":502","timeout":"60s"}',
-  opcua: '{"endpoint":"opc.tcp://192.168.1.5:4840"}',
-}
+import SchemaForm from '../components/SchemaForm.vue'
+import { defaultModel, modelFromValue, valueFromModel } from '../utils/schema'
 
 const list = ref([])
+const drivers = ref([])
 const loading = ref(false)
 const dialogVisible = ref(false)
 const editingId = ref('')
-const formRef = ref()
 
-const form = reactive({
-  id: '',
-  name: '',
-  driver: 'modbus',
-  config: '{}',
+const form = reactive({ id: '', name: '', driver: '' })
+const configModel = ref({})
+
+const driverMap = computed(() => {
+  const m = {}
+  for (const d of drivers.value) m[d.name] = d
+  return m
 })
+
+const currentSchema = computed(() => driverMap.value[form.driver]?.config || [])
 
 async function load() {
   loading.value = true
   try {
-    list.value = await api.listConnections()
+    const [c, d] = await Promise.all([api.listConnections(), api.listDrivers()])
+    list.value = c
+    drivers.value = d
   } finally {
     loading.value = false
   }
 }
 
-function onDriverChange() {
-  form.config = DRIVER_CONFIG_PLACEHOLDER[form.driver] || '{}'
+function resetConfig(driver) {
+  form.driver = driver
+  configModel.value = defaultModel(currentSchema.value)
 }
 
 function openCreate() {
   editingId.value = ''
-  Object.assign(form, { id: '', name: '', driver: 'modbus', config: DRIVER_CONFIG_PLACEHOLDER.modbus })
+  form.id = ''
+  form.name = ''
+  const first = drivers.value[0]?.name || ''
+  resetConfig(first)
   dialogVisible.value = true
 }
 
@@ -53,16 +53,16 @@ function openEdit(row) {
   form.id = row.id
   form.name = row.name
   form.driver = row.driver
-  form.config = JSON.stringify(row.config ?? {}, null, 2)
+  configModel.value = modelFromValue(driverMap.value[row.driver]?.config || [], row.config)
   dialogVisible.value = true
 }
 
 async function save() {
   let config
   try {
-    config = JSON.parse(form.config)
-  } catch {
-    ElMessage.error('配置不是合法的 JSON')
+    config = valueFromModel(currentSchema.value, configModel.value)
+  } catch (e) {
+    ElMessage.error(e.message)
     return
   }
   const payload = { id: form.id, name: form.name, driver: form.driver, config }
@@ -83,9 +83,7 @@ async function save() {
 async function remove(row) {
   try {
     await ElMessageBox.confirm(`确定删除连接「${row.name || row.id}」吗？`, '删除确认', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
+      type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
     })
   } catch {
     return
@@ -139,10 +137,10 @@ onMounted(load)
     <el-dialog
       v-model="dialogVisible"
       :title="editingId ? '编辑连接' : '新建连接'"
-      width="520px"
+      width="560px"
       destroy-on-close
     >
-      <el-form ref="formRef" :model="form" label-width="80px">
+      <el-form label-width="90px">
         <el-form-item label="ID" required>
           <el-input v-model="form.id" :disabled="!!editingId" placeholder="conn-1" />
         </el-form-item>
@@ -150,14 +148,11 @@ onMounted(load)
           <el-input v-model="form.name" placeholder="车间 Modbus TCP" />
         </el-form-item>
         <el-form-item label="驱动" required>
-          <el-select v-model="form.driver" style="width: 100%" @change="onDriverChange">
-            <el-option v-for="d in DRIVERS" :key="d.value" :label="d.label" :value="d.value" />
+          <el-select v-model="form.driver" style="width: 100%" @change="resetConfig">
+            <el-option v-for="d in drivers" :key="d.name" :label="d.name" :value="d.name" />
           </el-select>
         </el-form-item>
-        <el-form-item label="配置">
-          <el-input v-model="form.config" type="textarea" :rows="6" class="mono" />
-          <div class="form-hint">传输参数 JSON，具体字段见 README「驱动」章节</div>
-        </el-form-item>
+        <SchemaForm :schema="currentSchema" :model="configModel" />
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>

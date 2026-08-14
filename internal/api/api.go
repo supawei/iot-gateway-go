@@ -42,6 +42,7 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("DELETE /api/v1/devices/{deviceId}/points/{name}", a.deletePoint)
 	mux.HandleFunc("GET /api/v1/status", a.listStatus)
 	mux.HandleFunc("GET /api/v1/devices/{deviceId}/status", a.getDeviceStatus)
+	mux.HandleFunc("GET /api/v1/drivers", a.listDrivers)
 	return mux
 }
 
@@ -326,6 +327,11 @@ func (a *API) getDeviceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, st)
+}
+
+// listDrivers 返回已注册驱动及其配置 schema,供前端动态渲染表单。
+func (a *API) listDrivers(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, driver.List())
 }
 
 func decodeDevice(w http.ResponseWriter, r *http.Request) (model.Device, bool) {

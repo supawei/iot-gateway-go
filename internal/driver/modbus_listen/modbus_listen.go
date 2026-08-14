@@ -33,6 +33,21 @@ type modbusListenDriver struct {
 	pool map[string]*sharedListener
 }
 
+// ConfigSchema 声明 Connection.config 结构。
+func (*modbusListenDriver) ConfigSchema() []driver.Field {
+	return []driver.Field{
+		{Name: "listen", Label: "监听地址", Type: driver.FieldString, Required: true, Default: ":502", Placeholder: ":502"},
+		{Name: "timeout", Label: "读超时", Type: driver.FieldString, Default: "60s", Hint: "设备连接空闲超时,超时断开需重连"},
+	}
+}
+
+// ParamSchema 声明 Device.params 结构。
+func (*modbusListenDriver) ParamSchema() []driver.Field {
+	return []driver.Field{
+		{Name: "slaveId", Label: "从机地址", Type: driver.FieldInt, Default: 1, Hint: "上报帧的 UnitID,用于路由到本设备"},
+	}
+}
+
 // sharedListener 是一个共享的 TCP 监听 socket,引用计数管理生命周期。devices 以
 // UnitID 为 key 记录"从机 -> 设备点位 + 回调",accept 到连接后按帧头 UnitID 路由。
 type sharedListener struct {

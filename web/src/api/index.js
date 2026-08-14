@@ -31,6 +31,9 @@ export const api = {
 
   // 状态
   listStatus: () => http.get('/status'),
+
+  // 驱动
+  listDrivers: () => http.get('/drivers'),
 }
 
 export default api
