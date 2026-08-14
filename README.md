@@ -31,6 +31,8 @@ go build -o gateway ./cmd/gateway
 ./gateway
 ```
 
+启动后可通过 Web 管理界面操作设备/连接(默认 `http://localhost:8080` 提供 API,前端见 [web/](web/))。
+
 ## 网关配置
 
 `config.yaml` 配置网关自身参数(设备/点位配置走 REST API + SQLite):
@@ -169,6 +171,18 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 
 配置写入后自动热加载,scheduler 全量重启采集,无需重启进程。
 
+## Web 管理界面
+
+独立前端工程,基于 Vue 3 + Element Plus,提供概览、连接管理、设备管理(点位/克隆/写值)。详见 [web/README.md](web/README.md)。
+
+```bash
+cd web
+npm install
+npm run dev        # http://localhost:5173, /api 代理到 :8080
+```
+
+生产构建 `npm run build` 产出 `dist/`,由静态服务器托管并将 `/api` 反代到网关即可。
+
 ## 扩展开发
 
 **新增南向驱动**:实现 `driver.Driver` 接口,在 `init()` 中 `driver.Register(name, drv)`,main 导入该包。按需叠加可选能力接口:`driver.Writer`(写)、`driver.Subscriber`(网关主动订阅)、`driver.Listener`(网关被动监听)。
@@ -190,5 +204,7 @@ internal/
   core/               scheduler + pipeline
   store/              SQLite 持久化
   api/                REST 配置 API
+  status/             设备运行时状态
   config/             YAML 配置
+web/                  管理界面(Vue 3 + Element Plus,独立工程)
 ```
