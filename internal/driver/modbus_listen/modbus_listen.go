@@ -157,21 +157,23 @@ func (s *sharedListener) register(slaveID byte, dev *listenDevice) error {
 		s.devices = make(map[byte]*listenDevice)
 	}
 	s.devices[slaveID] = dev
-	if !s.started {
-		s.started = true
-		go s.serve()
+	if s.started {
+		return nil
 	}
+	// 同步 bind:失败立即返回错误,由 scheduler 标记设备离线并记录,不再静默卡死;
+	// 端口占用等场景会在下一次 reload 重试。
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", s.addr, err)
+	}
+	s.started = true
+	go s.serveLoop(ln)
 	return nil
 }
 
-// serve 建立监听 socket 并循环 accept;每个连接交给独立 goroutine 读帧。ctx 取消
-// 时关闭 listener 使 accept 退出。单个设备连接靠读超时回收,避免僵尸 goroutine。
-func (s *sharedListener) serve() {
-	ln, err := net.Listen("tcp", s.addr)
-	if err != nil {
-		slog.Error("modbus_listen listen failed", "addr", s.addr, "err", err)
-		return
-	}
+// serveLoop 循环 accept;每个连接交给独立 goroutine 读帧。ctx 取消时关闭 listener
+// 使 accept 退出。单个设备连接靠读超时回收,避免僵尸 goroutine。
+func (s *sharedListener) serveLoop(ln net.Listener) {
 	slog.Info("modbus_listen listening", "addr", s.addr, "connection", s.connectionID)
 	go func() {
 		<-s.ctx.Done()

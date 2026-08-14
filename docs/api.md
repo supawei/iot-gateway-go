@@ -357,6 +357,34 @@ curl -X POST http://localhost:8080/api/v1/devices/sensor-01/write \
   -d '{"point":"setpoint","value":42}'
 ```
 
+### 状态
+
+设备运行时健康状态由 scheduler 采集过程中实时上报(内存态,不持久化)。
+
+#### 列出全部设备状态
+
+`GET /api/v1/status`
+
+**响应**:`200 OK` + 状态数组(按 deviceId 排序)
+
+```json
+[ { "deviceId": "sensor-01", "online": true, "lastCollect": "2026-08-14T10:00:00Z", "lastError": "", "lastErrorAt": "0001-01-01T00:00:00Z" } ]
+```
+
+#### 获取单设备状态
+
+`GET /api/v1/devices/{deviceId}/status`
+
+**响应**:`200 OK` + 单条状态;设备从未被上报过则 `404`
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `deviceId` | string | 设备 ID |
+| `online` | bool | 在线状态:轮询为"最近一次读成功且至少一个点位 good";订阅/监听为"注册成功" |
+| `lastCollect` | string | 最近一次成功采集时间(零值=从未) |
+| `lastError` | string | 最近一次错误(空=无) |
+| `lastErrorAt` | string | 最近一次错误时间 |
+
 ### 点位
 
 #### 添加点位

@@ -133,7 +133,10 @@ func (c *opcuaConn) Read(ctx context.Context, points []model.Point) ([]model.Dat
 	}
 	resp, err := c.shared.client.Read(ctx, &ua.ReadRequest{NodesToRead: nodes})
 	if err != nil {
-		return results, err
+		// 通信失败:全部点已初始化为 bad,照常返回让北向感知设备异常;
+		// 不把通信错误升级为整批配置级 error(语义对齐 Read 约定)。
+		slog.Error("opcua read failed", "device", c.deviceID, "err", err)
+		return results, nil
 	}
 	applyReadResults(results, indices, resp.Results, points)
 	return results, nil

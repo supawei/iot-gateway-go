@@ -19,6 +19,7 @@ import (
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/output/mqtt"
+	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 
 	_ "iot-gateway-go/internal/driver/modbus"        // 注册 modbus 驱动
@@ -54,6 +55,7 @@ func main() {
 		fatal("build outputs failed", "err", err)
 	}
 
+	statusReg := status.NewRegistry()
 	dataPoints := make(chan model.DataPoint, datapointBufferSize)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -67,13 +69,13 @@ func main() {
 
 	schedulerDone := make(chan struct{})
 	go func() {
-		if err := core.NewScheduler(st, dataPoints, cfg.Scheduler.PoolSize).Run(ctx); err != nil {
+		if err := core.NewScheduler(st, dataPoints, cfg.Scheduler.PoolSize, statusReg).Run(ctx); err != nil {
 			slog.Error("scheduler exited", "err", err)
 		}
 		close(schedulerDone)
 	}()
 
-	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: api.New(st).Routes()}
+	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: api.New(st, statusReg).Routes()}
 	go func() {
 		slog.Info("HTTP API listening", "addr", cfg.HTTP.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

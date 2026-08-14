@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 )
 
@@ -21,7 +23,7 @@ func newTestAPI(t *testing.T) *API {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return New(st)
+	return New(st, status.NewRegistry())
 }
 
 func doRequest(t *testing.T, handler http.Handler, method, path string, body interface{}) *httptest.ResponseRecorder {
@@ -415,5 +417,52 @@ func TestWriteDeviceDriverNotWritable(t *testing.T) {
 		map[string]any{"point": "setpoint", "value": 1})
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("readonly driver: got %d want %d", rec.Code, http.StatusNotImplemented)
+	}
+}
+
+// TestStatusEndpoints 验证设备运行时状态查询(列表 + 单设备)。
+func TestStatusEndpoints(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	reg := status.NewRegistry()
+	reg.SetOnline("d1", time.Now())
+	reg.SetOffline("d2", "connection refused")
+
+	handler := New(st, reg).Routes()
+
+	rec := doRequest(t, handler, "GET", "/api/v1/status", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status: got %d", rec.Code)
+	}
+	var list []status.DeviceStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("want 2 status got %d", len(list))
+	}
+
+	rec = doRequest(t, handler, "GET", "/api/v1/devices/d1/status", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status: got %d", rec.Code)
+	}
+	var got status.DeviceStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.DeviceID != "d1" || !got.Online {
+		t.Fatalf("status: %+v", got)
+	}
+}
+
+func TestGetDeviceStatusNotFound(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	rec := doRequest(t, apiInstance.Routes(), "GET", "/api/v1/devices/nonexistent/status", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status not found: got %d want %d", rec.Code, http.StatusNotFound)
 	}
 }

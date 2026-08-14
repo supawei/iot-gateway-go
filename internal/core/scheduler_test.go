@@ -7,6 +7,7 @@ import (
 
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 )
 
@@ -92,7 +93,7 @@ func TestSchedulerSubscribes(t *testing.T) {
 	})
 
 	dataPoints := make(chan model.DataPoint, 10)
-	scheduler := NewScheduler(st, dataPoints, 4)
+	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
@@ -162,7 +163,7 @@ func TestSchedulerListens(t *testing.T) {
 	})
 
 	dataPoints := make(chan model.DataPoint, 10)
-	scheduler := NewScheduler(st, dataPoints, 4)
+	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
@@ -204,7 +205,7 @@ func TestSchedulerCollects(t *testing.T) {
 	})
 
 	dataPoints := make(chan model.DataPoint, 10)
-	scheduler := NewScheduler(st, dataPoints, 4)
+	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
@@ -218,4 +219,83 @@ func TestSchedulerCollects(t *testing.T) {
 		t.Fatal("timeout waiting for datapoint")
 	}
 	cancel()
+}
+
+// TestSchedulerReportsOnline 验证采集成功后设备状态被标记在线。
+func TestSchedulerReportsOnline(t *testing.T) {
+	driver.Register("onlinedriver", mockDriver{})
+
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	st.SaveConnection(model.Connection{ID: "c1", Name: "c1", Driver: "onlinedriver", Config: []byte(`{}`)})
+	st.SaveDevice(model.Device{
+		ID: "d1", ConnectionID: "c1", Params: []byte(`{}`),
+		IntervalMs: 100, Enabled: true,
+		Points: []model.Point{{Name: "p1", Address: "holding:0", DataType: model.DataTypeInt16}},
+	})
+
+	reg := status.NewRegistry()
+	scheduler := NewScheduler(st, make(chan model.DataPoint, 10), 4, reg)
+	ctx, cancel := context.WithCancel(context.Background())
+	go scheduler.Run(ctx)
+	defer cancel()
+
+	waitForOnline(t, reg, "d1")
+}
+
+// TestSchedulerReportsOffline 验证打开失败(驱动未注册)时设备被标记离线。
+func TestSchedulerReportsOffline(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	st.SaveConnection(model.Connection{ID: "c1", Name: "c1", Driver: "nosuchdriver", Config: []byte(`{}`)})
+	st.SaveDevice(model.Device{
+		ID: "d1", ConnectionID: "c1", Params: []byte(`{}`),
+		IntervalMs: 100, Enabled: true,
+		Points: []model.Point{{Name: "p1", Address: "holding:0", DataType: model.DataTypeInt16}},
+	})
+
+	reg := status.NewRegistry()
+	scheduler := NewScheduler(st, make(chan model.DataPoint, 10), 4, reg)
+	ctx, cancel := context.WithCancel(context.Background())
+	go scheduler.Run(ctx)
+	defer cancel()
+
+	waitForOffline(t, reg, "d1")
+}
+
+// waitForOnline 轮询等待设备状态变在线(采集成功在 emit 之后才上报状态)。
+func waitForOnline(t *testing.T, reg *status.Registry, deviceID string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if st, ok := reg.Get(deviceID); ok && st.Online {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for online status")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func waitForOffline(t *testing.T, reg *status.Registry, deviceID string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if st, ok := reg.Get(deviceID); ok && !st.Online {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for offline status")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }

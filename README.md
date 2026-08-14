@@ -35,6 +35,8 @@ go build -o gateway ./cmd/gateway
 
 `config.yaml` 配置网关自身参数(设备/点位配置走 REST API + SQLite):
 
+> **注意**:`config.yaml` 只在启动时读取一次,修改后需重启进程;设备/点位/连接配置走 REST API + SQLite,**写入即自动热加载,无需重启**。两种配置的热加载行为不同。
+
 | 字段 | 说明 | 默认 |
 |---|---|---|
 | `gateway.id` | 网关 ID,用于 MQTT topic | `iot-gateway` |

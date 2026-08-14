@@ -8,16 +8,19 @@ import (
 
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 )
 
-// API 提供 REST 配置接口,操作 store 并通过 OnChange 触发 scheduler 热加载。
+// API 提供 REST 配置接口,操作 store 并通过 OnChange 触发 scheduler 热加载;
+// 同时提供设备运行时状态查询。
 type API struct {
-	store *store.Store
+	store  *store.Store
+	status *status.Registry
 }
 
-func New(st *store.Store) *API {
-	return &API{store: st}
+func New(st *store.Store, statusReg *status.Registry) *API {
+	return &API{store: st, status: statusReg}
 }
 
 // Routes 返回挂载好路由的 ServeMux,由 main 直接用作 http.Server Handler。
@@ -37,6 +40,8 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/devices/{deviceId}/write", a.writeDevice)
 	mux.HandleFunc("POST /api/v1/devices/{deviceId}/points", a.addPoint)
 	mux.HandleFunc("DELETE /api/v1/devices/{deviceId}/points/{name}", a.deletePoint)
+	mux.HandleFunc("GET /api/v1/status", a.listStatus)
+	mux.HandleFunc("GET /api/v1/devices/{deviceId}/status", a.getDeviceStatus)
 	return mux
 }
 
@@ -306,6 +311,21 @@ func (a *API) deletePoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// listStatus 返回全部设备的运行时状态(在线/离线、最近采集、最近错误)。
+func (a *API) listStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, a.status.List())
+}
+
+// getDeviceStatus 返回单台设备的运行时状态;设备从未被上报过则 404。
+func (a *API) getDeviceStatus(w http.ResponseWriter, r *http.Request) {
+	st, ok := a.status.Get(r.PathValue("deviceId"))
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("device status not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
 }
 
 func decodeDevice(w http.ResponseWriter, r *http.Request) (model.Device, bool) {
