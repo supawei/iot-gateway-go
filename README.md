@@ -121,6 +121,32 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
   "publishInterval": "1s", "samplingInterval": 250, "queueSize": 10 }
 ```
 
+## 监听类驱动(modbus_listen)
+
+网关作为 **TCP 服务端被动 listen**,设备/主站主动连入并按 Modbus TCP(MBAP)推帧,驱动按从机地址(UnitID)路由到已配置设备。这是 `driver.Listener` 监听能力的参考实现,详见 [docs/listener.md](docs/listener.md)。
+
+**连接配置** (`Connection.config`,`driver` 设为 `modbus_listen`):
+
+| 字段 | 说明 |
+|---|---|
+| `listen` | 本地监听地址,如 `:502` 或 `0.0.0.0:502` |
+| `timeout` | 设备连接的空闲读超时(超时断开,设备需重连),默认 `60s` |
+
+**设备参数** (`Device.params`):`{ "slaveId": 1 }` —— Modbus 从机地址(UnitID),用于把上报帧路由到对应设备。
+
+**点位地址** (`address` 字段):寄存器偏移(十进制),`int32`/`uint32`/`float32` 占 2 个寄存器(大端)。
+
+```jsonc
+// Connection
+{ "listen": ":502", "timeout": "60s" }
+// Device.params
+{ "slaveId": 1 }
+// Point: address 为寄存器偏移
+{ "name": "level", "address": "0", "dataType": "float32", "scale": 0.1 }
+```
+
+> 已知缺口:加性校准(`value = raw*multiple + calibration` 中的 `calibration`)、float 多字节序(ABCD/BADC/CDAB/DCBA)暂未实现,详见 listener 设计文档。
+
 ## REST API
 
 | 方法 | 路径 | 说明 |
@@ -143,7 +169,7 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 
 ## 扩展开发
 
-**新增南向驱动**:实现 `driver.Driver` 接口,在 `init()` 中 `driver.Register(name, drv)`,main 导入该包。
+**新增南向驱动**:实现 `driver.Driver` 接口,在 `init()` 中 `driver.Register(name, drv)`,main 导入该包。按需叠加可选能力接口:`driver.Writer`(写)、`driver.Subscriber`(网关主动订阅)、`driver.Listener`(网关被动监听)。
 
 **新增北向输出**:实现 `output.Output` 接口,在 main 中构造并加入 outputs 列表。
 
@@ -154,8 +180,9 @@ cmd/gateway/          入口
 internal/
   model/              Connection/Device/Point/DataPoint 数据模型
   driver/             Driver/Conn 接口 + registry
-    modbus/           Modbus 驱动
-    opcua/            OPC UA 驱动
+    modbus/           Modbus 驱动(轮询)
+    modbus_listen/    Modbus 监听驱动(设备主动连入上报)
+    opcua/            OPC UA 驱动(轮询/订阅)
   output/             Output 接口
     mqtt/             MQTT 输出
   core/               scheduler + pipeline
