@@ -14,3 +14,13 @@ storage:
 
 scheduler:
   poolSize: 16
+
+log:
+  level: info          # debug/info/warn/error
+  format: text         # text/json
+  file:
+    path: "./logs/gateway.log"  # 留空则只输出 stdout
+    maxSize: 100       # MB,单文件超过则轮转
+    maxBackups: 7      # 保留旧日志文件数
+    maxAge: 30         # 保留天数
+    compress: true     # 旧文件 gzip 压缩

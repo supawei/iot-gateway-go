@@ -42,6 +42,9 @@ go build -o gateway ./cmd/gateway
 | `mqtt.*` | MQTT broker 连接 | - |
 | `storage.sqlitePath` | SQLite 路径 | `./gateway.db` |
 | `scheduler.poolSize` | 采集 worker 池大小(最大并发采集数) | `16` |
+| `log.level` | 日志级别(debug/info/warn/error) | `info` |
+| `log.format` | 日志格式(text/json) | `text` |
+| `log.file.*` | 文件轮转(path/maxSize/maxBackups/maxAge/compress),path 留空只输出 stdout | - |
 
 ## 配置设备
 
