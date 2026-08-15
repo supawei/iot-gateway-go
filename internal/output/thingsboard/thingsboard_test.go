@@ -109,3 +109,30 @@ func TestHandleDownlinkIgnoresUplink(t *testing.T) {
 	default:
 	}
 }
+
+// TestHandleRPCDownlink 验证 RPC write 命令被解析并投递写队列(带 RPC id 用于应答)。
+func TestHandleRPCDownlink(t *testing.T) {
+	o := &thingsboardOutput{prefix: "factory1/", writeCh: make(chan writeRequest, 4)}
+	o.handleRPCDownlink([]byte(`{"device":"factory1/sensor-01","data":{"id":7,"method":"write","params":{"point":"setpoint","value":42}}}`))
+
+	select {
+	case req := <-o.writeCh:
+		if req.deviceID != "sensor-01" || req.point != "setpoint" || req.rpcID != 7 || req.value != float64(42) {
+			t.Fatalf("req: %+v", req)
+		}
+	default:
+		t.Fatal("no write request enqueued")
+	}
+}
+
+// TestHandleRPCDownlinkIgnoresReply 验证 RPC 应答(无 data.method)被忽略,避免回环。
+func TestHandleRPCDownlinkIgnoresReply(t *testing.T) {
+	o := &thingsboardOutput{writeCh: make(chan writeRequest, 4)}
+	o.handleRPCDownlink([]byte(`{"device":"sensor-01","id":7,"data":{"ok":true}}`))
+
+	select {
+	case req := <-o.writeCh:
+		t.Fatalf("rpc reply should be ignored, got %+v", req)
+	default:
+	}
+}

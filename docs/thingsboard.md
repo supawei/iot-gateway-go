@@ -124,9 +124,9 @@ ThingsBoard 把"数据"分两类,格式不同:
 | 用途 | Topic | 说明 | 状态 |
 |---|---|---|---|
 | 共享属性更新 | 订阅 `v1/gateway/attributes` | `{"device":"<name>","data":{"<key>":<val>}}` → 每个 key 作为点位写回设备 | ✅ 已实现 |
-| RPC 命令 | 订阅 `v1/gateway/rpc` | `{"device":"<name>","data":{"id":1,"method":"setValue","params":{...}}}` | 待实现 |
+| RPC 命令 | 订阅 `v1/gateway/rpc` | `{"device":"<name>","data":{"id":1,"method":"write","params":{"point":"<p>","value":<v>}}}` → 写点位并应答 | ✅ 已实现 |
 
-下行经 `WriteFunc` 回调(由 main 注入 `core.WritePoint`)→ 驱动 `Writer` 写回设备。与上行客户端属性同 topic 但 payload 不同(下行带 `device`/`data` 包装),据此区分。
+下行经 `WriteFunc` 回调(由 main 注入 `core.WritePoint`)→ 驱动 `Writer` 写回设备。与上行客户端属性同 topic 但 payload 不同(下行带 `device`/`data` 包装),据此区分;RPC 请求带 `data.method`、应答不带,据此区分。
 
 ## 6. 输出插件设计
 
@@ -204,7 +204,7 @@ thingsboard:
    ```
    scheduler 在设备状态发生"上线/离线"转变时,对实现了该接口的输出调用对应方法;ThingsBoard 据此发 `v1/gateway/connect` / `v1/gateway/disconnect`(在 flusher 中与实际遥测一起 flush,顺序为 disconnect→connect→telemetry)。
 
-2. **下行反向通道(共享属性已实现,RPC 预留)**:平台下发 → 网关 → 驱动 `Write`。采用**回调注入**:thingsboard 输出订阅 `v1/gateway/attributes`,解析共享属性更新后经 `WriteFunc` 回调(由 main 注入 `core.WritePoint`)写回设备。`core.WritePoint` 同时被 REST 写接口复用,消除重复。RPC 命令(需 method 映射 + 应答)留待后续。
+2. **下行反向通道(已实现)**:平台下发 → 网关 → 驱动 `Write`。采用**回调注入**:thingsboard 输出订阅 `v1/gateway/attributes`(共享属性)与 `v1/gateway/rpc`(RPC 命令),解析后经 `WriteFunc` 回调(由 main 注入 `core.WritePoint`)写回设备;RPC 写完后应答 `{"device","id","data":{"ok","error"}}`。`core.WritePoint` 同时被 REST 写接口复用,消除重复。
 
 ## 10. 分阶段实施
 
@@ -212,7 +212,7 @@ thingsboard:
 |---|---|---|
 | **P1(上送)** | thingsboard 输出插件:连接 + 惰性 connect + 遥测(扁平,一条一帧)+ quality 属性 | ✅ 已实现 |
 | P1.5 | 遥测微批聚合(按设备 + 定时 flush)+ 显式生命周期(DeviceNotifier) | ✅ 已实现 |
-| **P2(下行)** | 共享属性 → 驱动 Write(已实现);RPC 命令(待实现) | 🟡 部分 |
+| **P2(下行)** | 共享属性 → 驱动 Write + RPC 命令 → 驱动 Write | ✅ 已实现 |
 | P3(优化) | 断网本地补传、deviceName 映射 | 待实现 |
 
 ## 11. 验收标准

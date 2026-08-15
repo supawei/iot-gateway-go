@@ -35,6 +35,7 @@ const (
 	topicDisconnect = "v1/gateway/disconnect"
 	topicTelemetry  = "v1/gateway/telemetry"
 	topicAttributes = "v1/gateway/attributes"
+	topicRPC        = "v1/gateway/rpc"
 )
 
 // Config 是 ThingsBoard 输出的网关级配置,来自 config.yaml 的 thingsboard 段。
@@ -81,6 +82,7 @@ type writeRequest struct {
 	deviceID string
 	point    string
 	value    interface{}
+	rpcID    int64 // 非 0 时写完后发 RPC 应答(共享属性下行为 0)
 }
 
 func New(cfg Config, write WriteFunc) (output.Output, error) {
@@ -136,6 +138,10 @@ func New(cfg Config, write WriteFunc) (output.Output, error) {
 	if token := client.Subscribe(topicAttributes, o.qos, o.handleAttributes); token.Wait() && token.Error() != nil {
 		return nil, fmt.Errorf("thingsboard subscribe attributes: %w", token.Error())
 	}
+	// 订阅 RPC 命令(与 RPC 应答同 topic,请求带 data.method 可区分)。
+	if token := client.Subscribe(topicRPC, o.qos, o.handleRPC); token.Wait() && token.Error() != nil {
+		return nil, fmt.Errorf("thingsboard subscribe rpc: %w", token.Error())
+	}
 
 	o.wg.Add(2)
 	go o.runFlusher()
@@ -190,6 +196,46 @@ func (o *thingsboardOutput) handleAttributes(_ pahomqtt.Client, msg pahomqtt.Mes
 	o.handleDownlink(msg.Payload())
 }
 
+// handleRPC 是 MQTT RPC handler:RPC 请求带 data.method,应答不带(据此区分,避免回环)。
+func (o *thingsboardOutput) handleRPC(_ pahomqtt.Client, msg pahomqtt.Message) {
+	o.handleRPCDownlink(msg.Payload())
+}
+
+// handleRPCDownlink 解析 RPC 请求:约定 method="write"、params={"point":..., "value":...},
+// 映射为设备写并登记 RPC id 以便写完后应答。未知方法/缺 point 直接应答错误。
+func (o *thingsboardOutput) handleRPCDownlink(payload []byte) {
+	var msg struct {
+		Device string `json:"device"`
+		Data   struct {
+			ID     int64                  `json:"id"`
+			Method string                 `json:"method"`
+			Params map[string]interface{} `json:"params"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		slog.Error("thingsboard rpc parse failed", "err", err)
+		return
+	}
+	if msg.Device == "" || msg.Data.Method == "" {
+		return // 非 RPC 请求(可能是应答回环)
+	}
+	if msg.Data.Method != "write" {
+		o.replyRPC(msg.Device, msg.Data.ID, fmt.Errorf("unknown rpc method %q", msg.Data.Method))
+		return
+	}
+	point, _ := msg.Data.Params["point"].(string)
+	if point == "" {
+		o.replyRPC(msg.Device, msg.Data.ID, fmt.Errorf("rpc write missing point"))
+		return
+	}
+	o.enqueueWrite(writeRequest{
+		deviceID: o.deviceID(msg.Device),
+		point:    point,
+		value:    msg.Data.Params["value"],
+		rpcID:    msg.Data.ID,
+	})
+}
+
 // handleDownlink 解析下行消息;对共享属性更新,把每个 key 作为点位、value 作为值,
 // 投递到写队列。上行客户端属性(无 device/data 包装)会被忽略,避免回环。
 func (o *thingsboardOutput) handleDownlink(payload []byte) {
@@ -219,7 +265,7 @@ func (o *thingsboardOutput) enqueueWrite(req writeRequest) {
 	}
 }
 
-// runWriter 消费写队列,调用注入的 WriteFunc(带超时)把值写回设备。
+// runWriter 消费写队列,调用注入的 WriteFunc(带超时)把值写回设备;RPC 请求写完后应答。
 func (o *thingsboardOutput) runWriter() {
 	defer o.wg.Done()
 	for {
@@ -233,7 +279,22 @@ func (o *thingsboardOutput) runWriter() {
 			if err != nil {
 				slog.Error("thingsboard downlink write failed", "device", req.deviceID, "point", req.point, "err", err)
 			}
+			if req.rpcID != 0 {
+				o.replyRPC(o.deviceName(req.deviceID), req.rpcID, err)
+			}
 		}
+	}
+}
+
+// replyRPC 发送 RPC 应答:{"device":name,"id":id,"data":{"ok":...,"error":...}}。
+func (o *thingsboardOutput) replyRPC(name string, id int64, err error) {
+	data := map[string]interface{}{"ok": err == nil}
+	if err != nil {
+		data["error"] = err.Error()
+	}
+	payload := map[string]interface{}{"device": name, "id": id, "data": data}
+	if perr := o.publish(topicRPC, payload); perr != nil {
+		slog.Error("thingsboard rpc reply failed", "device", name, "err", perr)
 	}
 }
 
