@@ -9,9 +9,9 @@
 | 阶段 | 目标 | 状态 |
 |---|---|---|
 | **P1** | MVP:Modbus→MQTT 端到端链路 + REST 配置 + SQLite | ✅ 已完成 (2026-08-13) |
-| **P2** | 验证扩展性:加第二协议,检验插件化承诺 | 🟡 进行中(OPC UA 已接入,第二北向输出待做) |
-| **P3** | 增强:边缘计算、断网补传、云平台对接 | ⬜ 待开始 |
-| **P4** | 产品化:Web UI、更多协议、运维监控 | ⬜ 待开始 |
+| **P2** | 验证扩展性:第二协议 / 第二北向输出 / 能力接口 | ✅ 已完成 (2026-08-16) |
+| **P3** | 增强:边缘计算、断网补传、更多云平台、增量热加载、API 鉴权 | ⬜ 待开始 |
+| **P4** | 产品化:更多协议、Sparkplug B、运维监控、物模型映射 | ⬜ 待开始 |
 
 ---
 
@@ -38,47 +38,69 @@
 
 - 热加载为**全量重载**,非增量 diff
 - MQTT 输出**单条发布**,无批量
-- 无连接级重试/退避(依赖 paho 自动重连)
+- 输出侧无连接级重试/退避(依赖 paho 自动重连;南向驱动自动重连已做)
 
 ---
 
-## P2 验证扩展性
+## P2 验证扩展性(已完成)
 
-目标:加第二个协议,验证"加一个子包即可、Core/北向零改动"的插件化承诺。
+目标:加第二协议、第二北向输出,并补齐能力接口,验证"加一个子包即可、Core/北向零改动"的插件化承诺。
 
-- [x] 选定第二协议:OPC UA(2026-08-13)
-- [x] 实现 `internal/driver/opcua` 子包(轮询读取,gopcua 库)
-- [x] OPC UA 订阅(Subscription)推送:连接配置 `mode:"subscribe"` 开启,driver 实现 `driver.Subscriber`,scheduler 检测能力后走推送而非轮询
-- [x] 验证 scheduler / pipeline / output 接入新协议无需改动(仅 model 加 3 个类型常量,core/store/api/config 零改动)
-- [x] 加第二个北向输出(TDengine,经 taosAdapter REST 写入),验证 Output 接口
-- [ ] 若扩展中暴露接口缺陷,回填修正 P1
+### 第二协议与采集方式
 
-**OPC UA 接入验收(2026-08-13)**:加子包 + main.go 一行 import 即接入;`make check` + `make build-all`(三平台静态)通过;同 ConnectionID 共享 session(引用计数)。实采验证待连真实 OPC UA server。
+- [x] 第二协议:OPC UA(2026-08-13),`internal/driver/opcua`(轮询读取,gopcua 库)
+- [x] OPC UA 订阅(Subscription)推送:`driver.Subscriber` 能力,同 endpoint 多设备共享订阅
+- [x] 监听类协议:`driver.Listener` 能力 + `internal/driver/modbus_listen` 参考驱动(设备主动连网关上送)
 
-**OPC UA 订阅(Subscription)**:连接配置 `mode:"subscribe"` 开启订阅式推送;驱动实现 `driver.Subscriber` 能力,scheduler 按类型断言切换到推送采集,`intervalMs` 在订阅模式下被忽略。同一 `endpoint` 的多个设备共享一个 gopcua 订阅,按 ClientHandle 分派回各自设备。Core/北向零改动,协议差异封死在 opcua 子包内部。
+### 第二/第三北向输出
 
-**退出标准**:新增协议与输出均在不改动 Core 的前提下接入并通过测试。
+- [x] ThingsBoard 输出(2026-08-15):MQTT Gateway 模式,上送 + 下行(共享属性 / RPC → 设备写)
+- [x] TDengine 输出(2026-08-16):taosAdapter REST 写入,时序库持久化
+
+### 能力接口与框架演进
+
+- [x] 写接口:`driver.Writer` + `core.WritePoint`,REST 写入口 `POST /devices/{id}/write`;下行与 REST 写复用同一链路
+- [x] 设备生命周期通知:`output.DeviceNotifier`(上线/离线事件 → ThingsBoard connect/disconnect)
+- [x] 设备运行时状态:`status.Registry`(在线/离线/最近采集/最近错误)+ REST 查询
+- [x] 设备实时值:`values.Registry`(各点位最新值)+ REST 查询 + Web UI 查看
+- [x] 驱动声明配置 schema:`driver.SchemaProvider` + 条件显示(`showWhen`),Web 表单动态渲染
+- [x] 调度模型:改为 cron 统一调度 + worker pool,并行打开设备连接
+- [x] 日志:slog 结构化输出 + lumberjack 文件轮转
+- [x] 落地框架 review 修复(背压隔离 / 设备状态 / 并行打开 / 离线可见性)
+
+### Web 管理界面(提前完成)
+
+- [x] Vue 3 + Element Plus 独立工程(概览 / 连接 / 设备管理:点位、克隆、写值、属性值)
+- [x] 前端产物经 `go:embed` 内嵌进二进制,单端口提供界面与 API,无需 nginx
+
+**退出标准**:新增协议(OPC UA)、监听驱动、三个北向输出(MQTT/ThingsBoard/TDengine)均在不改动 Core 的前提下接入并通过测试 —— 已达成。
+
+**P2 已知简化**:
+
+- ThingsBoard / TDengine **尚未对真实实例验证**(需 broker / taosAdapter)
+- ThingsBoard 断网本地补传、deviceName 映射未做(归 P3)
+- API **未鉴权**(review 列为 #5,已推迟;迁输出配置前必须先做)
 
 ---
 
 ## P3 增强
 
+- [ ] **API 鉴权**:保护配置与凭据(当前未鉴权,属安全欠账,独立且前置)
 - [ ] **边缘计算**:规则 / 过滤 / 聚合,插入 pipeline 处理层(目前直通)
-- [ ] **断网本地补传**:网络中断时缓存,恢复后补送,保证采集数据不丢
-- [ ] **云 IoT 平台对接**:阿里云 / 华为云 / AWS IoT 输出插件
+- [ ] **断网本地补传**:网络中断时缓存,恢复后补送,保证采集数据不丢(ThingsBoard/TDengine 均需)
+- [ ] **云 IoT 平台对接**:阿里云 / 华为云 / AWS IoT 输出插件(ThingsBoard 已作为 P2 验证完成)
 - [ ] **增量热加载**:scheduler 对设备/点位做 diff,增删改而非全量重启
 - [ ] **MQTT 批量发布**:减少高频场景的发布次数
-- [ ] 连接级重试与退避策略
+- [ ] 输出侧连接级重试与退避策略
 
 ---
 
 ## P4 产品化
 
-- [ ] **Web 管理界面**:可视化设备/协议配置(API 已就绪,前端独立)
 - [ ] **更多协议**:Profinet / EtherCAT(工业以太网实时)、现场总线
 - [ ] **Sparkplug B 支持**:工业 MQTT 事实标准(topic 命名空间已预留)
-- [ ] **运维监控**:指标采集、结构化日志、健康检查端点
-- [ ] **物模型映射层**:在设备-点位之上加云物模型(TSL)映射,对接云平台语义
+- [ ] **运维监控**:指标采集、结构化日志增强、健康检查端点
+- [ ] **物模型映射层**:在设备-点位之上加云物模型(TSL)映射,对接云平台语义(草案见 [docs/tsl-mapping.md](docs/tsl-mapping.md))
 
 ---
 
@@ -86,11 +108,11 @@
 
 | 项 | 暂缓理由 | 触发条件 |
 |---|---|---|
-| OPC UA / 工业以太网 / 现场总线 | P1 聚焦 Modbus | P2 起按需 |
 | `go plugin` / 进程外插件 | 起步无隔离需求,坑多/复杂度高 | 出现不稳定驱动需隔离或第三方插件 |
 | 规则引擎 / 断网补传 | 非 MVP 核心 | P3 |
-| Web UI | API 优先,UI 后补 | P4 |
+| 工业以太网(Profinet/EtherCAT)/ 现场总线 | P1/P2 聚焦 Modbus、OPC UA | P4 或有真实设备需求 |
 | Sparkplug B | JSON 起步快,已留扩展点 | P4 或有互操作需求 |
+| 北向输出迁移到 SQLite + Web UI | 分析结论:保持 yaml(鉴权/热重载/引导成本),见 [docs/northbound-output-config.md](docs/northbound-output-config.md) | 先做 API 鉴权再评估 |
 
 ---
 
@@ -106,7 +128,15 @@
 | output registry | 去掉,main 直接构造 | 网关级单例无需注册表,更克制 |
 | 热加载 | 全量重载 | MVP 简化,增量 diff 留 P3 |
 | Read 语义 | error 表配置级错误,Quality 表数据质量 | 让北向能感知设备异常(bad/uncertain) |
-| Modbus 库 | grid-x/modbus | 原生 RTU over TCP;Client/Connect 带 ctx,阻塞读可取消;纯 Go 不影响交叉编译 |
+| Modbus 库 | grid-x/modbus | 原生 RTU over TCP;Client/Connect 带 ctx;纯 Go 不影响交叉编译 |
 | 连接实体化 | Connection 与 Device 分离 | 同串口/DTU 多从机共享传输配置不冗余;连接复用以 ConnectionID 为 key |
-| OPC UA 库 | gopcua/opcua | 纯 Go 无 CGO,符合交叉编译;轮询 Read 复用 scheduler 模型;订阅经 `driver.Subscriber` 推送 |
+| OPC UA 库 | gopcua/opcua | 纯 Go 无 CGO,符合交叉编译;轮询复用 scheduler 模型;订阅经 `Subscriber` 推送 |
 | 调度模型 | cron 统一调度 + worker pool | 常驻 goroutine 与设备数解耦;pool 限流保护下游;reload 全量重建(增量留 P3) |
+| 可选能力接口 | `Writer`/`Subscriber`/`Listener`/`SchemaProvider`/`DeviceNotifier` 经类型断言叠加 | 核心接口(Driver/Conn/Output)保持最小,能力按需声明,不强制所有驱动/输出实现 |
+| 设备写链路 | `core.WritePoint` 单点复用 | REST 写接口与 ThingsBoard 下行共用同一"查点位→开连接→Writer.Write"链路,消除重复 |
+| 运行时状态 | `status.Registry` + `values.Registry`(内存态) | 可观测性信息不持久化,与 SQLite 配置分离;实时值只记"最新一帧",供界面展示 |
+| ThingsBoard 对接 | MQTT Gateway 模式 | 单连接代表 N 个子设备,契合网关"集中接入多设备"定位 |
+| TDengine 对接 | taosAdapter REST(强类型超级表 + 按点位建子表) | 无 CGO 保持纯 Go;值按 Go 类型落强类型列;TAGS 承载设备/点位,子表名 hash 保证合法唯一 |
+| Web 前端 | Vue 3 + Element Plus,`go:embed` 内嵌 | 独立工程便于前端迭代;内嵌免 nginx,单端口部署 |
+| 配置 schema | `SchemaProvider` 由驱动声明,前端动态渲染 | 替代手写 JSON,避免前端硬编码各驱动字段;`showWhen` 处理模式相关字段 |
+| 北向输出配置 | 保留在 config.yaml | 未鉴权 API 暴露凭据风险、热重载需 OutputManager、yaml 永不可消(引导配置),见分析文档 |
