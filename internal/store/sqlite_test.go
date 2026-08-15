@@ -161,6 +161,28 @@ func TestAddAndDeletePoint(t *testing.T) {
 	}
 }
 
+// TestListEmptyReturnsEmptySlice 验证空库时列表返回非 nil 空切片(JSON 序列化为 [] 而非 null),
+// 避免前端对 `.length` 访问抛错导致页面空白。
+func TestListEmptyReturnsEmptySlice(t *testing.T) {
+	st := newTestStore(t)
+
+	conns, err := st.ListConnections()
+	if err != nil {
+		t.Fatalf("list connections: %v", err)
+	}
+	if conns == nil || len(conns) != 0 {
+		t.Fatalf("empty connections should be non-nil empty slice, got %#v", conns)
+	}
+
+	devices, err := st.ListDevices()
+	if err != nil {
+		t.Fatalf("list devices: %v", err)
+	}
+	if devices == nil || len(devices) != 0 {
+		t.Fatalf("empty devices should be non-nil empty slice, got %#v", devices)
+	}
+}
+
 func TestOnChange(t *testing.T) {
 	st := newTestStore(t)
 	saveSampleConnection(t, st)

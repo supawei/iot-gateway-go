@@ -93,7 +93,7 @@ func (s *Store) ListConnections() ([]model.Connection, error) {
 		return nil, fmt.Errorf("query connections: %w", err)
 	}
 	defer rows.Close()
-	var conns []model.Connection
+	conns := make([]model.Connection, 0)
 	for rows.Next() {
 		conn, err := scanConnection(rows)
 		if err != nil {
@@ -142,7 +142,11 @@ func (s *Store) ListDevices() ([]model.Device, error) {
 		return nil, err
 	}
 	for index := range devices {
-		devices[index].Points = pointsByDevice[devices[index].ID]
+		points := pointsByDevice[devices[index].ID]
+		if points == nil {
+			points = []model.Point{}
+		}
+		devices[index].Points = points
 	}
 	return devices, nil
 }
@@ -225,7 +229,7 @@ func (s *Store) queryDevices(query string, args ...any) ([]model.Device, error) 
 		return nil, fmt.Errorf("query devices: %w", err)
 	}
 	defer rows.Close()
-	var devices []model.Device
+	devices := make([]model.Device, 0)
 	for rows.Next() {
 		device, err := scanDevice(rows)
 		if err != nil {
@@ -242,7 +246,7 @@ func (s *Store) queryPoints(query string, args ...any) ([]model.Point, error) {
 		return nil, fmt.Errorf("query points: %w", err)
 	}
 	defer rows.Close()
-	var points []model.Point
+	points := make([]model.Point, 0)
 	for rows.Next() {
 		point, err := scanPoint(rows)
 		if err != nil {
