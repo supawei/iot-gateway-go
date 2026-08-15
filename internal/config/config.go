@@ -7,6 +7,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"iot-gateway-go/internal/output/mqtt"
+	"iot-gateway-go/internal/output/thingsboard"
 )
 
 const (
@@ -25,8 +26,9 @@ type Config struct {
 	HTTP struct {
 		Addr string `yaml:"addr"`
 	} `yaml:"http"`
-	MQTT    mqtt.Config `yaml:"mqtt"`
-	Storage struct {
+	MQTT        mqtt.Config        `yaml:"mqtt"`
+	ThingsBoard thingsboard.Config `yaml:"thingsboard"`
+	Storage     struct {
 		SqlitePath string `yaml:"sqlitePath"`
 	} `yaml:"storage"`
 	Scheduler struct {

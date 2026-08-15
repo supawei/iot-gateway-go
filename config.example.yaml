@@ -9,6 +9,15 @@ mqtt:
   clientId: "iot-gateway-gw-01"
   qos: 1
 
+# ThingsBoard 平台对接(可选;配置 broker + accessToken 后启用)
+# thingsboard:
+#   broker: "tcp://tb.example.com:1883"
+#   accessToken: "gateway-access-token"
+#   clientId: "iot-gateway-tb"
+#   qos: 1
+#   deviceNamePrefix: ""   # 子设备名前缀,默认空
+#   reportQuality: true    # 是否上报 quality 属性,默认 true
+
 storage:
   sqlitePath: "./gateway.db"
 

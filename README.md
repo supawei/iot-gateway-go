@@ -7,7 +7,7 @@ Go 实现的开源工业物联网边缘网关。插件化架构,南向接入工�
 ```
 ┌──────────────────────────────────────────────┐
 │  Northbound 北向输出层（输出插件）              │
-│  已实现: MQTT        预留: 云IoT平台            │
+│  已实现: MQTT / ThingsBoard  预留: 其他云平台      │
 ├──────────────────────────────────────────────┤
 │  Processing 处理层（预留,目前直通）             │
 ├──────────────────────────────────────────────┤
@@ -44,6 +44,7 @@ go build -o gateway ./cmd/gateway
 | `gateway.id` | 网关 ID,用于 MQTT topic | `iot-gateway` |
 | `http.addr` | REST API 监听地址 | `:8080` |
 | `mqtt.*` | MQTT broker 连接 | - |
+| `thingsboard.*` | ThingsBoard 平台对接(可选,见 [docs/thingsboard.md](docs/thingsboard.md)) | - |
 | `storage.sqlitePath` | SQLite 路径 | `./gateway.db` |
 | `scheduler.poolSize` | 采集 worker 池大小(最大并发采集数) | `16` |
 | `log.level` | 日志级别(debug/info/warn/error) | `info` |
@@ -150,6 +151,23 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 ```
 
 > 已知缺口:加性校准(`value = raw*multiple + calibration` 中的 `calibration`)、float 多字节序(ABCD/BADC/CDAB/DCBA)暂未实现,详见 listener 设计文档。
+
+## ThingsBoard 输出
+
+采用 ThingsBoard **MQTT Gateway** 模式:网关作为一个"网关设备",单连接上报 N 个子设备的数据。每个设备映射为一个子设备(设备名 = `Device.ID` + 可选前缀),点位值为遥测、`Quality` 为客户端属性 `quality`。详见 [docs/thingsboard.md](docs/thingsboard.md)。
+
+```yaml
+# config.yaml
+thingsboard:
+  broker: "tcp://tb.example.com:1883"
+  accessToken: "gateway-access-token"
+  clientId: "iot-gateway-tb"
+  qos: 1
+  deviceNamePrefix: ""   # 可选
+  reportQuality: true    # 可选,默认 true
+```
+
+配置 `broker + accessToken` 后即启用(可与 mqtt 输出并存)。
 
 ## REST API
 

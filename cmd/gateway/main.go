@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/output/mqtt"
+	"iot-gateway-go/internal/output/thingsboard"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 	"iot-gateway-go/web"
@@ -145,9 +147,26 @@ func fatal(msg string, args ...any) {
 }
 
 func buildOutputs(cfg config.Config) ([]output.Output, error) {
-	mqttOutput, err := mqtt.New(cfg.MQTT, cfg.Gateway.ID)
-	if err != nil {
-		return nil, err
+	outputs := make([]output.Output, 0, 2)
+
+	if cfg.MQTT.Broker != "" {
+		mqttOutput, err := mqtt.New(cfg.MQTT, cfg.Gateway.ID)
+		if err != nil {
+			return nil, err
+		}
+		outputs = append(outputs, mqttOutput)
 	}
-	return []output.Output{mqttOutput}, nil
+
+	if cfg.ThingsBoard.Broker != "" && cfg.ThingsBoard.AccessToken != "" {
+		tbOutput, err := thingsboard.New(cfg.ThingsBoard)
+		if err != nil {
+			return nil, err
+		}
+		outputs = append(outputs, tbOutput)
+	}
+
+	if len(outputs) == 0 {
+		return nil, errors.New("no output configured: set mqtt.broker or thingsboard.broker+accessToken")
+	}
+	return outputs, nil
 }

@@ -212,7 +212,7 @@ thingsboard:
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| **P1(上送)** | thingsboard 输出插件:连接 + 惰性 connect + 遥测(扁平,一条一帧)+ quality 属性 | 待实现 |
+| **P1(上送)** | thingsboard 输出插件:连接 + 惰性 connect + 遥测(扁平,一条一帧)+ quality 属性 | ✅ 已实现 |
 | P1.5 | 遥测微批聚合(按设备 + 定时 flush)+ 显式生命周期(DeviceNotifier) | 待实现 |
 | **P2(下行)** | RPC/共享属性 → commandBus → 驱动 Write | 待实现 |
 | P3(优化) | 断网本地补传、deviceName 映射 | 待实现 |
