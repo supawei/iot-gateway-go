@@ -1,15 +1,22 @@
 <script setup>
+import { isVisible } from '../utils/schema'
+
 // 通用配置表单:根据驱动声明的 schema 动态渲染字段。
 // 需放在 el-form 内部使用;json 字段以文本框编辑 JSON,其余字段用对应控件。
-defineProps({
+// 字段带 showWhen 时,依赖字段值不匹配则隐藏。
+const props = defineProps({
   schema: { type: Array, default: () => [] },
   model: { type: Object, required: true },
 })
+
+function visible(f) {
+  return isVisible(f, props.model)
+}
 </script>
 
 <template>
   <template v-for="f in schema" :key="f.name">
-    <el-form-item :label="f.label" :required="f.required">
+    <el-form-item v-if="visible(f)" :label="f.label" :required="f.required">
       <!-- 文本 -->
       <el-input
         v-if="f.type === 'string'"

@@ -1,6 +1,13 @@
 // 驱动配置 schema 的表单模型转换工具。
 // 表单模型:每个字段名对应一个 key;json 字段存 JSON 字符串(编辑用),其余存原生值。
 
+// isVisible 判断字段是否应显示:showWhen 声明依赖字段的值需属于 In 集合。
+export function isVisible(field, model) {
+  if (!field.showWhen) return true
+  const v = model[field.showWhen.field]
+  return Array.isArray(field.showWhen.in) && field.showWhen.in.includes(String(v))
+}
+
 // defaultModel 按 schema 生成带默认值的表单模型。
 export function defaultModel(schema) {
   const m = {}
@@ -32,10 +39,11 @@ export function modelFromValue(schema, value) {
   return m
 }
 
-// valueFromModel 把表单模型转成 config/params 对象;json 字段解析,非法则抛错。
+// valueFromModel 把表单模型转成 config/params 对象;隐藏字段不写入,json 字段解析,非法则抛错。
 export function valueFromModel(schema, model) {
   const out = {}
   for (const f of schema || []) {
+    if (!isVisible(f, model)) continue
     let v = model[f.name]
     if (v === '' || v === undefined || v === null) {
       if (f.required) {

@@ -77,6 +77,13 @@ const (
 	FieldJSON   FieldType = "json"   // 复杂嵌套结构,用 JSON 编辑
 )
 
+// ShowWhen 描述字段的显示条件:当依赖字段(Field)的值属于 In 集合时显示该字段。
+// 用于按"连接模式/采集模式"等字段动态显示或隐藏相关配置项。
+type ShowWhen struct {
+	Field string   `json:"field"`
+	In    []string `json:"in"`
+}
+
 // Field 描述一个配置字段。驱动借此向 Web UI 暴露自己的配置结构,
 // 前端据此动态渲染表单,实现"新协议零前端改动"。
 type Field struct {
@@ -88,6 +95,7 @@ type Field struct {
 	Options     []string  `json:"options,omitempty"`     // enum 的可选项
 	Hint        string    `json:"hint,omitempty"`        // 补充说明
 	Placeholder string    `json:"placeholder,omitempty"` // 占位提示
+	ShowWhen    *ShowWhen `json:"showWhen,omitempty"`    // 显示条件
 }
 
 // SchemaProvider 是驱动的可选能力:声明 Connection.config 与 Device.params 的结构。

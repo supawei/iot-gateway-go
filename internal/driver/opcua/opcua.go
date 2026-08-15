@@ -34,9 +34,12 @@ func (*opcuaDriver) ConfigSchema() []driver.Field {
 		{Name: "username", Label: "用户名", Type: driver.FieldString, Hint: "留空为匿名"},
 		{Name: "password", Label: "密码", Type: driver.FieldString},
 		{Name: "timeout", Label: "请求超时", Type: driver.FieldString, Default: "5s"},
-		{Name: "publishInterval", Label: "发布间隔", Type: driver.FieldString, Default: "1s", Hint: "仅订阅模式生效"},
-		{Name: "samplingInterval", Label: "采样间隔(ms)", Type: driver.FieldNumber, Default: 0, Hint: "0=沿用发布间隔;仅订阅模式生效"},
-		{Name: "queueSize", Label: "队列长度", Type: driver.FieldInt, Default: 10, Hint: "仅订阅模式生效"},
+		{Name: "publishInterval", Label: "发布间隔", Type: driver.FieldString, Default: "1s",
+			ShowWhen: &driver.ShowWhen{Field: "mode", In: []string{"subscribe"}}},
+		{Name: "samplingInterval", Label: "采样间隔(ms)", Type: driver.FieldNumber, Default: 0,
+			Hint: "0=沿用发布间隔", ShowWhen: &driver.ShowWhen{Field: "mode", In: []string{"subscribe"}}},
+		{Name: "queueSize", Label: "队列长度", Type: driver.FieldInt, Default: 10,
+			ShowWhen: &driver.ShowWhen{Field: "mode", In: []string{"subscribe"}}},
 	}
 }
 
