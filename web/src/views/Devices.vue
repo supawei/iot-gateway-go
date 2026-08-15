@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import api from '../api'
@@ -175,6 +175,48 @@ async function doClone() {
   }
 }
 
+// ---- 属性值 ----
+const valuesVisible = ref(false)
+const valuesTarget = ref(null)
+const valuesList = ref({ points: [] })
+const valuesLoading = ref(false)
+let valuesTimer = null
+
+function fmtValue(v) {
+  if (v === null || v === undefined) return '—'
+  if (typeof v === 'object') return JSON.stringify(v)
+  return String(v)
+}
+
+function fmtTime(t) {
+  if (!t || t.startsWith('0001')) return '—'
+  return new Date(t).toLocaleString()
+}
+
+async function loadValues() {
+  if (!valuesTarget.value) return
+  valuesLoading.value = true
+  try {
+    valuesList.value = await api.getDeviceValues(valuesTarget.value.id)
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    valuesLoading.value = false
+  }
+}
+
+function openValues(row) {
+  valuesTarget.value = row
+  valuesVisible.value = true
+  loadValues()
+  valuesTimer = setInterval(loadValues, 3000)
+}
+
+function closeValues() {
+  if (valuesTimer) clearInterval(valuesTimer)
+  valuesTimer = null
+}
+
 // ---- 写值 ----
 const writeVisible = ref(false)
 const writeTarget = ref(null)
@@ -208,6 +250,9 @@ async function doWrite() {
 }
 
 onMounted(load)
+onUnmounted(() => {
+  if (valuesTimer) clearInterval(valuesTimer)
+})
 </script>
 
 <template>
@@ -254,9 +299,10 @@ onMounted(load)
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="230" fixed="right">
+        <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+            <el-button link type="primary" @click="openValues(row)">属性值</el-button>
             <el-button link type="primary" @click="openClone(row)">克隆</el-button>
             <el-button link type="warning" @click="openWrite(row)">写值</el-button>
             <el-button link type="danger" @click="remove(row)">删除</el-button>
@@ -348,6 +394,48 @@ onMounted(load)
       <template #footer>
         <el-button @click="cloneVisible = false">取消</el-button>
         <el-button type="primary" @click="doClone">克隆</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 属性值对话框 -->
+    <el-dialog
+      v-model="valuesVisible"
+      :title="`属性值 · ${valuesTarget?.name || valuesTarget?.id || ''}`"
+      width="640px"
+      destroy-on-close
+      @closed="closeValues"
+    >
+      <el-table v-loading="valuesLoading" :data="valuesList.points" empty-text="暂无采集数据">
+        <el-table-column prop="point" label="点位" min-width="140">
+          <template #default="{ row }">
+            <span class="mono">{{ row.point }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="值" min-width="160">
+          <template #default="{ row }">
+            <span class="mono">{{ fmtValue(row.value) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="质量" width="100">
+          <template #default="{ row }">
+            <el-tag
+              :type="row.quality === 'good' ? 'success' : row.quality === 'uncertain' ? 'warning' : 'danger'"
+              effect="light"
+              size="small"
+            >
+              {{ row.quality }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="时间" min-width="170">
+          <template #default="{ row }">
+            <span class="el-text el-text--info" style="font-size: 13px">{{ fmtTime(row.timestamp) }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="loadValues">刷新</el-button>
+        <el-button type="primary" @click="valuesVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 

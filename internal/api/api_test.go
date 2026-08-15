@@ -14,6 +14,7 @@ import (
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
+	"iot-gateway-go/internal/values"
 )
 
 func newTestAPI(t *testing.T) *API {
@@ -23,7 +24,7 @@ func newTestAPI(t *testing.T) *API {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return New(st, status.NewRegistry())
+	return New(st, status.NewRegistry(), values.NewRegistry())
 }
 
 func doRequest(t *testing.T, handler http.Handler, method, path string, body interface{}) *httptest.ResponseRecorder {
@@ -432,7 +433,7 @@ func TestStatusEndpoints(t *testing.T) {
 	reg.SetOnline("d1", time.Now())
 	reg.SetOffline("d2", "connection refused")
 
-	handler := New(st, reg).Routes()
+	handler := New(st, reg, values.NewRegistry()).Routes()
 
 	rec := doRequest(t, handler, "GET", "/api/v1/status", nil)
 	if rec.Code != http.StatusOK {
@@ -464,6 +465,47 @@ func TestGetDeviceStatusNotFound(t *testing.T) {
 	rec := doRequest(t, apiInstance.Routes(), "GET", "/api/v1/devices/nonexistent/status", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status not found: got %d want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// TestGetDeviceValues 验证实时值查询:返回各点位最新值,设备从未上报时返回空列表。
+func TestGetDeviceValues(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	reg := values.NewRegistry()
+	reg.Update(model.DataPoint{
+		DeviceID: "d1", Point: "temperature", Value: 25.5,
+		Quality: model.QualityGood, Timestamp: time.Now(),
+	})
+	reg.Update(model.DataPoint{
+		DeviceID: "d1", Point: "humidity", Value: 60.0,
+		Quality: model.QualityGood, Timestamp: time.Now(),
+	})
+
+	handler := New(st, status.NewRegistry(), reg).Routes()
+
+	rec := doRequest(t, handler, "GET", "/api/v1/devices/d1/values", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get values: got %d", rec.Code)
+	}
+	var got values.DeviceValues
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.DeviceID != "d1" || len(got.Points) != 2 {
+		t.Fatalf("values: %+v", got)
+	}
+
+	// 从未上报的设备返回空列表(而非 404 或 null)
+	rec = doRequest(t, handler, "GET", "/api/v1/devices/empty/values", nil)
+	var empty values.DeviceValues
+	json.Unmarshal(rec.Body.Bytes(), &empty)
+	if empty.DeviceID != "empty" || len(empty.Points) != 0 {
+		t.Fatalf("empty values: %+v", empty)
 	}
 }
 

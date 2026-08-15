@@ -10,6 +10,7 @@ import (
 	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
+	"iot-gateway-go/internal/values"
 )
 
 type mockConn struct {
@@ -94,7 +95,7 @@ func TestSchedulerSubscribes(t *testing.T) {
 	})
 
 	dataPoints := make(chan model.DataPoint, 10)
-	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry(), nil)
+	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry(), values.NewRegistry(), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
@@ -164,7 +165,7 @@ func TestSchedulerListens(t *testing.T) {
 	})
 
 	dataPoints := make(chan model.DataPoint, 10)
-	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry(), nil)
+	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry(), values.NewRegistry(), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
@@ -206,7 +207,7 @@ func TestSchedulerCollects(t *testing.T) {
 	})
 
 	dataPoints := make(chan model.DataPoint, 10)
-	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry(), nil)
+	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry(), values.NewRegistry(), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
@@ -239,7 +240,7 @@ func TestSchedulerReportsOnline(t *testing.T) {
 	})
 
 	reg := status.NewRegistry()
-	scheduler := NewScheduler(st, make(chan model.DataPoint, 10), 4, reg, nil)
+	scheduler := NewScheduler(st, make(chan model.DataPoint, 10), 4, reg, values.NewRegistry(), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
 	defer cancel()
@@ -262,7 +263,7 @@ func TestSchedulerReportsOffline(t *testing.T) {
 	})
 
 	reg := status.NewRegistry()
-	scheduler := NewScheduler(st, make(chan model.DataPoint, 10), 4, reg, nil)
+	scheduler := NewScheduler(st, make(chan model.DataPoint, 10), 4, reg, values.NewRegistry(), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
 	defer cancel()
@@ -316,7 +317,7 @@ func (m *mockNotifier) DeviceOffline(id string)       { m.offline = append(m.off
 func TestSchedulerNotifiesTransitions(t *testing.T) {
 	reg := status.NewRegistry()
 	n := &mockNotifier{}
-	s := NewScheduler(nil, nil, 4, reg, []output.Output{n})
+	s := NewScheduler(nil, nil, 4, reg, values.NewRegistry(), []output.Output{n})
 
 	// 未知 → 在线:通知 online
 	s.markOnline("d1", time.Now())

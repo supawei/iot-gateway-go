@@ -23,6 +23,7 @@ import (
 	"iot-gateway-go/internal/output/thingsboard"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
+	"iot-gateway-go/internal/values"
 	"iot-gateway-go/web"
 
 	_ "iot-gateway-go/internal/driver/modbus"        // 注册 modbus 驱动
@@ -59,6 +60,7 @@ func main() {
 	}
 
 	statusReg := status.NewRegistry()
+	valuesReg := values.NewRegistry()
 	dataPoints := make(chan model.DataPoint, datapointBufferSize)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -72,7 +74,7 @@ func main() {
 
 	schedulerDone := make(chan struct{})
 	go func() {
-		if err := core.NewScheduler(st, dataPoints, cfg.Scheduler.PoolSize, statusReg, outputs).Run(ctx); err != nil {
+		if err := core.NewScheduler(st, dataPoints, cfg.Scheduler.PoolSize, statusReg, valuesReg, outputs).Run(ctx); err != nil {
 			slog.Error("scheduler exited", "err", err)
 		}
 		close(schedulerDone)
@@ -81,7 +83,7 @@ func main() {
 	// 根路由挂内嵌前端(SPA),/api/ 挂 REST 接口,单端口同时提供界面与 API。
 	mux := http.NewServeMux()
 	mux.Handle("/", web.Handler())
-	mux.Handle("/api/", api.New(st, statusReg).Routes())
+	mux.Handle("/api/", api.New(st, statusReg, valuesReg).Routes())
 
 	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: mux}
 	go func() {

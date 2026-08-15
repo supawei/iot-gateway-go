@@ -11,17 +11,19 @@ import (
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
+	"iot-gateway-go/internal/values"
 )
 
 // API 提供 REST 配置接口,操作 store 并通过 OnChange 触发 scheduler 热加载;
-// 同时提供设备运行时状态查询。
+// 同时提供设备运行时状态与实时值查询。
 type API struct {
 	store  *store.Store
 	status *status.Registry
+	values *values.Registry
 }
 
-func New(st *store.Store, statusReg *status.Registry) *API {
-	return &API{store: st, status: statusReg}
+func New(st *store.Store, statusReg *status.Registry, valuesReg *values.Registry) *API {
+	return &API{store: st, status: statusReg, values: valuesReg}
 }
 
 // Routes 返回挂载好路由的 ServeMux,由 main 直接用作 http.Server Handler。
@@ -43,6 +45,7 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("DELETE /api/v1/devices/{deviceId}/points/{name}", a.deletePoint)
 	mux.HandleFunc("GET /api/v1/status", a.listStatus)
 	mux.HandleFunc("GET /api/v1/devices/{deviceId}/status", a.getDeviceStatus)
+	mux.HandleFunc("GET /api/v1/devices/{deviceId}/values", a.getDeviceValues)
 	mux.HandleFunc("GET /api/v1/drivers", a.listDrivers)
 	return mux
 }
@@ -292,6 +295,11 @@ func (a *API) getDeviceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, st)
+}
+
+// getDeviceValues 返回设备各点位的最新采集值(内存态快照);设备从未上报则返回空列表。
+func (a *API) getDeviceValues(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, a.values.Get(r.PathValue("deviceId")))
 }
 
 // listDrivers 返回已注册驱动及其配置 schema,供前端动态渲染表单。

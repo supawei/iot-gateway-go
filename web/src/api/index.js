@@ -31,6 +31,7 @@ export const api = {
 
   // 状态
   listStatus: () => http.get('/status'),
+  getDeviceValues: (id) => http.get(`/devices/${id}/values`),
 
   // 驱动
   listDrivers: () => http.get('/drivers'),

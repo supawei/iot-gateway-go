@@ -13,6 +13,7 @@ import (
 	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
+	"iot-gateway-go/internal/values"
 )
 
 const defaultInterval = 5 * time.Second
@@ -24,6 +25,7 @@ type Scheduler struct {
 	store         *store.Store
 	output        chan<- model.DataPoint
 	status        *status.Registry
+	values        *values.Registry
 	notifiers     []output.DeviceNotifier
 	poolSize      int
 	baseCtx       context.Context
@@ -35,7 +37,7 @@ type Scheduler struct {
 	collectCancel context.CancelFunc
 }
 
-func NewScheduler(st *store.Store, dataPoints chan<- model.DataPoint, poolSize int, statusReg *status.Registry, outputs []output.Output) *Scheduler {
+func NewScheduler(st *store.Store, dataPoints chan<- model.DataPoint, poolSize int, statusReg *status.Registry, valuesReg *values.Registry, outputs []output.Output) *Scheduler {
 	if poolSize <= 0 {
 		poolSize = 16
 	}
@@ -45,7 +47,7 @@ func NewScheduler(st *store.Store, dataPoints chan<- model.DataPoint, poolSize i
 			notifiers = append(notifiers, n)
 		}
 	}
-	return &Scheduler{store: st, output: dataPoints, poolSize: poolSize, status: statusReg, notifiers: notifiers}
+	return &Scheduler{store: st, output: dataPoints, poolSize: poolSize, status: statusReg, values: valuesReg, notifiers: notifiers}
 }
 
 func (s *Scheduler) Run(ctx context.Context) error {
@@ -286,8 +288,11 @@ func (s *Scheduler) pushData(ctx context.Context, deviceID string, dp model.Data
 }
 
 // emit 把单个 DataPoint 投递到输出 channel;ctx 取消时返回 false。
-// 轮询、订阅、监听三条采集路径共用此投递入口。
+// 轮询、订阅、监听三条采集路径共用此投递入口,也是记录实时值快照的唯一入口。
 func (s *Scheduler) emit(ctx context.Context, dp model.DataPoint) bool {
+	if s.values != nil {
+		s.values.Update(dp)
+	}
 	select {
 	case s.output <- dp:
 		return true
