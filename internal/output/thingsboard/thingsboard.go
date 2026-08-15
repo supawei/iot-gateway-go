@@ -1,14 +1,16 @@
 // Package thingsboard 实现 ThingsBoard 平台对接(北向输出插件)。
 // 采用 ThingsBoard MQTT Gateway 模式:网关作为一个"网关设备",用一个 MQTT 连接
 // 代表 N 个子设备。每个 DataPoint 映射为子设备的一条遥测;Quality 映射为客户端属性。
-// 同时实现 output.DeviceNotifier,把设备上线/离线映射为 v1/gateway/connect / disconnect。
-// 详见 docs/thingsboard.md。
+// 同时实现 output.DeviceNotifier(设备上线/离线 → connect/disconnect)与下行
+// (共享属性 → 设备写),详见 docs/thingsboard.md。
 package thingsboard
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +25,8 @@ const (
 	disconnectQuiesce = 250 * time.Millisecond
 
 	defaultFlushInterval = 200 * time.Millisecond
+	writeTimeout         = 5 * time.Second
+	writeQueueSize       = 64
 )
 
 // ThingsBoard MQTT Gateway 的 topic。
@@ -46,6 +50,9 @@ type Config struct {
 	FlushInterval    string `yaml:"flushInterval"`    // 微批 flush 间隔,如 "200ms",默认 200ms
 }
 
+// WriteFunc 是下行写回调:把设备点位的值写回设备(由 main 注入,最终落到驱动 Writer)。
+type WriteFunc func(ctx context.Context, deviceID string, point string, value interface{}) error
+
 type thingsboardOutput struct {
 	client        pahomqtt.Client
 	prefix        string
@@ -53,7 +60,9 @@ type thingsboardOutput struct {
 	reportQuality bool
 	flushInterval time.Duration
 
-	// 以下由 Publish / DeviceOnline / DeviceOffline(来自不同 goroutine)与 flush 并发访问。
+	write WriteFunc // 下行写回调
+
+	// 以下由 Publish / DeviceOnline / DeviceOffline / 下行 handler 与 flush 并发访问。
 	mu          sync.Mutex
 	pending     map[string][]model.DataPoint // 设备名 -> 待上报遥测点
 	qualities   map[string]model.Quality     // 设备名 -> 最近质量
@@ -63,11 +72,18 @@ type thingsboardOutput struct {
 	// connected 仅在 flush 中访问(flusher goroutine 串行,Close 等待其退出后再 flush)。
 	connected map[string]bool
 
-	done      chan struct{}
-	flushDone chan struct{}
+	writeCh chan writeRequest // 下行写请求队列(非阻塞投递,不关闭)
+	done    chan struct{}
+	wg      sync.WaitGroup
 }
 
-func New(cfg Config) (output.Output, error) {
+type writeRequest struct {
+	deviceID string
+	point    string
+	value    interface{}
+}
+
+func New(cfg Config, write WriteFunc) (output.Output, error) {
 	if cfg.QoS == 0 {
 		cfg.QoS = defaultQoS
 	}
@@ -106,20 +122,34 @@ func New(cfg Config) (output.Output, error) {
 		qos:           cfg.QoS,
 		reportQuality: reportQuality,
 		flushInterval: flushInterval,
+		write:         write,
 		pending:       make(map[string][]model.DataPoint),
 		qualities:     make(map[string]model.Quality),
 		connects:      make(map[string]bool),
 		disconnects:   make(map[string]bool),
 		connected:     make(map[string]bool),
+		writeCh:       make(chan writeRequest, writeQueueSize),
 		done:          make(chan struct{}),
-		flushDone:     make(chan struct{}),
 	}
+
+	// 订阅下行共享属性(与上行客户端属性同 topic,但下行带 device/data 包装,可区分)。
+	if token := client.Subscribe(topicAttributes, o.qos, o.handleAttributes); token.Wait() && token.Error() != nil {
+		return nil, fmt.Errorf("thingsboard subscribe attributes: %w", token.Error())
+	}
+
+	o.wg.Add(2)
 	go o.runFlusher()
+	go o.runWriter()
 	return o, nil
 }
 
 func (o *thingsboardOutput) deviceName(deviceID string) string {
 	return o.prefix + deviceID
+}
+
+// deviceID 反向映射:设备名去掉前缀还原为网关 DeviceID。
+func (o *thingsboardOutput) deviceID(name string) string {
+	return strings.TrimPrefix(name, o.prefix)
 }
 
 // Publish 把 DataPoint 缓冲进对应设备的待发队列,由 flusher 定时聚合上报。
@@ -155,9 +185,61 @@ func (o *thingsboardOutput) DeviceOffline(deviceID string) {
 	delete(o.connects, name)
 }
 
+// handleAttributes 是 MQTT 下行 handler:共享属性更新(server→gateway)带 device/data 包装。
+func (o *thingsboardOutput) handleAttributes(_ pahomqtt.Client, msg pahomqtt.Message) {
+	o.handleDownlink(msg.Payload())
+}
+
+// handleDownlink 解析下行消息;对共享属性更新,把每个 key 作为点位、value 作为值,
+// 投递到写队列。上行客户端属性(无 device/data 包装)会被忽略,避免回环。
+func (o *thingsboardOutput) handleDownlink(payload []byte) {
+	var msg struct {
+		Device string                 `json:"device"`
+		Data   map[string]interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		slog.Error("thingsboard downlink parse failed", "err", err)
+		return
+	}
+	if msg.Device == "" || len(msg.Data) == 0 {
+		return
+	}
+	deviceID := o.deviceID(msg.Device)
+	for point, value := range msg.Data {
+		o.enqueueWrite(writeRequest{deviceID: deviceID, point: point, value: value})
+	}
+}
+
+// enqueueWrite 非阻塞投递写请求;队列满则丢弃并告警(避免阻塞 MQTT 处理)。
+func (o *thingsboardOutput) enqueueWrite(req writeRequest) {
+	select {
+	case o.writeCh <- req:
+	default:
+		slog.Warn("thingsboard downlink queue full, drop write", "device", req.deviceID, "point", req.point)
+	}
+}
+
+// runWriter 消费写队列,调用注入的 WriteFunc(带超时)把值写回设备。
+func (o *thingsboardOutput) runWriter() {
+	defer o.wg.Done()
+	for {
+		select {
+		case <-o.done:
+			return
+		case req := <-o.writeCh:
+			ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+			err := o.write(ctx, req.deviceID, req.point, req.value)
+			cancel()
+			if err != nil {
+				slog.Error("thingsboard downlink write failed", "device", req.deviceID, "point", req.point, "err", err)
+			}
+		}
+	}
+}
+
 // runFlusher 按 flushInterval 周期性 flush,直到 Close 关闭 done。
 func (o *thingsboardOutput) runFlusher() {
-	defer close(o.flushDone)
+	defer o.wg.Done()
 	ticker := time.NewTicker(o.flushInterval)
 	defer ticker.Stop()
 	for {
@@ -237,8 +319,8 @@ func (o *thingsboardOutput) publish(topic string, payload interface{}) error {
 
 func (o *thingsboardOutput) Close() error {
 	close(o.done)
-	<-o.flushDone // 等 flusher 退出,避免并发 flush
-	o.flush()     // 上报剩余缓冲
+	o.wg.Wait() // 等 flusher 与 writer 退出
+	o.flush()   // 上报剩余缓冲
 	o.client.Disconnect(uint(disconnectQuiesce / time.Millisecond))
 	return nil
 }

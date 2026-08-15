@@ -82,3 +82,30 @@ func TestDeviceNotifierIntents(t *testing.T) {
 		t.Fatal("offline should override online intent")
 	}
 }
+
+// TestHandleDownlink 验证共享属性下行被解析并投递到写队列(设备名去前缀还原 DeviceID)。
+func TestHandleDownlink(t *testing.T) {
+	o := &thingsboardOutput{prefix: "factory1/", writeCh: make(chan writeRequest, 4)}
+	o.handleDownlink([]byte(`{"device":"factory1/sensor-01","data":{"setpoint":42}}`))
+
+	select {
+	case req := <-o.writeCh:
+		if req.deviceID != "sensor-01" || req.point != "setpoint" || req.value != float64(42) {
+			t.Fatalf("req: %+v", req)
+		}
+	default:
+		t.Fatal("no write request enqueued")
+	}
+}
+
+// TestHandleDownlinkIgnoresUplink 验证上行客户端属性(无 device/data 包装)被忽略,避免回环。
+func TestHandleDownlinkIgnoresUplink(t *testing.T) {
+	o := &thingsboardOutput{writeCh: make(chan writeRequest, 4)}
+	o.handleDownlink([]byte(`{"sensor-01":{"quality":"good"}}`))
+
+	select {
+	case req := <-o.writeCh:
+		t.Fatalf("uplink should be ignored, got %+v", req)
+	default:
+	}
+}

@@ -53,7 +53,7 @@ func main() {
 	}
 	defer st.Close()
 
-	outputs, err := buildOutputs(cfg)
+	outputs, err := buildOutputs(cfg, st)
 	if err != nil {
 		fatal("build outputs failed", "err", err)
 	}
@@ -146,7 +146,7 @@ func fatal(msg string, args ...any) {
 	os.Exit(1)
 }
 
-func buildOutputs(cfg config.Config) ([]output.Output, error) {
+func buildOutputs(cfg config.Config, st *store.Store) ([]output.Output, error) {
 	outputs := make([]output.Output, 0, 2)
 
 	if cfg.MQTT.Broker != "" {
@@ -158,7 +158,12 @@ func buildOutputs(cfg config.Config) ([]output.Output, error) {
 	}
 
 	if cfg.ThingsBoard.Broker != "" && cfg.ThingsBoard.AccessToken != "" {
-		tbOutput, err := thingsboard.New(cfg.ThingsBoard)
+		// 下行写回调:共享属性更新 → core.WritePoint → 驱动 Writer。
+		write := func(ctx context.Context, deviceID, point string, value interface{}) error {
+			_, err := core.WritePoint(ctx, st, deviceID, point, value)
+			return err
+		}
+		tbOutput, err := thingsboard.New(cfg.ThingsBoard, write)
 		if err != nil {
 			return nil, err
 		}
