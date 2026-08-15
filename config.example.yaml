@@ -17,6 +17,7 @@ mqtt:
 #   qos: 1
 #   deviceNamePrefix: ""   # 子设备名前缀,默认空
 #   reportQuality: true    # 是否上报 quality 属性,默认 true
+#   flushInterval: "200ms" # 微批聚合 flush 间隔,默认 200ms
 
 storage:
   sqlitePath: "./gateway.db"

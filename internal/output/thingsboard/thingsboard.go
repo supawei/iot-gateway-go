@@ -7,6 +7,8 @@ package thingsboard
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"sync"
 	"time"
 
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
@@ -18,6 +20,8 @@ import (
 const (
 	defaultQoS        = 1
 	disconnectQuiesce = 250 * time.Millisecond
+
+	defaultFlushInterval = 200 * time.Millisecond
 )
 
 // ThingsBoard MQTT Gateway 的 topic。
@@ -38,6 +42,7 @@ type Config struct {
 	QoS              byte   `yaml:"qos"`              // 默认 1
 	DeviceNamePrefix string `yaml:"deviceNamePrefix"` // 子设备名前缀,默认空
 	ReportQuality    *bool  `yaml:"reportQuality"`    // 是否上报 quality 属性,默认 true
+	FlushInterval    string `yaml:"flushInterval"`    // 微批 flush 间隔,如 "200ms",默认 200ms
 }
 
 type thingsboardOutput struct {
@@ -45,7 +50,18 @@ type thingsboardOutput struct {
 	prefix        string
 	qos           byte
 	reportQuality bool
-	connected     map[string]bool // 已发送 connect 的子设备名集合(单 publishLoop goroutine 访问,无需锁)
+	flushInterval time.Duration
+
+	// pending/qualities 由 Publish(单 publishLoop goroutine)与 flush(flusher goroutine)并发访问。
+	mu        sync.Mutex
+	pending   map[string][]model.DataPoint // 设备名 -> 待上报遥测点
+	qualities map[string]model.Quality     // 设备名 -> 最近质量
+
+	// connected 仅在 flush 中访问(flusher goroutine 串行,Close 等待其退出后再 flush)。
+	connected map[string]bool // 已发送 connect 的子设备名集合
+
+	done      chan struct{}
+	flushDone chan struct{}
 }
 
 func New(cfg Config) (output.Output, error) {
@@ -55,6 +71,14 @@ func New(cfg Config) (output.Output, error) {
 	reportQuality := true
 	if cfg.ReportQuality != nil {
 		reportQuality = *cfg.ReportQuality
+	}
+	flushInterval := defaultFlushInterval
+	if cfg.FlushInterval != "" {
+		d, err := time.ParseDuration(cfg.FlushInterval)
+		if err != nil {
+			return nil, fmt.Errorf("invalid thingsboard flushInterval %q: %w", cfg.FlushInterval, err)
+		}
+		flushInterval = d
 	}
 
 	opts := pahomqtt.NewClientOptions()
@@ -73,43 +97,83 @@ func New(cfg Config) (output.Output, error) {
 		return nil, fmt.Errorf("thingsboard mqtt connect: %w", token.Error())
 	}
 
-	return &thingsboardOutput{
+	o := &thingsboardOutput{
 		client:        client,
 		prefix:        cfg.DeviceNamePrefix,
 		qos:           cfg.QoS,
 		reportQuality: reportQuality,
+		flushInterval: flushInterval,
+		pending:       make(map[string][]model.DataPoint),
+		qualities:     make(map[string]model.Quality),
 		connected:     make(map[string]bool),
-	}, nil
+		done:          make(chan struct{}),
+		flushDone:     make(chan struct{}),
+	}
+	go o.runFlusher()
+	return o, nil
 }
 
 func (o *thingsboardOutput) deviceName(deviceID string) string {
 	return o.prefix + deviceID
 }
 
-// Publish 把单个 DataPoint 上报为子设备遥测(数组单元素),并可选上报 quality 属性。
-// 惰性 connect:首次出现某子设备时先发 v1/gateway/connect 登记。
+// Publish 把 DataPoint 缓冲进对应设备的待发队列,由 flusher 定时聚合上报。
+// 有值才入遥测队列;Quality 作为状态属性记录(同一设备取最近值)。
 func (o *thingsboardOutput) Publish(dp model.DataPoint) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	name := o.deviceName(dp.DeviceID)
-
-	if err := o.ensureConnected(name); err != nil {
-		return err
-	}
-
-	// 遥测:仅当有值时上报(bad/uncertain 无值,不上报遥测)
 	if dp.Value != nil {
-		if err := o.publish(topicTelemetry, telemetryPayload(name, dp)); err != nil {
-			return err
-		}
+		o.pending[name] = append(o.pending[name], dp)
 	}
-
-	// 质量属性(可选)
 	if o.reportQuality {
-		attrs := map[string]interface{}{"quality": string(dp.Quality)}
-		if err := o.publish(topicAttributes, attributesPayload(name, attrs)); err != nil {
-			return err
-		}
+		o.qualities[name] = dp.Quality
 	}
 	return nil
+}
+
+// runFlusher 按 flushInterval 周期性 flush,直到 Close 关闭 done。
+func (o *thingsboardOutput) runFlusher() {
+	defer close(o.flushDone)
+	ticker := time.NewTicker(o.flushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-o.done:
+			return
+		case <-ticker.C:
+			o.flush()
+		}
+	}
+}
+
+// flush 把各设备缓冲的遥测点按时间戳聚合成一帧(数组多元素)上报,并上报 quality 属性。
+func (o *thingsboardOutput) flush() {
+	o.mu.Lock()
+	pending := o.pending
+	o.pending = make(map[string][]model.DataPoint)
+	qualities := o.qualities
+	o.qualities = make(map[string]model.Quality)
+	o.mu.Unlock()
+
+	for name, points := range pending {
+		if len(points) == 0 {
+			continue
+		}
+		if err := o.ensureConnected(name); err != nil {
+			slog.Error("thingsboard connect failed", "device", name, "err", err)
+			continue
+		}
+		if err := o.publish(topicTelemetry, telemetryBatchPayload(name, points)); err != nil {
+			slog.Error("thingsboard publish telemetry failed", "device", name, "err", err)
+		}
+	}
+	for name, q := range qualities {
+		attrs := map[string]interface{}{"quality": string(q)}
+		if err := o.publish(topicAttributes, attributesPayload(name, attrs)); err != nil {
+			slog.Error("thingsboard publish attributes failed", "device", name, "err", err)
+		}
+	}
 }
 
 func (o *thingsboardOutput) ensureConnected(name string) error {
@@ -134,20 +198,31 @@ func (o *thingsboardOutput) publish(topic string, payload interface{}) error {
 }
 
 func (o *thingsboardOutput) Close() error {
+	close(o.done)
+	<-o.flushDone // 等 flusher 退出,避免并发 flush
+	o.flush()     // 上报剩余缓冲
 	o.client.Disconnect(uint(disconnectQuiesce / time.Millisecond))
 	return nil
 }
 
-// telemetryPayload 构造网关遥测帧:设备名 → [ {ts, values} ]。
-func telemetryPayload(name string, dp model.DataPoint) map[string]interface{} {
-	return map[string]interface{}{
-		name: []map[string]interface{}{
-			{
-				"ts":     dp.Timestamp.UnixMilli(),
-				"values": map[string]interface{}{dp.Point: dp.Value},
-			},
-		},
+// telemetryBatchPayload 把一批点位按时间戳分组,构造成网关遥测帧:
+// 设备名 → [ {ts, values:{point:value,...}}, ... ]。
+func telemetryBatchPayload(name string, points []model.DataPoint) map[string]interface{} {
+	grouped := make(map[int64]map[string]interface{})
+	var order []int64 // 保持时间戳出现顺序稳定
+	for _, dp := range points {
+		ts := dp.Timestamp.UnixMilli()
+		if _, ok := grouped[ts]; !ok {
+			grouped[ts] = make(map[string]interface{})
+			order = append(order, ts)
+		}
+		grouped[ts][dp.Point] = dp.Value
 	}
+	arr := make([]map[string]interface{}, 0, len(order))
+	for _, ts := range order {
+		arr = append(arr, map[string]interface{}{"ts": ts, "values": grouped[ts]})
+	}
+	return map[string]interface{}{name: arr}
 }
 
 // attributesPayload 构造网关属性帧:设备名 → {key: value}。
