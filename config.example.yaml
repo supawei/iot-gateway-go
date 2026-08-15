@@ -19,6 +19,15 @@ mqtt:
 #   reportQuality: true    # 是否上报 quality 属性,默认 true
 #   flushInterval: "200ms" # 微批聚合 flush 间隔,默认 200ms
 
+# TDengine 时序库对接(可选;配置 url 后启用,经 taosAdapter REST 写入)
+# tdengine:
+#   url: "http://127.0.0.1:6041"  # taosAdapter REST 地址
+#   username: "root"               # 默认 root
+#   password: "taosdata"           # 默认 taosdata
+#   database: "iot_gateway"        # 库名,默认 iot_gateway
+#   stable: "data_points"          # 超级表名,默认 data_points
+#   flushInterval: "1s"            # 微批聚合 flush 间隔,默认 1s
+
 storage:
   sqlitePath: "./gateway.db"
 

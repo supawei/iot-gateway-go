@@ -20,6 +20,7 @@ import (
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/output/mqtt"
+	"iot-gateway-go/internal/output/tdengine"
 	"iot-gateway-go/internal/output/thingsboard"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
@@ -172,8 +173,16 @@ func buildOutputs(cfg config.Config, st *store.Store) ([]output.Output, error) {
 		outputs = append(outputs, tbOutput)
 	}
 
+	if cfg.TDengine.URL != "" {
+		tdOutput, err := tdengine.New(cfg.TDengine)
+		if err != nil {
+			return nil, err
+		}
+		outputs = append(outputs, tdOutput)
+	}
+
 	if len(outputs) == 0 {
-		return nil, errors.New("no output configured: set mqtt.broker or thingsboard.broker+accessToken")
+		return nil, errors.New("no output configured: set mqtt.broker, thingsboard.broker+accessToken, or tdengine.url")
 	}
 	return outputs, nil
 }

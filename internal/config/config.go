@@ -7,6 +7,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"iot-gateway-go/internal/output/mqtt"
+	"iot-gateway-go/internal/output/tdengine"
 	"iot-gateway-go/internal/output/thingsboard"
 )
 
@@ -28,6 +29,7 @@ type Config struct {
 	} `yaml:"http"`
 	MQTT        mqtt.Config        `yaml:"mqtt"`
 	ThingsBoard thingsboard.Config `yaml:"thingsboard"`
+	TDengine    tdengine.Config    `yaml:"tdengine"`
 	Storage     struct {
 		SqlitePath string `yaml:"sqlitePath"`
 	} `yaml:"storage"`

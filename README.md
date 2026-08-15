@@ -45,6 +45,7 @@ go build -o gateway ./cmd/gateway
 | `http.addr` | REST API 监听地址 | `:8080` |
 | `mqtt.*` | MQTT broker 连接 | - |
 | `thingsboard.*` | ThingsBoard 平台对接(可选,见 [docs/thingsboard.md](docs/thingsboard.md)) | - |
+| `tdengine.*` | TDengine 时序库对接(可选,见 [docs/tdengine.md](docs/tdengine.md)) | - |
 | `storage.sqlitePath` | SQLite 路径 | `./gateway.db` |
 | `scheduler.poolSize` | 采集 worker 池大小(最大并发采集数) | `16` |
 | `log.level` | 日志级别(debug/info/warn/error) | `info` |
@@ -169,6 +170,23 @@ thingsboard:
 
 配置 `broker + accessToken` 后即启用(可与 mqtt 输出并存)。
 
+## TDengine 输出
+
+通过 taosAdapter REST API 写入 TDengine 时序库:所有点位写入一张超级表,值按类型落到强类型列(DOUBLE/BIGINT/BOOL/NCHAR),设备与点位作为 TAGS,子表按 (设备, 点位) 自动建表。详见 [docs/tdengine.md](docs/tdengine.md)。
+
+```yaml
+# config.yaml
+tdengine:
+  url: "http://127.0.0.1:6041"  # taosAdapter REST 地址
+  username: "root"               # 默认 root
+  password: "taosdata"           # 默认 taosdata
+  database: "iot_gateway"        # 默认 iot_gateway
+  stable: "data_points"          # 默认 data_points
+  flushInterval: "1s"            # 默认 1s
+```
+
+配置 `url` 后即启用(可与 mqtt / thingsboard 输出并存)。
+
 ## REST API
 
 | 方法 | 路径 | 说明 |
@@ -221,6 +239,8 @@ internal/
     opcua/            OPC UA 驱动(轮询/订阅)
   output/             Output 接口
     mqtt/             MQTT 输出
+    thingsboard/      ThingsBoard 输出
+    tdengine/         TDengine 输出
   core/               scheduler + pipeline
   store/              SQLite 持久化
   api/                REST 配置 API

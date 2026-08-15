@@ -50,7 +50,7 @@
 - [x] 实现 `internal/driver/opcua` 子包(轮询读取,gopcua 库)
 - [x] OPC UA 订阅(Subscription)推送:连接配置 `mode:"subscribe"` 开启,driver 实现 `driver.Subscriber`,scheduler 检测能力后走推送而非轮询
 - [x] 验证 scheduler / pipeline / output 接入新协议无需改动(仅 model 加 3 个类型常量,core/store/api/config 零改动)
-- [ ] 加第二个北向输出(候选:时序数据库 InfluxDB / TDengine),验证 Output 接口
+- [x] 加第二个北向输出(TDengine,经 taosAdapter REST 写入),验证 Output 接口
 - [ ] 若扩展中暴露接口缺陷,回填修正 P1
 
 **OPC UA 接入验收(2026-08-13)**:加子包 + main.go 一行 import 即接入;`make check` + `make build-all`(三平台静态)通过;同 ConnectionID 共享 session(引用计数)。实采验证待连真实 OPC UA server。
