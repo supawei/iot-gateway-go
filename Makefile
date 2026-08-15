@@ -53,10 +53,10 @@ linux-arm32:
 run: ## 运行网关（读取 config.yaml）
 	$(GO) run $(MAIN_PACKAGE)
 
-test: ## 运行全部测试
+test: web ## 运行全部测试(先构建前端,go:embed 依赖 dist)
 	$(GO) test ./...
 
-vet: ## go vet 静态检查
+vet: web ## go vet 静态检查(先构建前端,go:embed 依赖 dist)
 	$(GO) vet ./...
 
 fmt: ## 格式化源码
@@ -71,7 +71,7 @@ fmt-check: ## 检查格式（不修改文件，CI/提交前用）
 tidy: ## 整理依赖
 	$(GO) mod tidy
 
-check: fmt-check vet test ## 提交前检查：格式 + vet + 测试
+check: web fmt-check vet test ## 提交前检查：前端 + 格式 + vet + 测试
 
 clean: ## 清理构建产物
 	rm -rf $(BINARY_NAME) $(DIST_DIR)

@@ -4,6 +4,9 @@
 /dist
 *.exe
 
+# 前端构建产物(由 make web / npm run build 生成,构建时 go:embed 内嵌)
+/web/dist/
+
 # 运行时数据
 *.db
 *.db-journal

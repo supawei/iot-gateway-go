@@ -34,7 +34,7 @@ make web && go build -o gateway ./cmd/gateway
 
 启动 `./gateway` 后,浏览器访问 `http://<网关IP>:8080/` 即为管理界面,API 在同端口的 `/api/v1`。
 
-> 注:`go build` 依赖 `web/dist` 存在(仓库已提交构建产物,克隆后可直接编译);改动前端源码后先 `npm run build`(或 `make web`)再编译。
+> 注:`go build` 依赖 `web/dist` 存在,该目录为前端构建产物,**不纳入 git**(见仓库根 `.gitignore` 的 `/web/dist/`)。克隆后需先 `make web`(或 `npm run build`)生成 `dist/`,再编译;或直接 `make build` 一步完成。
 
 ## 目录
 

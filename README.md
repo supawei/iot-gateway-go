@@ -199,6 +199,8 @@ make build          # 先编译前端再编译二进制(前端已内嵌)
 cd web && npm install && npm run dev   # http://localhost:5173, /api 代理到 :8080
 ```
 
+> 前端构建产物 `web/dist/` 不纳入 git(`.gitignore` 已忽略)。`go build`/`go test`/`go vet` 依赖该目录存在(经 `go:embed` 内嵌),请先 `make web` 生成,或直接 `make build` 一步完成。
+
 详见 [web/README.md](web/README.md)。
 
 ## 扩展开发
