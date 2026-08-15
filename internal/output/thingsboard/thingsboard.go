@@ -1,6 +1,7 @@
 // Package thingsboard 实现 ThingsBoard 平台对接(北向输出插件)。
 // 采用 ThingsBoard MQTT Gateway 模式:网关作为一个"网关设备",用一个 MQTT 连接
 // 代表 N 个子设备。每个 DataPoint 映射为子设备的一条遥测;Quality 映射为客户端属性。
+// 同时实现 output.DeviceNotifier,把设备上线/离线映射为 v1/gateway/connect / disconnect。
 // 详见 docs/thingsboard.md。
 package thingsboard
 
@@ -52,13 +53,15 @@ type thingsboardOutput struct {
 	reportQuality bool
 	flushInterval time.Duration
 
-	// pending/qualities 由 Publish(单 publishLoop goroutine)与 flush(flusher goroutine)并发访问。
-	mu        sync.Mutex
-	pending   map[string][]model.DataPoint // 设备名 -> 待上报遥测点
-	qualities map[string]model.Quality     // 设备名 -> 最近质量
+	// 以下由 Publish / DeviceOnline / DeviceOffline(来自不同 goroutine)与 flush 并发访问。
+	mu          sync.Mutex
+	pending     map[string][]model.DataPoint // 设备名 -> 待上报遥测点
+	qualities   map[string]model.Quality     // 设备名 -> 最近质量
+	connects    map[string]bool              // 待发送 connect 的设备名
+	disconnects map[string]bool              // 待发送 disconnect 的设备名
 
 	// connected 仅在 flush 中访问(flusher goroutine 串行,Close 等待其退出后再 flush)。
-	connected map[string]bool // 已发送 connect 的子设备名集合
+	connected map[string]bool
 
 	done      chan struct{}
 	flushDone chan struct{}
@@ -105,6 +108,8 @@ func New(cfg Config) (output.Output, error) {
 		flushInterval: flushInterval,
 		pending:       make(map[string][]model.DataPoint),
 		qualities:     make(map[string]model.Quality),
+		connects:      make(map[string]bool),
+		disconnects:   make(map[string]bool),
 		connected:     make(map[string]bool),
 		done:          make(chan struct{}),
 		flushDone:     make(chan struct{}),
@@ -132,6 +137,24 @@ func (o *thingsboardOutput) Publish(dp model.DataPoint) error {
 	return nil
 }
 
+// DeviceOnline 记录设备上线意图,由 flusher 在下一轮 flush 发 v1/gateway/connect。
+func (o *thingsboardOutput) DeviceOnline(deviceID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	name := o.deviceName(deviceID)
+	o.connects[name] = true
+	delete(o.disconnects, name)
+}
+
+// DeviceOffline 记录设备离线意图,由 flusher 在下一轮 flush 发 v1/gateway/disconnect。
+func (o *thingsboardOutput) DeviceOffline(deviceID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	name := o.deviceName(deviceID)
+	o.disconnects[name] = true
+	delete(o.connects, name)
+}
+
 // runFlusher 按 flushInterval 周期性 flush,直到 Close 关闭 done。
 func (o *thingsboardOutput) runFlusher() {
 	defer close(o.flushDone)
@@ -147,15 +170,30 @@ func (o *thingsboardOutput) runFlusher() {
 	}
 }
 
-// flush 把各设备缓冲的遥测点按时间戳聚合成一帧(数组多元素)上报,并上报 quality 属性。
+// flush 依次处理:disconnect → connect → 遥测(按时间戳聚合)→ quality 属性。
 func (o *thingsboardOutput) flush() {
 	o.mu.Lock()
 	pending := o.pending
 	o.pending = make(map[string][]model.DataPoint)
 	qualities := o.qualities
 	o.qualities = make(map[string]model.Quality)
+	connects := o.connects
+	o.connects = make(map[string]bool)
+	disconnects := o.disconnects
+	o.disconnects = make(map[string]bool)
 	o.mu.Unlock()
 
+	for name := range disconnects {
+		if err := o.publish(topicDisconnect, map[string]interface{}{"device": name}); err != nil {
+			slog.Error("thingsboard disconnect failed", "device", name, "err", err)
+		}
+		delete(o.connected, name)
+	}
+	for name := range connects {
+		if err := o.ensureConnected(name); err != nil {
+			slog.Error("thingsboard connect failed", "device", name, "err", err)
+		}
+	}
 	for name, points := range pending {
 		if len(points) == 0 {
 			continue

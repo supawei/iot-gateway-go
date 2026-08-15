@@ -66,3 +66,19 @@ func TestAttributesPayload(t *testing.T) {
 		t.Fatalf("attributes payload:\n got %s\nwant %s", got, want)
 	}
 }
+
+// TestDeviceNotifierIntents 验证 DeviceOnline/DeviceOffline 记录 connect/disconnect 意图,后者覆盖前者。
+func TestDeviceNotifierIntents(t *testing.T) {
+	o := &thingsboardOutput{
+		connects:    make(map[string]bool),
+		disconnects: make(map[string]bool),
+	}
+	o.DeviceOnline("sensor-01")
+	if !o.connects["sensor-01"] {
+		t.Fatal("online should record connect intent")
+	}
+	o.DeviceOffline("sensor-01")
+	if !o.disconnects["sensor-01"] || o.connects["sensor-01"] {
+		t.Fatal("offline should override online intent")
+	}
+}

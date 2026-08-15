@@ -193,27 +193,25 @@ thingsboard:
 
 `main.go` 的 `buildOutputs` 中:若配置了 `thingsboard.accessToken` 非空,则追加构造 `thingsboard.New(...)` 到 outputs 列表(与 mqtt 并列);未配置则跳过,保证向后兼容。
 
-## 9. 设备生命周期与下行通道(架构预留)
+## 9. 设备生命周期与下行通道
 
-当前 `Output` 只有 `Publish/Close`,没有"设备上线/离线"与"平台下发"两种事件。为支持完整对接,预留两条扩展路径,均不影响 MVP:
-
-1. **生命周期事件**:为 `Output` 增加可选能力接口(与驱动侧的 `Writer/Subscriber/Listener` 同套路):
+1. **生命周期事件(已实现)**:`Output` 增加了可选能力接口 `DeviceNotifier`(与驱动侧的 `Writer/Subscriber/Listener` 同套路):
    ```go
    type DeviceNotifier interface {
        DeviceOnline(deviceID string)
        DeviceOffline(deviceID string)
    }
    ```
-   scheduler 在状态变化时,若 output 实现该接口则调用;ThingsBoard 据此发 `connect/disconnect`。MVP 可先用"惰性 connect"替代,后续再切显式通知。
+   scheduler 在设备状态发生"上线/离线"转变时,对实现了该接口的输出调用对应方法;ThingsBoard 据此发 `v1/gateway/connect` / `v1/gateway/disconnect`(在 flusher 中与实际遥测一起 flush,顺序为 disconnect→connect→telemetry)。
 
-2. **下行反向通道**:平台 RPC/属性 → 网关 → 驱动 `Write`。需要一条从 output 回到 scheduler/driver 的通道(当前是单向的)。建议引入一个 `commandBus`(回调/通道),output 订阅 `v1/gateway/rpc`,解析后投递到 commandBus,scheduler 再按 deviceID 调驱动 `Writer`。此为 P2 阶段。
+2. **下行反向通道(预留)**:平台 RPC/属性 → 网关 → 驱动 `Write`。需要一条从 output 回到 scheduler/driver 的通道(当前是单向的)。建议引入一个 `commandBus`(回调/通道),output 订阅 `v1/gateway/rpc`,解析后投递到 commandBus,scheduler 再按 deviceID 调驱动 `Writer`。此为 P2 阶段。
 
 ## 10. 分阶段实施
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **P1(上送)** | thingsboard 输出插件:连接 + 惰性 connect + 遥测(扁平,一条一帧)+ quality 属性 | ✅ 已实现 |
-| P1.5 | 遥测微批聚合(按设备 + 定时 flush,已实现);显式生命周期(DeviceNotifier,待实现) | 🟡 部分 |
+| P1.5 | 遥测微批聚合(按设备 + 定时 flush)+ 显式生命周期(DeviceNotifier) | ✅ 已实现 |
 | **P2(下行)** | RPC/共享属性 → commandBus → 驱动 Write | 待实现 |
 | P3(优化) | 断网本地补传、deviceName 映射 | 待实现 |
 

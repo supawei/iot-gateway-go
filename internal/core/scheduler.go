@@ -10,6 +10,7 @@ import (
 
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 )
@@ -23,6 +24,7 @@ type Scheduler struct {
 	store         *store.Store
 	output        chan<- model.DataPoint
 	status        *status.Registry
+	notifiers     []output.DeviceNotifier
 	poolSize      int
 	baseCtx       context.Context
 	mu            sync.Mutex
@@ -33,11 +35,17 @@ type Scheduler struct {
 	collectCancel context.CancelFunc
 }
 
-func NewScheduler(st *store.Store, dataPoints chan<- model.DataPoint, poolSize int, statusReg *status.Registry) *Scheduler {
+func NewScheduler(st *store.Store, dataPoints chan<- model.DataPoint, poolSize int, statusReg *status.Registry, outputs []output.Output) *Scheduler {
 	if poolSize <= 0 {
 		poolSize = 16
 	}
-	return &Scheduler{store: st, output: dataPoints, poolSize: poolSize, status: statusReg}
+	var notifiers []output.DeviceNotifier
+	for _, out := range outputs {
+		if n, ok := out.(output.DeviceNotifier); ok {
+			notifiers = append(notifiers, n)
+		}
+	}
+	return &Scheduler{store: st, output: dataPoints, poolSize: poolSize, status: statusReg, notifiers: notifiers}
 }
 
 func (s *Scheduler) Run(ctx context.Context) error {
@@ -118,10 +126,10 @@ func (s *Scheduler) reload() error {
 				s.pushData(collectCtx, device.ID, dp)
 			}); err != nil {
 				slog.Error("subscribe failed", "device", device.ID, "err", err)
-				s.status.SetOffline(device.ID, err.Error())
+				s.markOffline(device.ID, err.Error())
 				continue
 			}
-			s.status.SetOnline(device.ID, time.Now())
+			s.markOnline(device.ID, time.Now())
 			continue
 		}
 		// 监听模式:网关被动 listen,设备连入上报数据即推送。
@@ -130,10 +138,10 @@ func (s *Scheduler) reload() error {
 				s.pushData(collectCtx, device.ID, dp)
 			}); err != nil {
 				slog.Error("listen failed", "device", device.ID, "err", err)
-				s.status.SetOffline(device.ID, err.Error())
+				s.markOffline(device.ID, err.Error())
 				continue
 			}
-			s.status.SetOnline(device.ID, time.Now())
+			s.markOnline(device.ID, time.Now())
 			continue
 		}
 		job := &deviceJob{
@@ -145,7 +153,7 @@ func (s *Scheduler) reload() error {
 		}
 		if _, err := c.AddJob(intervalSpec(device.IntervalMs), job); err != nil {
 			slog.Error("add cron job failed", "device", device.ID, "err", err)
-			s.status.SetOffline(device.ID, err.Error())
+			s.markOffline(device.ID, err.Error())
 		}
 	}
 
@@ -196,13 +204,13 @@ func (s *Scheduler) openDevice(ctx context.Context, device model.Device) (driver
 	connection, err := s.store.GetConnection(device.ConnectionID)
 	if err != nil {
 		slog.Error("get connection failed", "device", device.ID, "connection", device.ConnectionID, "err", err)
-		s.status.SetOffline(device.ID, "get connection failed: "+err.Error())
+		s.markOffline(device.ID, "get connection failed: "+err.Error())
 		return nil, false
 	}
 	drv, err := driver.Get(connection.Driver)
 	if err != nil {
 		slog.Error("driver not registered", "device", device.ID, "driver", connection.Driver, "err", err)
-		s.status.SetOffline(device.ID, err.Error())
+		s.markOffline(device.ID, err.Error())
 		return nil, false
 	}
 	conn, err := drv.Open(ctx, driver.OpenRequest{
@@ -213,7 +221,7 @@ func (s *Scheduler) openDevice(ctx context.Context, device model.Device) (driver
 	})
 	if err != nil {
 		slog.Error("open device failed", "device", device.ID, "err", err)
-		s.status.SetOffline(device.ID, "open failed: "+err.Error())
+		s.markOffline(device.ID, "open failed: "+err.Error())
 		return nil, false
 	}
 	s.mu.Lock()
@@ -241,9 +249,39 @@ func (s *Scheduler) startWorkers(taskCh <-chan collectTask) <-chan struct{} {
 	return done
 }
 
+// markOnline 记录设备在线;仅在状态由"离线/未知 → 在线"转变时通知输出。
+func (s *Scheduler) markOnline(deviceID string, t time.Time) {
+	prev, _ := s.status.Get(deviceID)
+	s.status.SetOnline(deviceID, t)
+	if !prev.Online {
+		s.notifyOnline(deviceID)
+	}
+}
+
+// markOffline 记录设备离线;仅在状态由"在线 → 离线"转变时通知输出(从未在线不通知)。
+func (s *Scheduler) markOffline(deviceID, errMsg string) {
+	prev, _ := s.status.Get(deviceID)
+	s.status.SetOffline(deviceID, errMsg)
+	if prev.Online {
+		s.notifyOffline(deviceID)
+	}
+}
+
+func (s *Scheduler) notifyOnline(deviceID string) {
+	for _, n := range s.notifiers {
+		n.DeviceOnline(deviceID)
+	}
+}
+
+func (s *Scheduler) notifyOffline(deviceID string) {
+	for _, n := range s.notifiers {
+		n.DeviceOffline(deviceID)
+	}
+}
+
 // pushData 把推送式(订阅/监听)采集到的 DataPoint 投递到输出,并刷新设备在线状态。
 func (s *Scheduler) pushData(ctx context.Context, deviceID string, dp model.DataPoint) {
-	s.status.SetOnline(deviceID, time.Now())
+	s.markOnline(deviceID, time.Now())
 	s.emit(ctx, dp)
 }
 
@@ -262,7 +300,7 @@ func (s *Scheduler) collectOnce(ctx context.Context, conn driver.Conn, points []
 	dataPoints, err := conn.Read(ctx, points)
 	if err != nil {
 		// 配置级错误(整批无效):记录离线,不发送
-		s.status.SetOffline(deviceID, err.Error())
+		s.markOffline(deviceID, err.Error())
 		slog.Error("read points failed", "points", len(points), "err", err)
 		return
 	}
@@ -276,9 +314,9 @@ func (s *Scheduler) collectOnce(ctx context.Context, conn driver.Conn, points []
 		}
 	}
 	if anyGood {
-		s.status.SetOnline(deviceID, time.Now())
+		s.markOnline(deviceID, time.Now())
 	} else {
-		s.status.SetOffline(deviceID, "all points bad")
+		s.markOffline(deviceID, "all points bad")
 	}
 }
 

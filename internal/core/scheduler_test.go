@@ -7,6 +7,7 @@ import (
 
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 )
@@ -93,7 +94,7 @@ func TestSchedulerSubscribes(t *testing.T) {
 	})
 
 	dataPoints := make(chan model.DataPoint, 10)
-	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry())
+	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry(), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
@@ -163,7 +164,7 @@ func TestSchedulerListens(t *testing.T) {
 	})
 
 	dataPoints := make(chan model.DataPoint, 10)
-	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry())
+	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry(), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
@@ -205,7 +206,7 @@ func TestSchedulerCollects(t *testing.T) {
 	})
 
 	dataPoints := make(chan model.DataPoint, 10)
-	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry())
+	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry(), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
@@ -238,7 +239,7 @@ func TestSchedulerReportsOnline(t *testing.T) {
 	})
 
 	reg := status.NewRegistry()
-	scheduler := NewScheduler(st, make(chan model.DataPoint, 10), 4, reg)
+	scheduler := NewScheduler(st, make(chan model.DataPoint, 10), 4, reg, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
 	defer cancel()
@@ -261,7 +262,7 @@ func TestSchedulerReportsOffline(t *testing.T) {
 	})
 
 	reg := status.NewRegistry()
-	scheduler := NewScheduler(st, make(chan model.DataPoint, 10), 4, reg)
+	scheduler := NewScheduler(st, make(chan model.DataPoint, 10), 4, reg, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Run(ctx)
 	defer cancel()
@@ -297,5 +298,41 @@ func waitForOffline(t *testing.T, reg *status.Registry, deviceID string) {
 			t.Fatal("timeout waiting for offline status")
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+// mockNotifier 实现 output.Output + output.DeviceNotifier,记录上线/离线通知。
+type mockNotifier struct {
+	online  []string
+	offline []string
+}
+
+func (m *mockNotifier) Publish(model.DataPoint) error { return nil }
+func (m *mockNotifier) Close() error                  { return nil }
+func (m *mockNotifier) DeviceOnline(id string)        { m.online = append(m.online, id) }
+func (m *mockNotifier) DeviceOffline(id string)       { m.offline = append(m.offline, id) }
+
+// TestSchedulerNotifiesTransitions 验证设备状态转变时才通知输出(不重复通知)。
+func TestSchedulerNotifiesTransitions(t *testing.T) {
+	reg := status.NewRegistry()
+	n := &mockNotifier{}
+	s := NewScheduler(nil, nil, 4, reg, []output.Output{n})
+
+	// 未知 → 在线:通知 online
+	s.markOnline("d1", time.Now())
+	// 在线 → 在线:不重复通知
+	s.markOnline("d1", time.Now())
+	// 在线 → 离线:通知 offline
+	s.markOffline("d1", "err")
+	// 离线 → 离线:不重复通知
+	s.markOffline("d1", "err")
+	// 未知 → 离线:从未在线,不通知
+	s.markOffline("d2", "err")
+
+	if len(n.online) != 1 || n.online[0] != "d1" {
+		t.Fatalf("online notifications: %v", n.online)
+	}
+	if len(n.offline) != 1 || n.offline[0] != "d1" {
+		t.Fatalf("offline notifications: %v", n.offline)
 	}
 }

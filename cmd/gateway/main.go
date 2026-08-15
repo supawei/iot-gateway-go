@@ -72,7 +72,7 @@ func main() {
 
 	schedulerDone := make(chan struct{})
 	go func() {
-		if err := core.NewScheduler(st, dataPoints, cfg.Scheduler.PoolSize, statusReg).Run(ctx); err != nil {
+		if err := core.NewScheduler(st, dataPoints, cfg.Scheduler.PoolSize, statusReg, outputs).Run(ctx); err != nil {
 			slog.Error("scheduler exited", "err", err)
 		}
 		close(schedulerDone)
