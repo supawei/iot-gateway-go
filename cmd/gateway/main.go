@@ -92,18 +92,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pipelineDone := make(chan struct{})
+	// pipelineDone := make(chan struct{})
 	go func() {
 		core.RunPipeline(ctx, dataPoints, outputs)
-		close(pipelineDone)
+		// close(pipelineDone)
 	}()
 
-	schedulerDone := make(chan struct{})
+	// schedulerDone := make(chan struct{})
 	go func() {
 		if err := core.NewScheduler(st, dataPoints, cfg.Scheduler.PoolSize, statusReg, valuesReg, outputs).Run(ctx); err != nil {
 			slog.Error("scheduler exited", "err", err)
 		}
-		close(schedulerDone)
+		// close(schedulerDone)
 	}()
 
 	// 根路由挂内嵌前端(SPA),/api/ 挂 REST 接口,单端口同时提供界面与 API。
@@ -130,8 +130,8 @@ func main() {
 	defer cancel()
 	server.Shutdown(shutdownCtx)
 
-	<-schedulerDone
-	<-pipelineDone
+	// <-schedulerDone
+	// <-pipelineDone
 	outputs.Close()
 }
 

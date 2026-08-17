@@ -33,6 +33,15 @@ type modbusListenDriver struct {
 	pool map[string]*sharedListener
 }
 
+// EndpointKey 归一化物理端点(监听地址):两个连接监听同一地址会 bind 冲突,保存时拒绝。
+func (*modbusListenDriver) EndpointKey(connection json.RawMessage) string {
+	cfg, err := parseConnConfig(connection)
+	if err != nil {
+		return ""
+	}
+	return "listen|" + cfg.Listen
+}
+
 // ConfigSchema 声明 Connection.config 结构。
 func (*modbusListenDriver) ConfigSchema() []driver.Field {
 	return []driver.Field{

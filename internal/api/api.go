@@ -88,11 +88,49 @@ func (a *API) createConnection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("connection id is required"))
 		return
 	}
+	if !a.checkEndpointConflict(w, conn) {
+		return
+	}
 	if err := a.store.SaveConnection(conn); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, conn)
+}
+
+// checkEndpointConflict 阻止两个 Connection 指向同一物理端点(同串口/同 DTU 地址):
+// 连接池按 ConnectionID 复用,重复端点意味着两条并发通道写同一条 485 总线,帧碰撞。
+// 驱动未注册/未实现 EndpointResolver/端点无法识别时跳过检查(保持旧行为,校验留给采集期)。
+// 返回 false 表示已写响应应终止。
+func (a *API) checkEndpointConflict(w http.ResponseWriter, conn model.Connection) bool {
+	drv, err := driver.Get(conn.Driver)
+	if err != nil {
+		return true
+	}
+	resolver, canResolve := drv.(driver.EndpointResolver)
+	if !canResolve {
+		return true
+	}
+	endpointKey := resolver.EndpointKey(conn.Config)
+	if endpointKey == "" {
+		return true
+	}
+	existing, err := a.store.ListConnections()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return false
+	}
+	for _, other := range existing {
+		if other.ID == conn.ID || other.Driver != conn.Driver {
+			continue
+		}
+		if resolver.EndpointKey(other.Config) == endpointKey {
+			writeError(w, http.StatusConflict, fmt.Errorf(
+				"endpoint already used by connection %q (%s)", other.ID, other.Name))
+			return false
+		}
+	}
+	return true
 }
 
 func (a *API) listConnections(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +157,9 @@ func (a *API) putConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.ID = r.PathValue("connectionId")
+	if !a.checkEndpointConflict(w, conn) {
+		return
+	}
 	if err := a.store.SaveConnection(conn); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

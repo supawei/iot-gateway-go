@@ -98,6 +98,14 @@ type Field struct {
 	ShowWhen    *ShowWhen `json:"showWhen,omitempty"`    // 显示条件
 }
 
+// EndpointResolver 是驱动的可选能力:从 Connection.config 计算物理端点标识
+// (串口路径/DTU 地址/server endpoint 等归一化后的 key)。网关据此阻止两个
+// Connection 指向同一物理总线:连接池按 ConnectionID 复用,重复端点会产生两条
+// 并发通道写同一条 485 总线,导致帧碰撞。返回空串表示无法识别,跳过检查。
+type EndpointResolver interface {
+	EndpointKey(config json.RawMessage) string
+}
+
 // SchemaProvider 是驱动的可选能力:声明 Connection.config 与 Device.params 的结构。
 // 未实现该能力的驱动,前端退化为原始 JSON 编辑。
 type SchemaProvider interface {

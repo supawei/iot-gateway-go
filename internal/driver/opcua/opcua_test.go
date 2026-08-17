@@ -257,3 +257,16 @@ func TestEncodeValue(t *testing.T) {
 		t.Fatal("float as bool should fail")
 	}
 }
+
+func TestEndpointKey(t *testing.T) {
+	drv := &opcuaDriver{}
+	if got := drv.EndpointKey(json.RawMessage(`{"endpoint":"opc.tcp://192.168.1.5:4840"}`)); got != "opcua|opc.tcp://192.168.1.5:4840" {
+		t.Errorf("EndpointKey=%q", got)
+	}
+	if got, want := drv.EndpointKey(json.RawMessage(`{"endpoint":" OPC.TCP://Server:4840 "}`)), "opcua|opc.tcp://server:4840"; got != want {
+		t.Errorf("normalized EndpointKey=%q want %q", got, want)
+	}
+	if got := drv.EndpointKey(json.RawMessage(`{"endpoint":""}`)); got != "" {
+		t.Errorf("missing endpoint should yield empty key, got %q", got)
+	}
+}

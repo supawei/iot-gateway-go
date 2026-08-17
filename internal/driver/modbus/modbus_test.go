@@ -267,3 +267,24 @@ func TestEncodeWriteValue(t *testing.T) {
 		t.Fatal("string value for int16 should fail")
 	}
 }
+
+func TestEndpointKey(t *testing.T) {
+	drv := &modbusDriver{}
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"tcp address", `{"mode":"tcp","address":"192.168.1.5:502"}`, "tcp|192.168.1.5:502"},
+		{"tcp address normalized", `{"mode":"tcp","address":"  Host.example.COM:502 "}`, "tcp|host.example.com:502"},
+		{"rtu serial port", `{"mode":"rtu","serialPort":"/dev/ttyS0"}`, "rtu|/dev/ttys0"},
+		{"rtu-over-tcp", `{"mode":"rtu-over-tcp","address":"10.0.0.7:9000"}`, "rtu-over-tcp|10.0.0.7:9000"},
+		{"invalid config", `{"mode":"tcp"`, ""},
+		{"unknown mode", `{"mode":"udp","address":"x"}`, ""},
+	}
+	for _, tc := range tests {
+		if got := drv.EndpointKey(json.RawMessage(tc.raw)); got != tc.want {
+			t.Errorf("%s: EndpointKey=%q want %q", tc.name, got, tc.want)
+		}
+	}
+}

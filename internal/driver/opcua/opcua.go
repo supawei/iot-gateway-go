@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,16 @@ func init() {
 type opcuaDriver struct {
 	mu   sync.Mutex
 	pool map[string]*sharedSession
+}
+
+// EndpointKey 归一化物理端点(server URL):两个连接指向同一 server 会各自建
+// session,虽不似总线那般冲突,但重复配置几乎必属误配,保存时同样拒绝。
+func (*opcuaDriver) EndpointKey(connection json.RawMessage) string {
+	cfg, err := parseConnConfig(connection)
+	if err != nil {
+		return ""
+	}
+	return "opcua|" + strings.ToLower(strings.TrimSpace(cfg.Endpoint))
 }
 
 // ConfigSchema 声明 Connection.config 结构。

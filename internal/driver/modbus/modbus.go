@@ -79,6 +79,23 @@ func (*modbusDriver) ParamSchema() []driver.Field {
 	}
 }
 
+// EndpointKey 归一化物理端点:tcp/rtu-over-tcp 按地址,rtu 按串口路径。
+// 同一地址/串口建两个连接会并发写同一条总线,须在保存时拒绝。
+func (*modbusDriver) EndpointKey(connection json.RawMessage) string {
+	cfg, err := parseConnConfig(connection)
+	if err != nil {
+		return ""
+	}
+	switch cfg.Mode {
+	case "tcp", "rtu-over-tcp":
+		return cfg.Mode + "|" + strings.ToLower(strings.TrimSpace(cfg.Address))
+	case "rtu":
+		return "rtu|" + strings.ToLower(strings.TrimSpace(cfg.SerialPort))
+	default:
+		return ""
+	}
+}
+
 func (d *modbusDriver) Open(ctx context.Context, req driver.OpenRequest) (driver.Conn, error) {
 	cfg, err := parseConnConfig(req.ConnConfig)
 	if err != nil {

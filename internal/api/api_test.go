@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -110,6 +111,61 @@ func TestDeleteConnectionBlockedByDevice(t *testing.T) {
 	rec := doRequest(t, handler, "DELETE", "/api/v1/connections/conn-1", nil)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("delete referenced connection: got %d want %d", rec.Code, http.StatusConflict)
+	}
+}
+
+// endpointDriverMock 按配置里的 endpoint 字段返回端点 key,模拟支持冲突检测的驱动。
+type endpointDriverMock struct{}
+
+func (*endpointDriverMock) Open(context.Context, driver.OpenRequest) (driver.Conn, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (*endpointDriverMock) EndpointKey(config json.RawMessage) string {
+	var cfg struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := json.Unmarshal(config, &cfg); err != nil || cfg.Endpoint == "" {
+		return ""
+	}
+	return cfg.Endpoint
+}
+
+// TestCreateConnectionEndpointConflict 验证同驱动两个连接指向同一物理端点被 409 拒绝;
+// 改指向其他端点、以及更新自身(同 ID)不受影响。
+func TestCreateConnectionEndpointConflict(t *testing.T) {
+	driver.Register("mock-endpoint", &endpointDriverMock{})
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
+	first := model.Connection{ID: "conn-a", Name: "a", Driver: "mock-endpoint",
+		Config: json.RawMessage(`{"endpoint":"/dev/ttyS0"}`)}
+	if rec := doRequest(t, handler, "POST", "/api/v1/connections", first); rec.Code != http.StatusCreated {
+		t.Fatalf("create first: got %d", rec.Code)
+	}
+
+	duplicate := model.Connection{ID: "conn-b", Name: "b", Driver: "mock-endpoint",
+		Config: json.RawMessage(`{"endpoint":"/dev/ttyS0"}`)}
+	if rec := doRequest(t, handler, "POST", "/api/v1/connections", duplicate); rec.Code != http.StatusConflict {
+		t.Fatalf("create duplicate endpoint: got %d want %d", rec.Code, http.StatusConflict)
+	}
+
+	other := model.Connection{ID: "conn-b", Name: "b", Driver: "mock-endpoint",
+		Config: json.RawMessage(`{"endpoint":"/dev/ttyS1"}`)}
+	if rec := doRequest(t, handler, "POST", "/api/v1/connections", other); rec.Code != http.StatusCreated {
+		t.Fatalf("create other endpoint: got %d", rec.Code)
+	}
+
+	// 更新自身(改名,端点不变)不应误判冲突
+	first.Name = "renamed"
+	if rec := doRequest(t, handler, "PUT", "/api/v1/connections/conn-a", first); rec.Code != http.StatusOK {
+		t.Fatalf("update self: got %d want %d", rec.Code, http.StatusOK)
+	}
+
+	// 把 conn-b 改到 conn-a 的端点应被拒绝
+	other.Config = json.RawMessage(`{"endpoint":"/dev/ttyS0"}`)
+	if rec := doRequest(t, handler, "PUT", "/api/v1/connections/conn-b", other); rec.Code != http.StatusConflict {
+		t.Fatalf("update to duplicate endpoint: got %d want %d", rec.Code, http.StatusConflict)
 	}
 }
 
