@@ -32,11 +32,11 @@ const (
 )
 
 // Config 是 smardaten-iot 平台输出的配置（存 SQLite，经 Web UI 配置）。
-// 注意：ProtoVer/PubMode 使用 string 类型，因为 Web UI 的 FieldEnum 控件发送字符串值。
+// ProtoVer/PubMode 使用 flexInt 类型，兼容 Web UI 发送的数字或字符串。
 type Config struct {
 	Broker   string `json:"broker"`   // MQTT broker 地址
 	Port     int    `json:"port"`     // MQTT 端口
-	ProtoVer string `json:"protoVer"` // 311(3.1.1) 或 5
+	ProtoVer flexInt `json:"protoVer"` // 311(3.1.1) 或 5
 	Username string `json:"username"` // MQTT 用户名
 	Password string `json:"password"` // MQTT 密码
 	ClientID string `json:"clientId"` // MQTT Client ID
@@ -45,9 +45,32 @@ type Config struct {
 	IotRsaKeyPath string `json:"iotRsaKeyPath"` // RSA 公钥路径（PEM SPKI）
 	IotConfigPath string `json:"iotConfigPath"` // application.json 落盘路径
 
-	PubMode       string `json:"pubMode"`       // 0=及时上报, 1=变化上报
-	MaxPubTime    int    `json:"maxPubTime"`    // 变化上报模式最大周期间隔（秒）
-	FlushInterval string `json:"flushInterval"` // 数据聚合 flush 间隔
+	PubMode       flexInt `json:"pubMode"`       // 0=及时上报, 1=变化上报
+	MaxPubTime    int     `json:"maxPubTime"`    // 变化上报模式最大周期间隔（秒）
+	FlushInterval string  `json:"flushInterval"` // 数据聚合 flush 间隔
+}
+
+// flexInt 兼容 JSON 数字和字符串，用于 FieldEnum 配置字段。
+type flexInt int
+
+func (f *flexInt) UnmarshalJSON(data []byte) error {
+	// 尝试数字
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		*f = flexInt(n)
+		return nil
+	}
+	// 尝试字符串
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return fmt.Errorf("flexInt: invalid number %q", s)
+		}
+		*f = flexInt(n)
+		return nil
+	}
+	return fmt.Errorf("flexInt: expected number or string, got %s", string(data))
 }
 
 // init 注册 smardaten-iot 输出类型。
@@ -129,9 +152,9 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 		cfg.IotConfigPath = "config/application.json"
 	}
 
-	// 解析字符串配置值
-	protoVer, _ := strconv.Atoi(cfg.ProtoVer)
-	pubMode, _ := strconv.Atoi(cfg.PubMode)
+	// 解析配置值
+	protoVer := int(cfg.ProtoVer)
+	pubMode := int(cfg.PubMode)
 	maxPubTime := cfg.MaxPubTime
 	if maxPubTime <= 0 {
 		maxPubTime = defaultMaxPubTime
