@@ -12,13 +12,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 )
 
 const (
-	httpTimeout   = 30 * time.Second
-	maxRedirects  = 10
-	tmpConfigPath = "/tmp/application.json"
+	httpTimeout  = 30 * time.Second
+	maxRedirects = 10
 )
 
 // httpDownloader 负责 HTTP 下载，支持 RSA 鉴权。
@@ -58,7 +58,8 @@ func newHTTPDownloader(iotAppID, rsaKeyPath string) (*httpDownloader, error) {
 	return &httpDownloader{appID: encrypted, client: client}, nil
 }
 
-// downloadConfig 下载配置文件到临时路径，校验 JSON 合法性后覆盖到目标路径。
+// downloadConfig 下载配置文件，校验 JSON 合法性后原子覆盖到目标路径。
+// 临时文件写在目标文件同目录下（同文件系统），避免跨设备 rename 报 EXDEV。
 func (d *httpDownloader) downloadConfig(url, targetPath string) error {
 	slog.Info("downloading config", "url", url)
 	data, err := d.download(url)
@@ -71,12 +72,20 @@ func (d *httpDownloader) downloadConfig(url, targetPath string) error {
 		return fmt.Errorf("downloaded config is not valid JSON")
 	}
 
-	// 先写临时文件
-	if err := os.WriteFile(tmpConfigPath, data, 0644); err != nil {
+	// 确保目标目录存在
+	if dir := filepath.Dir(targetPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("mkdir config dir: %w", err)
+		}
+	}
+
+	// 写到目标目录下的临时文件，再原子 rename 覆盖（同文件系统）
+	tmpPath := targetPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return fmt.Errorf("write tmp config: %w", err)
 	}
-	// 覆盖到目标路径
-	if err := os.Rename(tmpConfigPath, targetPath); err != nil {
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		os.Remove(tmpPath) // 清理残留临时文件
 		return fmt.Errorf("rename config: %w", err)
 	}
 	slog.Info("config saved", "path", targetPath)
