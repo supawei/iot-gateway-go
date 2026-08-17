@@ -176,7 +176,7 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 	}
 
 	// 构建 MQTT 连接
-	client, err := connectMQTT(cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, cfg.Port, protoVer)
+	client, err := connectMQTT(cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, gatewayID, cfg.Port, protoVer)
 	if err != nil {
 		return nil, fmt.Errorf("mqtt connect: %w", err)
 	}
@@ -272,7 +272,7 @@ func (o *platformOutput) Close() error {
 // ---------- MQTT 连接 ----------
 
 // connectMQTT 建立到平台的 MQTT 连接。
-func connectMQTT(broker, clientID, username, password string, port, protoVer int) (pahomqtt.Client, error) {
+func connectMQTT(broker, clientID, username, password, gatewayID string, port, protoVer int) (pahomqtt.Client, error) {
 	opts := pahomqtt.NewClientOptions()
 
 	if port > 0 {
@@ -281,7 +281,8 @@ func connectMQTT(broker, clientID, username, password string, port, protoVer int
 	opts.AddBroker(broker)
 
 	if clientID == "" {
-		clientID = "gw-dev-manage-" + broker
+		// 用 gatewayID 生成唯一 clientID，避免网关 ID 变更时新旧连接冲突
+		clientID = "gw-dev-manage-" + gatewayID
 	}
 	opts.SetClientID(clientID)
 
