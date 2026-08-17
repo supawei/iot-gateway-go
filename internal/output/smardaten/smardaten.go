@@ -72,14 +72,15 @@ func init() {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			return nil, fmt.Errorf("smardaten-iot config: %w", err)
 		}
-		return New(cfg, bc.GatewayID, bc.Write)
+		return New(cfg, bc.GatewayID, bc.Write, bc.Store)
 	})
 }
 
 // platformOutput 实现 output.Output + output.DeviceNotifier。
 type platformOutput struct {
 	gatewayID string
-	write     output.WriteFunc // 下行写回调
+	write     output.WriteFunc    // 下行写回调
+	store     output.StoreAccessor // 配置同步（application.json → 网关配置）
 
 	client pahomqtt.Client
 	qos    byte
@@ -107,7 +108,7 @@ type platformOutput struct {
 }
 
 // New 构造 smardaten-iot 平台输出。
-func New(cfg Config, gatewayID string, write output.WriteFunc) (output.Output, error) {
+func New(cfg Config, gatewayID string, write output.WriteFunc, store output.StoreAccessor) (output.Output, error) {
 	if cfg.Broker == "" {
 		return nil, fmt.Errorf("smardaten-iot broker is required")
 	}
@@ -148,6 +149,7 @@ func New(cfg Config, gatewayID string, write output.WriteFunc) (output.Output, e
 	o := &platformOutput{
 		gatewayID:     gatewayID,
 		write:         write,
+		store:         store,
 		client:        client,
 		qos:           defaultQoS,
 		cfg:           cfg,
@@ -511,6 +513,9 @@ func (o *platformOutput) loadConfig() error {
 
 	o.topics.buildFrom(cfg)
 	slog.Info("application.json loaded", "devices", len(cfg.Devices), "controllers", len(cfg.Controllers))
+
+	// 同步到网关配置（自动创建/更新 Connection 和 Device）
+	o.syncToGateway(cfg)
 
 	// 重新订阅动态 topic（服务调用）
 	o.resubscribeServices()

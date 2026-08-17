@@ -6,18 +6,28 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+
+	"iot-gateway-go/internal/model"
 )
 
 // BuildContext 是构造输出所需的网关上下文:与输出自身配置无关的部分。
-// 由 main 注入(gatewayID 用于 topic/标识,Write 用于下行写回设备)。
+// 由 main 注入(gatewayID 用于 topic/标识,Write 用于下行写回设备,Store 用于插件自动同步配置)。
 type BuildContext struct {
 	GatewayID string
 	Write     WriteFunc
+	Store     StoreAccessor
 }
 
 // WriteFunc 是下行写回调(如 ThingsBoard 共享属性 / RPC → 设备写)。
 // 由 main 注入,最终落到 core.WritePoint。
 type WriteFunc func(ctx context.Context, deviceID, point string, value interface{}) error
+
+// StoreAccessor 是插件访问网关配置存储的接口。
+// 实现者为 *store.Store;只暴露插件所需的写入方法,避免插件直接依赖 store 包。
+type StoreAccessor interface {
+	SaveConnection(conn model.Connection) error
+	SaveDevice(device model.Device) error
+}
 
 // Descriptor 描述一种输出插件类型及其配置 schema,供 Web UI 渲染表单。
 type Descriptor struct {

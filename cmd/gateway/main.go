@@ -186,7 +186,7 @@ func buildOutputs(st *store.Store, write output.WriteFunc) output.BuildFunc {
 		if err != nil {
 			return nil, err
 		}
-		bc := output.BuildContext{GatewayID: gatewayID, Write: write}
+		bc := output.BuildContext{GatewayID: gatewayID, Write: write, Store: st}
 		configs, err := st.ListOutputs()
 		if err != nil {
 			return nil, err

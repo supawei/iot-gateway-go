@@ -1,0 +1,522 @@
+package smardaten
+
+import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"math"
+	"sort"
+	"strconv"
+
+	"iot-gateway-go/internal/model"
+)
+
+// ---------- 类型映射表 ----------
+
+// controllerTypeToDriver 将平台 controller type 映射为网关驱动名。
+// 仅覆盖本次重构要求的类型：1/2/3/21/23/24。
+func controllerTypeToDriver(ct string) string {
+	switch ct {
+	case "1":
+		return "modbus" // modbus-rtu
+	case "2":
+		return "modbus" // modbus-tcp
+	case "3":
+		return "opcua"
+	case "21":
+		return "modbus" // dlt645-2007（暂用 modbus 驱动承载，后续可替换为专用驱动）
+	case "23":
+		return "modbus" // modbus-rtu-over-tcp
+	case "24":
+		return "modbus" // dlt645-1997
+	default:
+		return ""
+	}
+}
+
+// controllerTypeToMode 将平台 controller type 映射为网关 modbus mode。
+func controllerTypeToMode(ct string) string {
+	switch ct {
+	case "1":
+		return "rtu"
+	case "2":
+		return "tcp"
+	case "23":
+		return "rtu-over-tcp"
+	default:
+		return ""
+	}
+}
+
+// comToSerialPort 将平台 com 编号映射为 Linux 串口设备路径。
+func comToSerialPort(com int) string {
+	switch com {
+	case 1:
+		return "/dev/ttyS2"
+	case 2:
+		return "/dev/ttyS3"
+	case 3:
+		return "/dev/ttyS4"
+	case 4:
+		return "/dev/ttyS5"
+	default:
+		return fmt.Sprintf("/dev/ttyS%d", com+1)
+	}
+}
+
+// parityToString 将平台 parity 数字映射为网关字符串。
+func parityToString(parity int) string {
+	switch parity {
+	case 0:
+		return "N"
+	case 1:
+		return "O"
+	case 2:
+		return "E"
+	default:
+		return "N"
+	}
+}
+
+// functionCodeToName 将平台 functionCode 数字映射为网关 pollBlocks function 名。
+func functionCodeToName(fc int) string {
+	switch fc {
+	case 1:
+		return "coil"
+	case 2:
+		return "discrete"
+	case 3:
+		return "holding"
+	case 4:
+		return "input"
+	default:
+		return "holding"
+	}
+}
+
+// dataTypeToModel 将平台 dataType 枚举映射为 model.DataType。
+func dataTypeToModel(dt int) model.DataType {
+	switch dt {
+	case 0:
+		return model.DataTypeBool
+	case 1:
+		return model.DataTypeInt16
+	case 2:
+		return model.DataTypeInt32
+	case 3:
+		return model.DataTypeInt64
+	case 4:
+		return model.DataTypeFloat
+	case 5:
+		return model.DataTypeDouble
+	case 6:
+		return model.DataTypeString
+	default:
+		return model.DataTypeInt16
+	}
+}
+
+// dataTypeWidth 返回 dataType 占用的寄存器数量（modbus 专用）。
+func dataTypeWidth(dt int) int {
+	switch dt {
+	case 0: // BOOL → 1 register (coil)
+		return 1
+	case 1: // INT16 → 1 register
+		return 1
+	case 2: // INT32 → 2 registers
+		return 2
+	case 3: // INT64 → 4 registers
+		return 4
+	case 4: // FLOAT → 2 registers
+		return 2
+	case 5: // DOUBLE → 4 registers
+		return 4
+	default:
+		return 1
+	}
+}
+
+// ---------- 配置转换 ----------
+
+// syncToGateway 将 application.json 中的控制器和设备同步到网关 SQLite。
+// 以 controllerId/deviceId 为 key 做 upsert，不覆盖网关本地独有的配置。
+func (o *platformOutput) syncToGateway(cfg *ApplicationConfig) {
+	if o.store == nil {
+		return
+	}
+
+	// 先同步控制器 → Connection
+	syncedControllers := make(map[string]bool)
+	for _, ctrl := range cfg.Controllers {
+		if ctrl.Specs.Enable != 1 {
+			continue
+		}
+		conn, err := convertControllerToConnection(ctrl)
+		if err != nil {
+			slog.Warn("skip controller, convert failed", "controllerId", ctrl.ControllerID, "err", err)
+			continue
+		}
+		if err := o.store.SaveConnection(conn); err != nil {
+			slog.Error("save connection failed", "controllerId", ctrl.ControllerID, "err", err)
+			continue
+		}
+		syncedControllers[ctrl.ControllerID] = true
+		slog.Info("synced controller", "id", conn.ID, "name", conn.Name, "driver", conn.Driver)
+	}
+
+	// 再同步设备 → Device
+	for _, dev := range cfg.Devices {
+		ctrl, ok := findController(cfg.Controllers, dev.ControllerID)
+		if !ok {
+			slog.Warn("skip device, controller not found", "deviceId", dev.DeviceID, "controllerId", dev.ControllerID)
+			continue
+		}
+		if !syncedControllers[dev.ControllerID] {
+			slog.Warn("skip device, controller not synced", "deviceId", dev.DeviceID, "controllerId", dev.ControllerID)
+			continue
+		}
+
+		device, err := convertDevice(dev, ctrl)
+		if err != nil {
+			slog.Warn("skip device, convert failed", "deviceId", dev.DeviceID, "err", err)
+			continue
+		}
+		if err := o.store.SaveDevice(device); err != nil {
+			slog.Error("save device failed", "deviceId", dev.DeviceID, "err", err)
+			continue
+		}
+		slog.Info("synced device", "id", device.ID, "name", device.Name, "points", len(device.Points))
+	}
+}
+
+// findController 在控制器列表中按 ID 查找。
+func findController(controllers []PlatformController, id string) (PlatformController, bool) {
+	for _, c := range controllers {
+		if c.ControllerID == id {
+			return c, true
+		}
+	}
+	return PlatformController{}, false
+}
+
+// convertControllerToConnection 将平台控制器转换为网关 Connection。
+func convertControllerToConnection(ctrl PlatformController) (model.Connection, error) {
+	driverName := controllerTypeToDriver(ctrl.Type)
+	if driverName == "" {
+		return model.Connection{}, fmt.Errorf("unsupported controller type %q", ctrl.Type)
+	}
+
+	connConfig, err := convertControllerConfig(ctrl)
+	if err != nil {
+		return model.Connection{}, fmt.Errorf("convert config: %w", err)
+	}
+
+	configJSON, err := json.Marshal(connConfig)
+	if err != nil {
+		return model.Connection{}, fmt.Errorf("marshal config: %w", err)
+	}
+
+	return model.Connection{
+		ID:     ctrl.ControllerID,
+		Name:   ctrl.Specs.Name,
+		Driver: driverName,
+		Config: configJSON,
+	}, nil
+}
+
+// convertControllerConfig 按 controller type 转换 configuration 为网关 Connection.Config。
+func convertControllerConfig(ctrl PlatformController) (map[string]interface{}, error) {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(ctrl.Specs.Configuration, &raw); err != nil {
+		return nil, fmt.Errorf("parse configuration: %w", err)
+	}
+
+	switch ctrl.Type {
+	case "1": // modbus-rtu
+		return convertModbusRTUConfig(raw), nil
+	case "2", "23": // modbus-tcp, modbus-rtu-over-tcp
+		return convertModbusTCPConfig(raw, ctrl.Type), nil
+	case "3": // opcua
+		return convertOPCUAConfig(raw), nil
+	case "21", "24": // dlt645
+		return convertDLT645Config(raw), nil
+	default:
+		// 未知类型：原样透传
+		return raw, nil
+	}
+}
+
+// convertModbusRTUConfig 转换 modbus-rtu 配置。
+func convertModbusRTUConfig(raw map[string]interface{}) map[string]interface{} {
+	cfg := map[string]interface{}{
+		"mode": "rtu",
+	}
+
+	if com, ok := getInt(raw, "com"); ok {
+		cfg["serialPort"] = comToSerialPort(com)
+	}
+	if b, ok := getInt(raw, "baudRate"); ok {
+		cfg["baudRate"] = b
+	}
+	if d, ok := getInt(raw, "dataBits"); ok {
+		cfg["dataBits"] = d
+	}
+	if s, ok := getInt(raw, "stopBits"); ok {
+		cfg["stopBits"] = s
+	}
+	if p, ok := getInt(raw, "parity"); ok {
+		cfg["parity"] = parityToString(p)
+	}
+	if t, ok := getInt(raw, "timeOut"); ok {
+		cfg["timeout"] = formatDuration(t)
+	}
+
+	return cfg
+}
+
+// convertModbusTCPConfig 转换 modbus-tcp / modbus-rtu-over-tcp 配置。
+func convertModbusTCPConfig(raw map[string]interface{}, ctrlType string) map[string]interface{} {
+	cfg := map[string]interface{}{
+		"mode": controllerTypeToMode(ctrlType),
+	}
+
+	ip, _ := raw["ip"].(string)
+	port, _ := getInt(raw, "port")
+	if ip != "" && port > 0 {
+		cfg["address"] = fmt.Sprintf("%s:%d", ip, port)
+	} else if ip != "" {
+		cfg["address"] = ip + ":502"
+	}
+
+	if t, ok := getInt(raw, "timeOut"); ok {
+		cfg["timeout"] = formatDuration(t)
+	}
+
+	return cfg
+}
+
+// convertOPCUAConfig 转换 OPC UA 配置。
+func convertOPCUAConfig(raw map[string]interface{}) map[string]interface{} {
+	cfg := map[string]interface{}{
+		"mode": "poll",
+	}
+
+	ip, _ := raw["ip"].(string)
+	port, _ := getInt(raw, "port")
+	if ip != "" && port > 0 {
+		cfg["endpoint"] = fmt.Sprintf("opc.tcp://%s:%d", ip, port)
+	} else if ip != "" {
+		cfg["endpoint"] = fmt.Sprintf("opc.tcp://%s:4840", ip)
+	}
+
+	anonymous, _ := getInt(raw, "anonymous")
+	if anonymous == 0 {
+		if u, ok := raw["userName"].(string); ok && u != "" {
+			cfg["username"] = u
+		}
+		if p, ok := raw["passwd"].(string); ok && p != "" {
+			cfg["password"] = p
+		}
+	}
+
+	cfg["securityMode"] = "none"
+
+	if t, ok := getInt(raw, "timeOut"); ok {
+		cfg["timeout"] = formatDuration(t)
+	}
+
+	return cfg
+}
+
+// convertDLT645Config 转换 DLT645 配置。
+func convertDLT645Config(raw map[string]interface{}) map[string]interface{} {
+	cfg := map[string]interface{}{
+		"mode": "tcp",
+	}
+
+	ip, _ := raw["ip"].(string)
+	port, _ := getInt(raw, "port")
+	if ip != "" && port > 0 {
+		cfg["address"] = fmt.Sprintf("%s:%d", ip, port)
+	}
+
+	if t, ok := getInt(raw, "timeOut"); ok {
+		cfg["timeout"] = formatDuration(t)
+	}
+
+	return cfg
+}
+
+// convertDevice 将平台设备转换为网关 Device。
+func convertDevice(dev PlatformDevice, ctrl PlatformController) (model.Device, error) {
+	// 构建 Points：从 sensorList 中筛选该设备 properties 引用的点位
+	pointIDs := make(map[string]bool)
+	for _, prop := range dev.Properties {
+		pointIDs[prop.PointID] = true
+	}
+
+	points := make([]model.Point, 0, len(pointIDs))
+	for _, sensor := range ctrl.SensorList {
+		if !pointIDs[sensor.PointID] {
+			continue
+		}
+		point := model.Point{
+			Name:    sensor.PointID,
+			Address: sensor.ItemName,
+			DataType: dataTypeToModel(sensor.DataType),
+			Scale:   0,
+		}
+		points = append(points, point)
+	}
+
+	// 构建 Device.Params：从 controller configuration 提取设备级参数
+	params := convertDeviceParams(ctrl, points)
+
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return model.Device{}, fmt.Errorf("marshal params: %w", err)
+	}
+
+	// 采集周期
+	intervalMs := ctrl.Specs.Period * 1000
+	if intervalMs <= 0 {
+		intervalMs = 5000 // 默认 5s
+	}
+
+	return model.Device{
+		ID:           dev.DeviceID,
+		Name:         dev.DeviceID, // 用 deviceId 作为名称
+		ConnectionID: ctrl.ControllerID,
+		Params:      paramsJSON,
+		Points:      points,
+		IntervalMs:  intervalMs,
+		Enabled:     true,
+	}, nil
+}
+
+// convertDeviceParams 从 controller configuration 提取设备级参数。
+func convertDeviceParams(ctrl PlatformController, points []model.Point) map[string]interface{} {
+	params := make(map[string]interface{})
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(ctrl.Specs.Configuration, &raw); err != nil {
+		return params
+	}
+
+	// slaveId：从 controller 级移到 device 级
+	if slaveID, ok := getInt(raw, "slaveId"); ok {
+		params["slaveId"] = slaveID
+	}
+
+	// pollBlocks：从 functionCode + sensorList 计算
+	if fc, ok := getInt(raw, "functionCode"); ok {
+		params["pollBlocks"] = buildPollBlocks(fc, points)
+	}
+
+	return params
+}
+
+// buildPollBlocks 根据功能码和点位列表构建 pollBlocks。
+// 将连续寄存器地址合并为一个 block，以支持批量读取。
+func buildPollBlocks(functionCode int, points []model.Point) []map[string]interface{} {
+	if len(points) == 0 {
+		return nil
+	}
+
+	type addrRange struct {
+		start int
+		end   int
+	}
+
+	// 解析每个点位的地址和宽度，计算寄存器范围
+	ranges := make([]addrRange, 0, len(points))
+	for _, p := range points {
+		addr, err := strconv.Atoi(p.Address)
+		if err != nil {
+			continue
+		}
+		width := dataTypeWidthForPoint(p.DataType)
+		ranges = append(ranges, addrRange{start: addr, end: addr + width - 1})
+	}
+
+	if len(ranges) == 0 {
+		return nil
+	}
+
+	// 按 start 排序
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i].start < ranges[j].start })
+
+	// 合并重叠或相邻（间隙 ≤16）的范围
+	merged := []addrRange{ranges[0]}
+	for _, r := range ranges[1:] {
+		last := &merged[len(merged)-1]
+		if r.start <= last.end+16 {
+			if r.end > last.end {
+				last.end = r.end
+			}
+		} else {
+			merged = append(merged, r)
+		}
+	}
+
+	blocks := make([]map[string]interface{}, 0, len(merged))
+	for _, m := range merged {
+		blocks = append(blocks, map[string]interface{}{
+			"function": functionCodeToName(functionCode),
+			"start":    m.start,
+			"count":    m.end - m.start + 1,
+		})
+	}
+
+	return blocks
+}
+
+// dataTypeWidthForPoint 根据 model.DataType 返回寄存器宽度。
+func dataTypeWidthForPoint(dt model.DataType) int {
+	switch dt {
+	case model.DataTypeBool, model.DataTypeInt16, model.DataTypeUInt16:
+		return 1
+	case model.DataTypeInt32, model.DataTypeUInt32, model.DataTypeFloat:
+		return 2
+	case model.DataTypeInt64, model.DataTypeDouble:
+		return 4
+	default:
+		return 1
+	}
+}
+
+// ---------- 工具函数 ----------
+
+// getInt 从 map 中获取 int 值（兼容 JSON 反序列化的 float64）。
+func getInt(m map[string]interface{}, key string) (int, bool) {
+	v, ok := m[key]
+	if !ok {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(math.Round(n)), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(i), true
+	}
+	return 0, false
+}
+
+// formatDuration 将毫秒数格式化为 Go duration 字符串。
+func formatDuration(ms int) string {
+	if ms <= 0 {
+		return "1s"
+	}
+	d := float64(ms) / 1000.0
+	// 去掉尾随零
+	s := strconv.FormatFloat(d, 'f', -1, 64)
+	return s + "s"
+}
