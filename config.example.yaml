@@ -9,29 +9,33 @@ http:
 #   enabled: true      # 显式 false 关闭鉴权(逃生舱)
 #   sessionTtl: "24h"  # 管理员会话有效期
 
-mqtt:
-  broker: "tcp://127.0.0.1:1883"
-  clientId: "iot-gateway-gw-01"
-  qos: 1
-
-# ThingsBoard 平台对接(可选;配置 broker + accessToken 后启用)
+# 北向输出已迁移到 SQLite,通过 Web UI 配置(无需写在 yaml 里)。
+# 下方 mqtt / thingsboard / tdengine 段仅在「旧版本升级」时用于一次性迁移:
+# 首次启动时若输出表为空且下方有配置,会自动导入 SQLite 并标记迁移完成,
+# 之后一律以 Web UI 中的配置为准,改 yaml 不再生效。
+# mqtt:
+#   broker: "tcp://127.0.0.1:1883"
+#   clientId: "iot-gateway-gw-01"
+#   qos: 1
+#
+# # ThingsBoard 平台对接
 # thingsboard:
 #   broker: "tcp://tb.example.com:1883"
 #   accessToken: "gateway-access-token"
 #   clientId: "iot-gateway-tb"
 #   qos: 1
-#   deviceNamePrefix: ""   # 子设备名前缀,默认空
-#   reportQuality: true    # 是否上报 quality 属性,默认 true
-#   flushInterval: "200ms" # 微批聚合 flush 间隔,默认 200ms
-
-# TDengine 时序库对接(可选;配置 url 后启用,经 taosAdapter REST 写入)
+#   deviceNamePrefix: ""
+#   reportQuality: true
+#   flushInterval: "200ms"
+#
+# # TDengine 时序库对接
 # tdengine:
-#   url: "http://127.0.0.1:6041"  # taosAdapter REST 地址
-#   username: "root"               # 默认 root
-#   password: "taosdata"           # 默认 taosdata
-#   database: "iot_gateway"        # 库名,默认 iot_gateway
-#   stable: "data_points"          # 超级表名,默认 data_points
-#   flushInterval: "1s"            # 微批聚合 flush 间隔,默认 1s
+#   url: "http://127.0.0.1:6041"
+#   username: "root"
+#   password: "taosdata"
+#   database: "iot_gateway"
+#   stable: "data_points"
+#   flushInterval: "1s"
 
 storage:
   sqlitePath: "./gateway.db"

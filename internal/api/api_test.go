@@ -7,12 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"iot-gateway-go/internal/auth"
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 	"iot-gateway-go/internal/values"
@@ -26,7 +28,7 @@ func newTestAPI(t *testing.T) *API {
 	}
 	t.Cleanup(func() { st.Close() })
 	// 默认关闭鉴权,保持既有测试行为(与历史接口一致);鉴权相关测试单独开启。
-	return New(st, status.NewRegistry(), values.NewRegistry(), nil, false)
+	return New(st, status.NewRegistry(), values.NewRegistry(), nil, false, nil)
 }
 
 func doRequest(t *testing.T, handler http.Handler, method, path string, body interface{}) *httptest.ResponseRecorder {
@@ -435,7 +437,7 @@ func TestStatusEndpoints(t *testing.T) {
 	reg.SetOnline("d1", time.Now())
 	reg.SetOffline("d2", "connection refused")
 
-	handler := New(st, reg, values.NewRegistry(), nil, false).Routes()
+	handler := New(st, reg, values.NewRegistry(), nil, false, nil).Routes()
 
 	rec := doRequest(t, handler, "GET", "/api/v1/status", nil)
 	if rec.Code != http.StatusOK {
@@ -488,7 +490,7 @@ func TestGetDeviceValues(t *testing.T) {
 		Quality: model.QualityGood, Timestamp: time.Now(),
 	})
 
-	handler := New(st, status.NewRegistry(), reg, nil, false).Routes()
+	handler := New(st, status.NewRegistry(), reg, nil, false, nil).Routes()
 
 	rec := doRequest(t, handler, "GET", "/api/v1/devices/d1/values", nil)
 	if rec.Code != http.StatusOK {
@@ -559,7 +561,7 @@ func newAuthAPI(t *testing.T) (*API, *auth.Manager) {
 	if _, err := authz.BootstrapAdmin(); err != nil {
 		t.Fatalf("bootstrap admin: %v", err)
 	}
-	return New(st, status.NewRegistry(), values.NewRegistry(), authz, true), authz
+	return New(st, status.NewRegistry(), values.NewRegistry(), authz, true, nil), authz
 }
 
 // loginAs 登录并返回 Bearer token;默认用预置管理员账号。
@@ -726,9 +728,167 @@ func TestAuthDisabledBypasses(t *testing.T) {
 	}
 	defer st.Close()
 	// 鉴权关闭:业务接口无需 token(逃生舱,兼容旧部署)
-	handler := New(st, status.NewRegistry(), values.NewRegistry(), nil, false).Routes()
+	handler := New(st, status.NewRegistry(), values.NewRegistry(), nil, false, nil).Routes()
 	rec := doRequest(t, handler, "GET", "/api/v1/status", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("auth disabled: got %d want 200", rec.Code)
+	}
+}
+
+// ---- 北向输出 ----
+
+func sampleOutput() model.Output {
+	return model.Output{
+		ID:      "mqtt-1",
+		Name:    "MQTT 主站",
+		Type:    "mqtt",
+		Config:  json.RawMessage(`{"broker":"tcp://127.0.0.1:1883","qos":1}`),
+		Enabled: true,
+	}
+}
+
+// TestOutputCRUD 验证输出的增删改查(鉴权关闭 + 未接线输出管理器)。
+func TestOutputCRUD(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
+	rec := doRequest(t, handler, "POST", "/api/v1/outputs", sampleOutput())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create output: got %d want %d, body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	rec = doRequest(t, handler, "GET", "/api/v1/outputs", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list outputs: got %d", rec.Code)
+	}
+	var list []model.Output
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != "mqtt-1" {
+		t.Fatalf("unexpected outputs: %+v", list)
+	}
+
+	rec = doRequest(t, handler, "GET", "/api/v1/outputs/mqtt-1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get output: got %d", rec.Code)
+	}
+
+	updated := sampleOutput()
+	updated.Name = "MQTT 备站"
+	rec = doRequest(t, handler, "PUT", "/api/v1/outputs/mqtt-1", updated)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update output: got %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doRequest(t, handler, "DELETE", "/api/v1/outputs/mqtt-1", nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete output: got %d", rec.Code)
+	}
+
+	rec = doRequest(t, handler, "GET", "/api/v1/outputs/mqtt-1", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("get after delete: got %d want 404", rec.Code)
+	}
+}
+
+// TestCreateOutputMissingID 验证创建缺 id 返回 400。
+func TestCreateOutputMissingID(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	o := sampleOutput()
+	o.ID = ""
+	rec := doRequest(t, apiInstance.Routes(), "POST", "/api/v1/outputs", o)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create missing id: got %d want 400", rec.Code)
+	}
+}
+
+// TestOutputTypesEndpoint 验证 /outputs/types 返回注册的输出类型与 schema。
+func TestOutputTypesEndpoint(t *testing.T) {
+	output.Register(output.Descriptor{
+		Type:   "test-out",
+		Label:  "测试输出",
+		Schema: []output.Field{{Name: "broker", Label: "地址", Type: output.FieldString, Required: true}},
+	}, func(output.BuildContext, json.RawMessage) (output.Output, error) {
+		return nil, nil
+	})
+
+	apiInstance := newTestAPI(t)
+	rec := doRequest(t, apiInstance.Routes(), "GET", "/api/v1/outputs/types", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list output types: got %d", rec.Code)
+	}
+	var types []output.Descriptor
+	if err := json.Unmarshal(rec.Body.Bytes(), &types); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, info := range types {
+		if info.Type == "test-out" {
+			if len(info.Schema) != 1 || info.Schema[0].Name != "broker" {
+				t.Fatalf("schema: %+v", info.Schema)
+			}
+			return
+		}
+	}
+	t.Fatal("test-out not in response")
+}
+
+// TestOutputsRequireScope 验证输出接口受 scope 保护。
+func TestOutputsRequireScope(t *testing.T) {
+	apiInstance, authz := newAuthAPI(t)
+	handler := apiInstance.Routes()
+
+	// 未登录 → 401
+	rec := doRequest(t, handler, "GET", "/api/v1/outputs", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("list outputs no token: got %d want 401", rec.Code)
+	}
+
+	// 只读三方 client:可读不可写
+	_, key, _ := authz.CreateClient("ro", "只读", []string{"outputs:read"})
+	rec = doRequestAuth(t, handler, "GET", "/api/v1/outputs", key, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("client read outputs: got %d want 200", rec.Code)
+	}
+	rec = doRequestAuth(t, handler, "POST", "/api/v1/outputs", key, sampleOutput())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("client write outputs: got %d want 403", rec.Code)
+	}
+}
+
+// TestOutputWriteTriggersReload 验证写/删输出后触发热重载。
+func TestOutputWriteTriggersReload(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	var mu sync.Mutex
+	var reloads int
+	mgr := output.NewManager(func() ([]output.Output, error) {
+		mu.Lock()
+		reloads++
+		mu.Unlock()
+		return nil, nil
+	})
+
+	handler := New(st, status.NewRegistry(), values.NewRegistry(), nil, false, mgr).Routes()
+
+	if rec := doRequest(t, handler, "POST", "/api/v1/outputs", sampleOutput()); rec.Code != http.StatusCreated {
+		t.Fatalf("create: got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(t, handler, "PUT", "/api/v1/outputs/mqtt-1", sampleOutput()); rec.Code != http.StatusOK {
+		t.Fatalf("update: got %d", rec.Code)
+	}
+	if rec := doRequest(t, handler, "DELETE", "/api/v1/outputs/mqtt-1", nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: got %d", rec.Code)
+	}
+
+	mu.Lock()
+	got := reloads
+	mu.Unlock()
+	if got != 3 {
+		t.Fatalf("want 3 reloads got %d", got)
 	}
 }

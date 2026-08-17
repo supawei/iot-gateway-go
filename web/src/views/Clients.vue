@@ -29,6 +29,13 @@ const SCOPE_GROUPS = [
     ],
   },
   {
+    label: '北向输出',
+    options: [
+      { value: 'outputs:read', label: '读输出配置' },
+      { value: 'outputs:write', label: '管理输出配置' },
+    ],
+  },
+  {
     label: '其他',
     options: [
       { value: 'drivers:read', label: '读驱动列表' },

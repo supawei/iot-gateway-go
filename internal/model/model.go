@@ -32,6 +32,16 @@ type Client struct {
 	CreatedAt  string   `json:"createdAt"`
 }
 
+// Output 是北向输出配置:一个输出插件实例(如 MQTT / ThingsBoard / TDengine)。
+// 与连接/设备一致,输出配置存 SQLite,经 Web UI 增删改并热重载(见 docs/northbound-output-config.md)。
+type Output struct {
+	ID      string          `json:"id"`
+	Name    string          `json:"name"`
+	Type    string          `json:"type"` // mqtt / thingsboard / tdengine
+	Config  json.RawMessage `json:"config"`
+	Enabled bool            `json:"enabled"`
+}
+
 // Device 表示一个物理或逻辑设备,引用一个 Connection 并携带设备级协议参数。
 // IntervalMs 为设备级采集周期,连读时按此周期批量读取所有点位。
 type Device struct {

@@ -37,14 +37,37 @@ const (
 	httpTimeout = 10 * time.Second
 )
 
-// Config 是 TDengine 输出的网关级配置,来自 config.yaml 的 tdengine 段。
+// Config 是 TDengine 输出的配置(存 SQLite,经 Web UI 配置)。
+// 同时保留 yaml tag 以兼容旧 config.yaml 的一次性迁移(见 main.migrateOutputs)。
 type Config struct {
-	URL           string `yaml:"url"`           // taosAdapter REST 地址,如 http://127.0.0.1:6041
-	Username      string `yaml:"username"`      // 默认 root
-	Password      string `yaml:"password"`      // 默认 taosdata
-	Database      string `yaml:"database"`      // 库名,默认 iot_gateway
-	Stable        string `yaml:"stable"`        // 超级表名,默认 data_points
-	FlushInterval string `yaml:"flushInterval"` // 微批聚合 flush 间隔,默认 1s
+	URL           string `json:"url" yaml:"url"`                     // taosAdapter REST 地址,如 http://127.0.0.1:6041
+	Username      string `json:"username" yaml:"username"`           // 默认 root
+	Password      string `json:"password" yaml:"password"`           // 默认 taosdata
+	Database      string `json:"database" yaml:"database"`           // 库名,默认 iot_gateway
+	Stable        string `json:"stable" yaml:"stable"`               // 超级表名,默认 data_points
+	FlushInterval string `json:"flushInterval" yaml:"flushInterval"` // 微批聚合 flush 间隔,默认 1s
+}
+
+// init 注册 TDengine 输出类型:声明配置 schema 并绑定构造器。
+func init() {
+	output.Register(output.Descriptor{
+		Type:  "tdengine",
+		Label: "TDengine",
+		Schema: []output.Field{
+			{Name: "url", Label: "REST 地址", Type: output.FieldString, Required: true, Placeholder: "http://127.0.0.1:6041", Hint: "taosAdapter REST 地址"},
+			{Name: "username", Label: "用户名", Type: output.FieldString, Default: "root"},
+			{Name: "password", Label: "密码", Type: output.FieldPassword, Default: "taosdata"},
+			{Name: "database", Label: "数据库", Type: output.FieldString, Default: "iot_gateway"},
+			{Name: "stable", Label: "超级表", Type: output.FieldString, Default: "data_points"},
+			{Name: "flushInterval", Label: "Flush 间隔", Type: output.FieldString, Default: "1s", Hint: "微批聚合写入间隔,如 1s"},
+		},
+	}, func(bc output.BuildContext, raw json.RawMessage) (output.Output, error) {
+		var cfg Config
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return nil, fmt.Errorf("tdengine config: %w", err)
+		}
+		return New(cfg)
+	})
 }
 
 type tdengineOutput struct {

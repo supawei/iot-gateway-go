@@ -1,0 +1,77 @@
+package output
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"sync"
+)
+
+// BuildContext 是构造输出所需的网关上下文:与输出自身配置无关的部分。
+// 由 main 注入(gatewayID 用于 topic/标识,Write 用于下行写回设备)。
+type BuildContext struct {
+	GatewayID string
+	Write     WriteFunc
+}
+
+// WriteFunc 是下行写回调(如 ThingsBoard 共享属性 / RPC → 设备写)。
+// 由 main 注入,最终落到 core.WritePoint。
+type WriteFunc func(ctx context.Context, deviceID, point string, value interface{}) error
+
+// Descriptor 描述一种输出插件类型及其配置 schema,供 Web UI 渲染表单。
+type Descriptor struct {
+	Type   string  `json:"type"`   // 输出类型,如 "mqtt"
+	Label  string  `json:"label"`  // 展示名,如 "MQTT"
+	Schema []Field `json:"schema"` // 配置字段结构
+}
+
+// Constructor 用一条输出配置(raw JSON)构造一个 Output 实例。
+// 返回错误时须保证不泄漏任何已建立的连接。
+type Constructor func(bc BuildContext, config json.RawMessage) (Output, error)
+
+type registered struct {
+	desc Descriptor
+	ctor Constructor
+}
+
+var (
+	registry   = map[string]registered{}
+	registryMu sync.RWMutex
+)
+
+// Register 注册一种输出类型,通常在输出插件包 init() 中调用。
+func Register(desc Descriptor, ctor Constructor) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	registry[desc.Type] = registered{desc: desc, ctor: ctor}
+}
+
+// ListTypes 返回全部已注册输出类型的信息,按类型名排序。
+func ListTypes() []Descriptor {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	names := make([]string, 0, len(registry))
+	for name := range registry {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	infos := make([]Descriptor, 0, len(names))
+	for _, name := range names {
+		infos = append(infos, registry[name].desc)
+	}
+	return infos
+}
+
+// Build 按类型名与配置构造一个输出实例。
+func Build(bc BuildContext, typ string, config json.RawMessage) (Output, error) {
+	registryMu.RLock()
+	r, ok := registry[typ]
+	registryMu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("output type %q not registered", typ)
+	}
+	return r.ctor(bc, config)
+}

@@ -38,6 +38,8 @@ const (
 	ScopeDriversRead      Scope = "drivers:read"
 	ScopeClientsRead      Scope = "clients:read"
 	ScopeClientsWrite     Scope = "clients:write"
+	ScopeOutputsRead      Scope = "outputs:read"
+	ScopeOutputsWrite     Scope = "outputs:write"
 )
 
 // principalKind 区分主体类型。

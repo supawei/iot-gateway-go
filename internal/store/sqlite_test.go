@@ -183,6 +183,78 @@ func TestListEmptyReturnsEmptySlice(t *testing.T) {
 	}
 }
 
+func TestSaveAndListOutputs(t *testing.T) {
+	st := newTestStore(t)
+	o := model.Output{
+		ID:      "mqtt",
+		Name:    "MQTT",
+		Type:    "mqtt",
+		Config:  []byte(`{"broker":"tcp://127.0.0.1:1883","qos":1}`),
+		Enabled: true,
+	}
+	if err := st.SaveOutput(o); err != nil {
+		t.Fatalf("save output: %v", err)
+	}
+	got, err := st.GetOutput("mqtt")
+	if err != nil {
+		t.Fatalf("get output: %v", err)
+	}
+	if got.Type != "mqtt" || !got.Enabled || string(got.Config) == "" {
+		t.Fatalf("unexpected output: %+v", got)
+	}
+
+	// 更新并停用
+	got.Enabled = false
+	if err := st.SaveOutput(got); err != nil {
+		t.Fatalf("update output: %v", err)
+	}
+	updated, _ := st.GetOutput("mqtt")
+	if updated.Enabled {
+		t.Fatalf("output should be disabled: %+v", updated)
+	}
+
+	outputs, err := st.ListOutputs()
+	if err != nil {
+		t.Fatalf("list outputs: %v", err)
+	}
+	if len(outputs) != 1 {
+		t.Fatalf("want 1 output got %d", len(outputs))
+	}
+}
+
+func TestDeleteOutput(t *testing.T) {
+	st := newTestStore(t)
+	st.SaveOutput(model.Output{ID: "td", Name: "TD", Type: "tdengine", Config: []byte(`{}`)})
+	if err := st.DeleteOutput("td"); err != nil {
+		t.Fatalf("delete output: %v", err)
+	}
+	if _, err := st.GetOutput("td"); err == nil {
+		t.Fatal("expected not found after delete")
+	}
+}
+
+func TestMeta(t *testing.T) {
+	st := newTestStore(t)
+	if _, ok, err := st.GetMeta("k"); err != nil || ok {
+		t.Fatalf("get missing meta: ok=%v err=%v", ok, err)
+	}
+	if err := st.SetMeta("k", "v"); err != nil {
+		t.Fatalf("set meta: %v", err)
+	}
+	v, ok, err := st.GetMeta("k")
+	if err != nil || !ok || v != "v" {
+		t.Fatalf("get meta: v=%q ok=%v err=%v", v, ok, err)
+	}
+	// 覆盖写
+	if err := st.SetMeta("k", "v2"); err != nil {
+		t.Fatalf("overwrite meta: %v", err)
+	}
+	v, _, _ = st.GetMeta("k")
+	if v != "v2" {
+		t.Fatalf("meta not overwritten: %q", v)
+	}
+}
+
 func TestOnChange(t *testing.T) {
 	st := newTestStore(t)
 	saveSampleConnection(t, st)

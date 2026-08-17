@@ -26,7 +26,7 @@ type Scheduler struct {
 	output        chan<- model.DataPoint
 	status        *status.Registry
 	values        *values.Registry
-	notifiers     []output.DeviceNotifier
+	outputs       *output.Manager // 设备上下线通知的动态来源(热重载后自动跟随最新输出)
 	poolSize      int
 	baseCtx       context.Context
 	mu            sync.Mutex
@@ -37,17 +37,11 @@ type Scheduler struct {
 	collectCancel context.CancelFunc
 }
 
-func NewScheduler(st *store.Store, dataPoints chan<- model.DataPoint, poolSize int, statusReg *status.Registry, valuesReg *values.Registry, outputs []output.Output) *Scheduler {
+func NewScheduler(st *store.Store, dataPoints chan<- model.DataPoint, poolSize int, statusReg *status.Registry, valuesReg *values.Registry, outputs *output.Manager) *Scheduler {
 	if poolSize <= 0 {
 		poolSize = 16
 	}
-	var notifiers []output.DeviceNotifier
-	for _, out := range outputs {
-		if n, ok := out.(output.DeviceNotifier); ok {
-			notifiers = append(notifiers, n)
-		}
-	}
-	return &Scheduler{store: st, output: dataPoints, poolSize: poolSize, status: statusReg, values: valuesReg, notifiers: notifiers}
+	return &Scheduler{store: st, output: dataPoints, poolSize: poolSize, status: statusReg, values: valuesReg, outputs: outputs}
 }
 
 func (s *Scheduler) Run(ctx context.Context) error {
@@ -270,13 +264,19 @@ func (s *Scheduler) markOffline(deviceID, errMsg string) {
 }
 
 func (s *Scheduler) notifyOnline(deviceID string) {
-	for _, n := range s.notifiers {
+	if s.outputs == nil {
+		return
+	}
+	for _, n := range s.outputs.Notifiers() {
 		n.DeviceOnline(deviceID)
 	}
 }
 
 func (s *Scheduler) notifyOffline(deviceID string) {
-	for _, n := range s.notifiers {
+	if s.outputs == nil {
+		return
+	}
+	for _, n := range s.outputs.Notifiers() {
 		n.DeviceOffline(deviceID)
 	}
 }

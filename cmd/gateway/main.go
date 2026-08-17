@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -20,9 +21,6 @@ import (
 	"iot-gateway-go/internal/core"
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output"
-	"iot-gateway-go/internal/output/mqtt"
-	"iot-gateway-go/internal/output/tdengine"
-	"iot-gateway-go/internal/output/thingsboard"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 	"iot-gateway-go/internal/values"
@@ -31,6 +29,9 @@ import (
 	_ "iot-gateway-go/internal/driver/modbus"        // 注册 modbus 驱动
 	_ "iot-gateway-go/internal/driver/modbus_listen" // 注册 modbus 监听驱动
 	_ "iot-gateway-go/internal/driver/opcua"         // 注册 opcua 驱动
+	_ "iot-gateway-go/internal/output/mqtt"          // 注册 mqtt 输出
+	_ "iot-gateway-go/internal/output/tdengine"      // 注册 tdengine 输出
+	_ "iot-gateway-go/internal/output/thingsboard"   // 注册 thingsboard 输出
 )
 
 const (
@@ -56,9 +57,21 @@ func main() {
 	}
 	defer st.Close()
 
-	outputs, err := buildOutputs(cfg, st)
-	if err != nil {
-		fatal("build outputs failed", "err", err)
+	// 旧版本把北向输出写在 config.yaml;一次性迁移到 SQLite(标记迁移完成,避免重复导入)。
+	if err := migrateOutputs(st, cfg); err != nil {
+		fatal("migrate outputs failed", "err", err)
+	}
+
+	// 下行写回调:共享属性/RPC → core.WritePoint → 驱动 Writer。
+	write := func(ctx context.Context, deviceID, point string, value interface{}) error {
+		_, err := core.WritePoint(ctx, st, deviceID, point, value)
+		return err
+	}
+	// 输出管理器:从 SQLite 读配置动态构建,Web UI 变更后热重载(原子替换 + 关闭旧输出)。
+	outputs := output.NewManager(buildOutputs(st, cfg.Gateway.ID, write))
+	if err := outputs.Reload(); err != nil {
+		// 首次构建失败不退出:API 仍可修复配置并触发热重载。
+		slog.Warn("initial output reload failed", "err", err)
 	}
 
 	statusReg := status.NewRegistry()
@@ -105,7 +118,7 @@ func main() {
 	if cfg.Auth.Enabled != nil {
 		authEnabled = *cfg.Auth.Enabled
 	}
-	mux.Handle("/api/", api.New(st, statusReg, valuesReg, authz, authEnabled).Routes())
+	mux.Handle("/api/", api.New(st, statusReg, valuesReg, authz, authEnabled, outputs).Routes())
 
 	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: mux}
 	go func() {
@@ -124,9 +137,7 @@ func main() {
 
 	<-schedulerDone
 	<-pipelineDone
-	for _, out := range outputs {
-		out.Close()
-	}
+	outputs.Close()
 }
 
 // initLogger 按 config 构造 slog logger:level 控制级别,format 选 text/json,
@@ -170,40 +181,74 @@ func fatal(msg string, args ...any) {
 	os.Exit(1)
 }
 
-func buildOutputs(cfg config.Config, st *store.Store) ([]output.Output, error) {
-	outputs := make([]output.Output, 0, 2)
+// buildOutputs 返回输出管理器的构建函数:每次重载都从 SQLite 读最新输出配置,
+// 逐个经 registry 构造为 Output 实例。任一输出构建失败即整体失败并关闭已构建部分,
+// 由 Manager 保留旧输出(原子替换语义)。
+func buildOutputs(st *store.Store, gatewayID string, write output.WriteFunc) output.BuildFunc {
+	bc := output.BuildContext{GatewayID: gatewayID, Write: write}
+	return func() ([]output.Output, error) {
+		configs, err := st.ListOutputs()
+		if err != nil {
+			return nil, err
+		}
+		result := make([]output.Output, 0, len(configs))
+		for _, o := range configs {
+			if !o.Enabled {
+				continue
+			}
+			out, err := output.Build(bc, o.Type, o.Config)
+			if err != nil {
+				for _, built := range result {
+					built.Close()
+				}
+				return nil, fmt.Errorf("build output %q: %w", o.ID, err)
+			}
+			result = append(result, out)
+		}
+		return result, nil
+	}
+}
 
+// migrateOutputs 把旧版本 config.yaml 里的北向输出一次性迁移到 SQLite 输出表。
+// 用 meta 表标记迁移完成,避免用户在 UI 删光输出后重启又被旧 yaml 覆盖。
+func migrateOutputs(st *store.Store, cfg config.Config) error {
+	migrated, _, err := st.GetMeta("outputs_migrated")
+	if err != nil {
+		return err
+	}
+	if migrated == "1" {
+		return nil
+	}
+
+	type entry struct {
+		id, name, typ string
+		config        any
+	}
+	entries := make([]entry, 0, 3)
 	if cfg.MQTT.Broker != "" {
-		mqttOutput, err := mqtt.New(cfg.MQTT, cfg.Gateway.ID)
-		if err != nil {
-			return nil, err
-		}
-		outputs = append(outputs, mqttOutput)
+		entries = append(entries, entry{"mqtt", "MQTT", "mqtt", cfg.MQTT})
 	}
-
 	if cfg.ThingsBoard.Broker != "" && cfg.ThingsBoard.AccessToken != "" {
-		// 下行写回调:共享属性更新 → core.WritePoint → 驱动 Writer。
-		write := func(ctx context.Context, deviceID, point string, value interface{}) error {
-			_, err := core.WritePoint(ctx, st, deviceID, point, value)
-			return err
-		}
-		tbOutput, err := thingsboard.New(cfg.ThingsBoard, write)
-		if err != nil {
-			return nil, err
-		}
-		outputs = append(outputs, tbOutput)
+		entries = append(entries, entry{"thingsboard", "ThingsBoard", "thingsboard", cfg.ThingsBoard})
 	}
-
 	if cfg.TDengine.URL != "" {
-		tdOutput, err := tdengine.New(cfg.TDengine)
-		if err != nil {
-			return nil, err
-		}
-		outputs = append(outputs, tdOutput)
+		entries = append(entries, entry{"tdengine", "TDengine", "tdengine", cfg.TDengine})
 	}
 
-	if len(outputs) == 0 {
-		return nil, errors.New("no output configured: set mqtt.broker, thingsboard.broker+accessToken, or tdengine.url")
+	for _, e := range entries {
+		raw, err := json.Marshal(e.config)
+		if err != nil {
+			return fmt.Errorf("migrate output %q: %w", e.id, err)
+		}
+		o := model.Output{ID: e.id, Name: e.name, Type: e.typ, Config: raw, Enabled: true}
+		if err := st.SaveOutput(o); err != nil {
+			return fmt.Errorf("migrate output %q: %w", e.id, err)
+		}
+		slog.Warn("migrated output config from config.yaml to sqlite", "output", e.id)
 	}
-	return outputs, nil
+
+	if err := st.SetMeta("outputs_migrated", "1"); err != nil {
+		return err
+	}
+	return nil
 }

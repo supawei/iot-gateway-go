@@ -10,6 +10,7 @@ import (
 	"iot-gateway-go/internal/core"
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 	"iot-gateway-go/internal/values"
@@ -23,10 +24,11 @@ type API struct {
 	values      *values.Registry
 	auth        *auth.Manager
 	authEnabled bool
+	outputs     *output.Manager // 输出配置变更后触发热重载;可为 nil(测试或未接线时跳过)
 }
 
-func New(st *store.Store, statusReg *status.Registry, valuesReg *values.Registry, authz *auth.Manager, authEnabled bool) *API {
-	return &API{store: st, status: statusReg, values: valuesReg, auth: authz, authEnabled: authEnabled}
+func New(st *store.Store, statusReg *status.Registry, valuesReg *values.Registry, authz *auth.Manager, authEnabled bool, outputs *output.Manager) *API {
+	return &API{store: st, status: statusReg, values: valuesReg, auth: authz, authEnabled: authEnabled, outputs: outputs}
 }
 
 // Routes 返回挂载好路由的 ServeMux,由 main 直接用作 http.Server Handler。
@@ -63,6 +65,13 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/devices/{deviceId}/status", a.require(auth.ScopeStatusRead, a.getDeviceStatus))
 	mux.HandleFunc("GET /api/v1/devices/{deviceId}/values", a.require(auth.ScopeValuesRead, a.getDeviceValues))
 	mux.HandleFunc("GET /api/v1/drivers", a.require(auth.ScopeDriversRead, a.listDrivers))
+	// 北向输出(配置变更触发热重载)
+	mux.HandleFunc("GET /api/v1/outputs/types", a.require(auth.ScopeOutputsRead, a.listOutputTypes))
+	mux.HandleFunc("GET /api/v1/outputs", a.require(auth.ScopeOutputsRead, a.listOutputs))
+	mux.HandleFunc("POST /api/v1/outputs", a.require(auth.ScopeOutputsWrite, a.createOutput))
+	mux.HandleFunc("GET /api/v1/outputs/{outputId}", a.require(auth.ScopeOutputsRead, a.getOutput))
+	mux.HandleFunc("PUT /api/v1/outputs/{outputId}", a.require(auth.ScopeOutputsWrite, a.putOutput))
+	mux.HandleFunc("DELETE /api/v1/outputs/{outputId}", a.require(auth.ScopeOutputsWrite, a.deleteOutput))
 	return mux
 }
 
@@ -321,6 +330,106 @@ func (a *API) getDeviceValues(w http.ResponseWriter, r *http.Request) {
 // listDrivers 返回已注册驱动及其配置 schema,供前端动态渲染表单。
 func (a *API) listDrivers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, driver.List())
+}
+
+// ---- 北向输出 ----
+
+// listOutputTypes 返回已注册输出类型及其配置 schema,供前端动态渲染表单。
+func (a *API) listOutputTypes(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, output.ListTypes())
+}
+
+func (a *API) listOutputs(w http.ResponseWriter, r *http.Request) {
+	outputs, err := a.store.ListOutputs()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, outputs)
+}
+
+func (a *API) getOutput(w http.ResponseWriter, r *http.Request) {
+	o, err := a.store.GetOutput(r.PathValue("outputId"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, o)
+}
+
+func (a *API) createOutput(w http.ResponseWriter, r *http.Request) {
+	o, ok := decodeOutput(w, r)
+	if !ok {
+		return
+	}
+	if o.ID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("output id is required"))
+		return
+	}
+	if o.Type == "" {
+		writeError(w, http.StatusBadRequest, errors.New("output type is required"))
+		return
+	}
+	if err := a.store.SaveOutput(o); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.reloadOutputs(); err != nil {
+		// 配置已持久化但激活失败:返回 502 告知用户,旧输出保持运行。
+		writeError(w, http.StatusBadGateway, fmt.Errorf("output saved but reload failed: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusCreated, o)
+}
+
+func (a *API) putOutput(w http.ResponseWriter, r *http.Request) {
+	o, ok := decodeOutput(w, r)
+	if !ok {
+		return
+	}
+	o.ID = r.PathValue("outputId")
+	if o.Type == "" {
+		writeError(w, http.StatusBadRequest, errors.New("output type is required"))
+		return
+	}
+	if err := a.store.SaveOutput(o); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.reloadOutputs(); err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("output saved but reload failed: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, o)
+}
+
+func (a *API) deleteOutput(w http.ResponseWriter, r *http.Request) {
+	if err := a.store.DeleteOutput(r.PathValue("outputId")); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.reloadOutputs(); err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("output deleted but reload failed: %w", err))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// reloadOutputs 触发热重载;未接线输出管理器(测试)时跳过。
+func (a *API) reloadOutputs() error {
+	if a.outputs == nil {
+		return nil
+	}
+	return a.outputs.Reload()
+}
+
+func decodeOutput(w http.ResponseWriter, r *http.Request) (model.Output, bool) {
+	var o model.Output
+	if err := json.NewDecoder(r.Body).Decode(&o); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return model.Output{}, false
+	}
+	return o, true
 }
 
 // ---- 鉴权中间件 ----

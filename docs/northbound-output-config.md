@@ -1,5 +1,10 @@
 # 北向输出配置:yaml vs SQLite 分析
 
+> **状态**:已迁移(原结论"保持 yaml"已反转,前提条件满足后实施)
+> **更新**:2026-08-17
+>
+> 本文前半部分保留当时的利弊分析;最终在完成 API 鉴权(原 §6 阶段①)后,按 §6 阶段②③推进,把北向输出配置迁入 SQLite 并经 Web UI 管理。实施细节见文末「§7 实施记录」。
+
 ## 1. 背景与现状
 
 网关的配置分两类,本质不同:
@@ -52,16 +57,48 @@ broker 地址、凭据属于"部署环境"信息,天然适合 yaml 这类**可�
 
 ## 5. 结论
 
-**保持现状:北向输出留在 config.yaml,不迁移到 SQLite。**
+**已反转:北向输出迁移到 SQLite,通过 Web UI 配置。**
 
-理由:当前 API 未鉴权(迁移会暴露凭据)、输出热重载需引入 `OutputManager` 新架构、yaml 仍作为引导配置无法消除、broker/凭据属部署环境信息更适合版本化的文件管理。
+原始"保持 yaml"结论基于两个前置:API 未鉴权、无输出热重载架构。这两点现已解决(鉴权见 [authz.md](authz.md),输出热重载见 §7),且"交付给最终用户、由他们自行配置云端平台"的产品化诉求成为主导,因此执行迁移。
 
-## 6. 若未来需要动态化,分阶段推进
+## 6. 分阶段推进(已完成)
 
-| 阶段 | 内容 | 前置 |
+| 阶段 | 内容 | 状态 |
 |---|---|---|
-| ① API 鉴权 | 保护凭据,不迁移输出也是刚需 | - |
-| ② OutputManager | 输出热重载(关闭旧连接 → 重建 → 原子替换) | ① |
-| ③ 迁移 SQLite + Web UI | 输出配置入库、UI 增删改 | ①② |
+| ① API 鉴权 | 保护凭据,不迁移输出也是刚需 | ✅ 已完成 |
+| ② OutputManager | 输出热重载(关闭旧连接 → 重建 → 原子替换) | ✅ 已完成 |
+| ③ 迁移 SQLite + Web UI | 输出配置入库、UI 增删改 | ✅ 已完成 |
 
-建议先做 ①(API 鉴权),它独立于输出迁移且本身已属安全欠账;做完后再评估是否继续 ②③。
+## 7. 实施记录
+
+### 7.1 存储与模型
+
+- `model.Output{ID, Name, Type, Config, Enabled}`:一条记录对应一个输出插件实例。
+- SQLite 新增 `output` 表(`id/name/type/config/enabled`);`Type` 取值 `mqtt` / `thingsboard` / `tdengine`。
+- 新增 `meta` 键值表,用于"输出已迁移"的一次性标记(见 7.3)。
+
+### 7.2 输出注册表与热重载(OutputManager)
+
+- `internal/output` 新增**注册表**(`Register`/`ListTypes`/`Build`):各输出插件在 `init()` 里声明类型、配置 schema 与构造器。与南向 `driver` 的 `SchemaProvider` 同思路,前端据此动态渲染表单,新增输出插件零前端改动。
+- `output.Manager` 维护活跃输出集合,提供 `Reload` / `Publish` / `Notifiers` / `Close`:
+  - **扇出**:每个输出独立队列 + 发布 goroutine,输出间背压隔离(接管原 `core.RunPipeline` 的分发职责)。
+  - **热重载**:构建新输出集 → 原子替换 → 关闭旧输出;构建失败保留旧输出(返回错误)。
+  - **设备通知**:scheduler 经 `Manager.Notifiers()` 动态获取实现 `DeviceNotifier` 的输出,热重载后自动跟随最新输出。
+- `BuildContext{GatewayID, Write}` 由 main 注入:gatewayID 用于 topic/标识,Write 为下行写回调(落到 `core.WritePoint`),二者属网关上下文而非输出自身配置,故不进注册表。
+
+### 7.3 旧 config.yaml 一次性迁移
+
+- 输出配置原在 config.yaml;升级后首次启动,若输出表为空且 yaml 有 `mqtt`/`thingsboard`/`tdengine` 段,则自动导入 SQLite 并写 `meta["outputs_migrated"]="1"`。
+- 迁移标记防止"用户在 UI 删光输出后重启又被旧 yaml 覆盖"。
+- 迁移后 config.yaml 里的输出段不再生效(仅作为迁移种子保留),配置一律以 Web UI 为准。
+
+### 7.4 API 与权限
+
+- 新增 `GET/POST/PUT/DELETE /outputs` 与 `GET /outputs/types`,受 `outputs:read` / `outputs:write` scope 保护(见 [authz.md](authz.md))。
+- 写/删输出后立即触发 `Manager.Reload()`;若新配置激活失败(如 broker 连不上),配置已持久化但旧输出保持运行,接口返回 `502` 以便用户感知。
+- 输出配置含云端凭据(密码/Token),故 `outputs:*` 属敏感 scope,只应授予可信主体;凭据脱敏留作后续评估。
+
+### 7.5 反转过度的取舍
+
+- 输出注册表重新引入(原 ROADMAP 曾"去掉 output registry,main 直接构造"):因配置源变为可变的 SQLite + 需 Web UI 动态渲染,注册表成为必需,故恢复。
+- 凭据脱敏(列表/详情对敏感字段打码)未做第一版:鉴权已解决"未鉴权暴露"的原始风险,脱敏属纵深防御,待真实的多角色只读场景再加。

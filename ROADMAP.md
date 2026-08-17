@@ -79,13 +79,13 @@
 
 - ThingsBoard / TDengine **尚未对真实实例验证**(需 broker / taosAdapter)
 - ThingsBoard 断网本地补传、deviceName 映射未做(归 P3)
-- API **未鉴权**(review 列为 #5,已推迟;迁输出配置前必须先做)
 
 ---
 
 ## P3 增强
 
-- [ ] **API 鉴权**:保护配置与凭据(当前未鉴权,属安全欠账,独立且前置;设计见 [docs/authz.md](docs/authz.md))
+- [x] **API 鉴权**:scope/RBAC + 三方 API Key + 强制改密(设计见 [docs/authz.md](docs/authz.md),2026-08-16)
+- [x] **北向输出迁移 SQLite + Web UI**:输出注册表 + OutputManager 热重载 + 旧 yaml 一次性迁移(见 [docs/northbound-output-config.md](docs/northbound-output-config.md),2026-08-17)
 - [ ] **边缘计算**:规则 / 过滤 / 聚合,插入 pipeline 处理层(目前直通)
 - [ ] **断网本地补传**:网络中断时缓存,恢复后补送,保证采集数据不丢(ThingsBoard/TDengine 均需)
 - [ ] **云 IoT 平台对接**:阿里云 / 华为云 / AWS IoT 输出插件(ThingsBoard 已作为 P2 验证完成)
@@ -112,7 +112,6 @@
 | 规则引擎 / 断网补传 | 非 MVP 核心 | P3 |
 | 工业以太网(Profinet/EtherCAT)/ 现场总线 | P1/P2 聚焦 Modbus、OPC UA | P4 或有真实设备需求 |
 | Sparkplug B | JSON 起步快,已留扩展点 | P4 或有互操作需求 |
-| 北向输出迁移到 SQLite + Web UI | 分析结论:保持 yaml(鉴权/热重载/引导成本),见 [docs/northbound-output-config.md](docs/northbound-output-config.md) | 先做 API 鉴权再评估 |
 
 ---
 
@@ -139,4 +138,4 @@
 | TDengine 对接 | taosAdapter REST(强类型超级表 + 按点位建子表) | 无 CGO 保持纯 Go;值按 Go 类型落强类型列;TAGS 承载设备/点位,子表名 hash 保证合法唯一 |
 | Web 前端 | Vue 3 + Element Plus,`go:embed` 内嵌 | 独立工程便于前端迭代;内嵌免 nginx,单端口部署 |
 | 配置 schema | `SchemaProvider` 由驱动声明,前端动态渲染 | 替代手写 JSON,避免前端硬编码各驱动字段;`showWhen` 处理模式相关字段 |
-| 北向输出配置 | 保留在 config.yaml | 未鉴权 API 暴露凭据风险、热重载需 OutputManager、yaml 永不可消(引导配置),见分析文档 |
+| 北向输出配置 | 迁移到 SQLite + Web UI(原"保留 yaml"结论反转) | 完成 API 鉴权与 OutputManager 后,产品化诉求(UI 免重启配置)成为主导;旧 yaml 一次性迁移,见分析文档 |

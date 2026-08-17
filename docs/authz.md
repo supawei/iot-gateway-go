@@ -56,6 +56,8 @@ Scope 命名 `资源:动作`。动作细分:
 | `drivers:read` | `GET /drivers` |
 | `clients:read` | `GET /clients` |
 | `clients:write` | `POST/PUT/DELETE /clients`(管理三方 API Key) |
+| `outputs:read` | `GET /outputs`、`GET /outputs/{id}`、`GET /outputs/types` |
+| `outputs:write` | `POST/PUT/DELETE /outputs`(北向输出配置,含云端凭据,敏感) |
 
 ### 3.2 认证相关接口(不属于任何 scope)
 

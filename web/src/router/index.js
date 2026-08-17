@@ -4,6 +4,7 @@ import Dashboard from '../views/Dashboard.vue'
 import Connections from '../views/Connections.vue'
 import Devices from '../views/Devices.vue'
 import Clients from '../views/Clients.vue'
+import Outputs from '../views/Outputs.vue'
 import Login from '../views/Login.vue'
 import ChangePassword from '../views/ChangePassword.vue'
 import auth from '../stores/auth'
@@ -15,6 +16,7 @@ const routes = [
   { path: '/dashboard', name: 'dashboard', component: Dashboard, meta: { title: '概览' } },
   { path: '/connections', name: 'connections', component: Connections, meta: { title: '连接' } },
   { path: '/devices', name: 'devices', component: Devices, meta: { title: '设备' } },
+  { path: '/outputs', name: 'outputs', component: Outputs, meta: { title: '北向输出' } },
   { path: '/clients', name: 'clients', component: Clients, meta: { title: '三方授权' } },
 ]
 

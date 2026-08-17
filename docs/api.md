@@ -416,6 +416,82 @@ Field 字段:`name`(JSON key)、`label`(展示名)、`type`(`string`/`int`/`numb
 
 > 驱动实现 `driver.SchemaProvider` 接口即提供 schema;未实现的驱动 `config`/`params` 为空。
 
+### 北向输出
+
+北向输出(数据上送目标)存 SQLite,经 Web UI 增删改;**保存后立即热重载**,无需重启进程。
+
+#### 列出输出类型及配置结构
+
+`GET /api/v1/outputs/types`
+
+返回已注册输出类型及配置 schema(前端据此动态渲染表单):
+
+```json
+[
+  {
+    "type": "mqtt",
+    "label": "MQTT",
+    "schema": [
+      { "name": "broker", "label": "Broker 地址", "type": "string", "required": true },
+      { "name": "password", "label": "密码", "type": "password" },
+      { "name": "qos", "label": "QoS", "type": "int", "default": 1 }
+    ]
+  }
+]
+```
+
+Field 字段与驱动一致:`name`/`label`/`type`(`string`/`password`/`int`/`number`/`bool`/`enum`/`json`)/`required`/`default`/`options`/`hint`/`placeholder`。
+
+#### 列出输出
+
+`GET /api/v1/outputs`
+
+**响应**:`200 OK` + Output 数组
+
+```json
+[ { "id": "mqtt-1", "name": "MQTT 主站", "type": "mqtt", "config": {"broker":"tcp://127.0.0.1:1883","qos":1}, "enabled": true } ]
+```
+
+#### 获取输出
+
+`GET /api/v1/outputs/{outputId}`
+
+**响应**:`200 OK` + Output;不存在则 `404`
+
+#### 创建输出
+
+`POST /api/v1/outputs`
+
+创建或整体覆盖一个输出。`id`、`type` 必填。
+
+**请求体**:Output 对象
+
+**响应**:`201 Created` + Output;若保存后热重载失败(broker 不可达等)返回 `502`(配置已持久化,旧输出保持运行)
+
+```bash
+curl -X POST http://localhost:8080/api/v1/outputs \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"mqtt-1","name":"MQTT 主站","type":"mqtt","enabled":true,"config":{"broker":"tcp://127.0.0.1:1883","qos":1}}'
+```
+
+#### 更新输出
+
+`PUT /api/v1/outputs/{outputId}`
+
+整体更新输出。路径中的 `outputId` 以 URL 为准。`type` 必填。
+
+**响应**:`200 OK` + 更新后的 Output
+
+#### 删除输出
+
+`DELETE /api/v1/outputs/{outputId}`
+
+删除后立即停止该输出的上送。
+
+**响应**:`204 No Content`(无响应体)
+
+> **鉴权**:输出配置含云端凭据(密码 / Access Token),`outputs:read` / `outputs:write` 属敏感 scope,只应授予可信主体(默认仅管理员持有)。
+
 ### 点位
 
 #### 添加点位

@@ -16,13 +16,35 @@ const (
 	disconnectQuiesce      = 250 * time.Millisecond
 )
 
-// Config 是 MQTT 输出的网关级配置,来自 config.yaml 的 mqtt 段。
+// Config 是 MQTT 输出的配置(存 SQLite,经 Web UI 配置)。
+// 同时保留 yaml tag 以兼容旧 config.yaml 的一次性迁移(见 main.migrateOutputs)。
 type Config struct {
-	Broker   string `yaml:"broker"`
-	ClientID string `yaml:"clientId"`
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
-	QoS      byte   `yaml:"qos"`
+	Broker   string `json:"broker" yaml:"broker"`
+	ClientID string `json:"clientId" yaml:"clientId"`
+	Username string `json:"username" yaml:"username"`
+	Password string `json:"password" yaml:"password"`
+	QoS      byte   `json:"qos" yaml:"qos"`
+}
+
+// init 注册 MQTT 输出类型:声明配置 schema 并绑定构造器。
+func init() {
+	output.Register(output.Descriptor{
+		Type:  "mqtt",
+		Label: "MQTT",
+		Schema: []output.Field{
+			{Name: "broker", Label: "Broker 地址", Type: output.FieldString, Required: true, Placeholder: "tcp://127.0.0.1:1883"},
+			{Name: "clientId", Label: "Client ID", Type: output.FieldString, Placeholder: "iot-gateway"},
+			{Name: "username", Label: "用户名", Type: output.FieldString},
+			{Name: "password", Label: "密码", Type: output.FieldPassword},
+			{Name: "qos", Label: "QoS", Type: output.FieldInt, Default: 1},
+		},
+	}, func(bc output.BuildContext, raw json.RawMessage) (output.Output, error) {
+		var cfg Config
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return nil, fmt.Errorf("mqtt config: %w", err)
+		}
+		return New(cfg, bc.GatewayID)
+	})
 }
 
 type mqttOutput struct {

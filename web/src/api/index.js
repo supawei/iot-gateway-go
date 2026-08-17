@@ -63,6 +63,13 @@ export const api = {
   updateConnection: (id, data) => http.put(`/connections/${id}`, data),
   deleteConnection: (id) => http.delete(`/connections/${id}`),
 
+  // 北向输出
+  listOutputs: () => http.get('/outputs'),
+  listOutputTypes: () => http.get('/outputs/types'),
+  createOutput: (data) => http.post('/outputs', data),
+  updateOutput: (id, data) => http.put(`/outputs/${id}`, data),
+  deleteOutput: (id) => http.delete(`/outputs/${id}`),
+
   // 设备
   listDevices: () => http.get('/devices'),
   createDevice: (data) => http.post('/devices', data),

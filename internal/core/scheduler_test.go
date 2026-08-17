@@ -317,7 +317,14 @@ func (m *mockNotifier) DeviceOffline(id string)       { m.offline = append(m.off
 func TestSchedulerNotifiesTransitions(t *testing.T) {
 	reg := status.NewRegistry()
 	n := &mockNotifier{}
-	s := NewScheduler(nil, nil, 4, reg, values.NewRegistry(), []output.Output{n})
+	mgr := output.NewManager(func() ([]output.Output, error) {
+		return []output.Output{n}, nil
+	})
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("reload outputs: %v", err)
+	}
+	defer mgr.Close()
+	s := NewScheduler(nil, nil, 4, reg, values.NewRegistry(), mgr)
 
 	// 未知 → 在线:通知 online
 	s.markOnline("d1", time.Now())

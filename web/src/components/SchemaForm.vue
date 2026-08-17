@@ -24,6 +24,15 @@ function visible(f) {
         :placeholder="f.placeholder"
         clearable
       />
+      <!-- 密码/令牌 -->
+      <el-input
+        v-else-if="f.type === 'password'"
+        v-model="model[f.name]"
+        type="password"
+        show-password
+        :placeholder="f.placeholder"
+        autocomplete="new-password"
+      />
       <!-- 整数 -->
       <el-input-number
         v-else-if="f.type === 'int'"

@@ -21,13 +21,27 @@ func (m *mockOutput) Publish(dp model.DataPoint) error {
 
 func (m *mockOutput) Close() error { return nil }
 
+// newTestManager 用一组输出构造 Manager 并完成首次 Reload。
+func newTestManager(t *testing.T, outs ...output.Output) *output.Manager {
+	t.Helper()
+	mgr := output.NewManager(func() ([]output.Output, error) {
+		return outs, nil
+	})
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("reload outputs: %v", err)
+	}
+	t.Cleanup(mgr.Close)
+	return mgr
+}
+
 func TestRunPipeline(t *testing.T) {
 	dataPoints := make(chan model.DataPoint, 2)
 	mock := &mockOutput{ch: make(chan model.DataPoint, 4)}
+	mgr := newTestManager(t, mock)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go RunPipeline(ctx, dataPoints, []output.Output{mock})
+	go RunPipeline(ctx, dataPoints, mgr)
 
 	dataPoints <- model.DataPoint{DeviceID: "d1", Point: "p1", Value: 1, Quality: model.QualityGood}
 	dataPoints <- model.DataPoint{DeviceID: "d1", Point: "p2", Value: 2, Quality: model.QualityGood}
@@ -47,10 +61,11 @@ func TestRunPipelineFanout(t *testing.T) {
 	dataPoints := make(chan model.DataPoint, 1)
 	out1 := &mockOutput{ch: make(chan model.DataPoint, 4)}
 	out2 := &mockOutput{ch: make(chan model.DataPoint, 4)}
+	mgr := newTestManager(t, out1, out2)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go RunPipeline(ctx, dataPoints, []output.Output{out1, out2})
+	go RunPipeline(ctx, dataPoints, mgr)
 
 	dataPoints <- model.DataPoint{DeviceID: "d1", Point: "p1", Value: 1, Quality: model.QualityGood}
 	for _, ch := range []chan model.DataPoint{out1.ch, out2.ch} {

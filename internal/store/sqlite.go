@@ -49,6 +49,17 @@ CREATE TABLE IF NOT EXISTS client (
     scopes       TEXT NOT NULL DEFAULT '[]',
     enabled      INTEGER NOT NULL DEFAULT 1,
     created_at   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS output (
+    id      TEXT PRIMARY KEY,
+    name    TEXT NOT NULL,
+    type    TEXT NOT NULL,
+    config  TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );`
 
 // ErrConnectionInUse 表示连接仍被设备引用,不可删除。
@@ -348,6 +359,105 @@ func (s *Store) DeleteClient(id string) error {
 		return fmt.Errorf("delete client: %w", err)
 	}
 	return nil
+}
+
+// ---- 北向输出 ----
+
+// SaveOutput 插入或更新输出配置(upsert);写入后通知热重载。
+func (s *Store) SaveOutput(o model.Output) error {
+	enabled := 0
+	if o.Enabled {
+		enabled = 1
+	}
+	config := o.Config
+	if len(config) == 0 {
+		config = json.RawMessage(`{}`)
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO output (id, name, type, config, enabled) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, config=excluded.config, enabled=excluded.enabled`,
+		o.ID, o.Name, o.Type, string(config), enabled,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert output: %w", err)
+	}
+	s.notify()
+	return nil
+}
+
+// ListOutputs 返回全部输出配置,按 ID 排序。
+func (s *Store) ListOutputs() ([]model.Output, error) {
+	rows, err := s.db.Query("SELECT id, name, type, config, enabled FROM output ORDER BY id")
+	if err != nil {
+		return nil, fmt.Errorf("query outputs: %w", err)
+	}
+	defer rows.Close()
+	outputs := make([]model.Output, 0)
+	for rows.Next() {
+		o, err := scanOutput(rows)
+		if err != nil {
+			return nil, err
+		}
+		outputs = append(outputs, o)
+	}
+	return outputs, rows.Err()
+}
+
+// GetOutput 返回单个输出配置;不存在返回 sql.ErrNoRows 包装的错误。
+func (s *Store) GetOutput(id string) (model.Output, error) {
+	row := s.db.QueryRow("SELECT id, name, type, config, enabled FROM output WHERE id = ?", id)
+	o, err := scanOutput(row)
+	if err != nil {
+		return model.Output{}, fmt.Errorf("get output %q: %w", id, err)
+	}
+	return o, nil
+}
+
+// DeleteOutput 删除输出配置。
+func (s *Store) DeleteOutput(id string) error {
+	if _, err := s.db.Exec("DELETE FROM output WHERE id = ?", id); err != nil {
+		return fmt.Errorf("delete output: %w", err)
+	}
+	s.notify()
+	return nil
+}
+
+func scanOutput(row rowScanner) (model.Output, error) {
+	var o model.Output
+	var config string
+	var enabled int
+	if err := row.Scan(&o.ID, &o.Name, &o.Type, &config, &enabled); err != nil {
+		return model.Output{}, err
+	}
+	o.Config = json.RawMessage(config)
+	o.Enabled = enabled != 0
+	return o, nil
+}
+
+// ---- 元数据(键值) ----
+
+// SetMeta 写入一个元数据键值(用于一次性迁移标记等)。
+func (s *Store) SetMeta(key, value string) error {
+	if _, err := s.db.Exec(
+		`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		key, value,
+	); err != nil {
+		return fmt.Errorf("set meta: %w", err)
+	}
+	return nil
+}
+
+// GetMeta 读取元数据键值;不存在返回 ("", false, nil)。
+func (s *Store) GetMeta(key string) (string, bool, error) {
+	var value string
+	err := s.db.QueryRow("SELECT value FROM meta WHERE key = ?", key).Scan(&value)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("get meta: %w", err)
+	}
+	return value, true, nil
 }
 
 func scanClient(row rowScanner) (model.Client, error) {
