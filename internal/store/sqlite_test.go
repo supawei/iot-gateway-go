@@ -233,28 +233,6 @@ func TestDeleteOutput(t *testing.T) {
 	}
 }
 
-func TestMeta(t *testing.T) {
-	st := newTestStore(t)
-	if _, ok, err := st.GetMeta("k"); err != nil || ok {
-		t.Fatalf("get missing meta: ok=%v err=%v", ok, err)
-	}
-	if err := st.SetMeta("k", "v"); err != nil {
-		t.Fatalf("set meta: %v", err)
-	}
-	v, ok, err := st.GetMeta("k")
-	if err != nil || !ok || v != "v" {
-		t.Fatalf("get meta: v=%q ok=%v err=%v", v, ok, err)
-	}
-	// 覆盖写
-	if err := st.SetMeta("k", "v2"); err != nil {
-		t.Fatalf("overwrite meta: %v", err)
-	}
-	v, _, _ = st.GetMeta("k")
-	if v != "v2" {
-		t.Fatalf("meta not overwritten: %q", v)
-	}
-}
-
 func TestOnChange(t *testing.T) {
 	st := newTestStore(t)
 	saveSampleConnection(t, st)

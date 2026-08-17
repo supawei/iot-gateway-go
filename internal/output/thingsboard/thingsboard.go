@@ -39,17 +39,16 @@ const (
 )
 
 // Config 是 ThingsBoard 输出的配置(存 SQLite,经 Web UI 配置)。
-// 同时保留 yaml tag 以兼容旧 config.yaml 的一次性迁移(见 main.migrateOutputs)。
 type Config struct {
-	Broker           string `json:"broker" yaml:"broker"`                     // MQTT broker,如 tcp://tb.example.com:1883
-	AccessToken      string `json:"accessToken" yaml:"accessToken"`           // 网关设备 Access Token(作为 MQTT 用户名)
-	ClientID         string `json:"clientId" yaml:"clientId"`                 // MQTT client id
-	Username         string `json:"username" yaml:"username"`                 // 可选,覆盖默认的 AccessToken 用户名
-	Password         string `json:"password" yaml:"password"`                 // 可选
-	QoS              byte   `json:"qos" yaml:"qos"`                           // 默认 1
-	DeviceNamePrefix string `json:"deviceNamePrefix" yaml:"deviceNamePrefix"` // 子设备名前缀,默认空
-	ReportQuality    *bool  `json:"reportQuality" yaml:"reportQuality"`       // 是否上报 quality 属性,默认 true
-	FlushInterval    string `json:"flushInterval" yaml:"flushInterval"`       // 微批 flush 间隔,如 "200ms",默认 200ms
+	Broker           string `json:"broker"`           // MQTT broker,如 tcp://tb.example.com:1883
+	AccessToken      string `json:"accessToken"`      // 网关设备 Access Token(作为 MQTT 用户名)
+	ClientID         string `json:"clientId"`         // MQTT client id
+	Username         string `json:"username"`         // 可选,覆盖默认的 AccessToken 用户名
+	Password         string `json:"password"`         // 可选
+	QoS              byte   `json:"qos"`              // 默认 1
+	DeviceNamePrefix string `json:"deviceNamePrefix"` // 子设备名前缀,默认空
+	ReportQuality    *bool  `json:"reportQuality"`    // 是否上报 quality 属性,默认 true
+	FlushInterval    string `json:"flushInterval"`    // 微批 flush 间隔,如 "200ms",默认 200ms
 }
 
 // init 注册 ThingsBoard 输出类型:声明配置 schema 并绑定构造器。

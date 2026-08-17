@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -56,11 +55,6 @@ func main() {
 		fatal("open store failed", "err", err)
 	}
 	defer st.Close()
-
-	// 旧版本把北向输出写在 config.yaml;一次性迁移到 SQLite(标记迁移完成,避免重复导入)。
-	if err := migrateOutputs(st, cfg); err != nil {
-		fatal("migrate outputs failed", "err", err)
-	}
 
 	// 下行写回调:共享属性/RPC → core.WritePoint → 驱动 Writer。
 	write := func(ctx context.Context, deviceID, point string, value interface{}) error {
@@ -207,48 +201,4 @@ func buildOutputs(st *store.Store, gatewayID string, write output.WriteFunc) out
 		}
 		return result, nil
 	}
-}
-
-// migrateOutputs 把旧版本 config.yaml 里的北向输出一次性迁移到 SQLite 输出表。
-// 用 meta 表标记迁移完成,避免用户在 UI 删光输出后重启又被旧 yaml 覆盖。
-func migrateOutputs(st *store.Store, cfg config.Config) error {
-	migrated, _, err := st.GetMeta("outputs_migrated")
-	if err != nil {
-		return err
-	}
-	if migrated == "1" {
-		return nil
-	}
-
-	type entry struct {
-		id, name, typ string
-		config        any
-	}
-	entries := make([]entry, 0, 3)
-	if cfg.MQTT.Broker != "" {
-		entries = append(entries, entry{"mqtt", "MQTT", "mqtt", cfg.MQTT})
-	}
-	if cfg.ThingsBoard.Broker != "" && cfg.ThingsBoard.AccessToken != "" {
-		entries = append(entries, entry{"thingsboard", "ThingsBoard", "thingsboard", cfg.ThingsBoard})
-	}
-	if cfg.TDengine.URL != "" {
-		entries = append(entries, entry{"tdengine", "TDengine", "tdengine", cfg.TDengine})
-	}
-
-	for _, e := range entries {
-		raw, err := json.Marshal(e.config)
-		if err != nil {
-			return fmt.Errorf("migrate output %q: %w", e.id, err)
-		}
-		o := model.Output{ID: e.id, Name: e.name, Type: e.typ, Config: raw, Enabled: true}
-		if err := st.SaveOutput(o); err != nil {
-			return fmt.Errorf("migrate output %q: %w", e.id, err)
-		}
-		slog.Warn("migrated output config from config.yaml to sqlite", "output", e.id)
-	}
-
-	if err := st.SetMeta("outputs_migrated", "1"); err != nil {
-		return err
-	}
-	return nil
 }

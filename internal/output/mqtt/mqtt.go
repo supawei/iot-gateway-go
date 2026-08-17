@@ -17,13 +17,12 @@ const (
 )
 
 // Config 是 MQTT 输出的配置(存 SQLite,经 Web UI 配置)。
-// 同时保留 yaml tag 以兼容旧 config.yaml 的一次性迁移(见 main.migrateOutputs)。
 type Config struct {
-	Broker   string `json:"broker" yaml:"broker"`
-	ClientID string `json:"clientId" yaml:"clientId"`
-	Username string `json:"username" yaml:"username"`
-	Password string `json:"password" yaml:"password"`
-	QoS      byte   `json:"qos" yaml:"qos"`
+	Broker   string `json:"broker"`
+	ClientID string `json:"clientId"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	QoS      byte   `json:"qos"`
 }
 
 // init 注册 MQTT 输出类型:声明配置 schema 并绑定构造器。

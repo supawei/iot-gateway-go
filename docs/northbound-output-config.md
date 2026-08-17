@@ -75,7 +75,6 @@ broker 地址、凭据属于"部署环境"信息,天然适合 yaml 这类**可�
 
 - `model.Output{ID, Name, Type, Config, Enabled}`:一条记录对应一个输出插件实例。
 - SQLite 新增 `output` 表(`id/name/type/config/enabled`);`Type` 取值 `mqtt` / `thingsboard` / `tdengine`。
-- 新增 `meta` 键值表,用于"输出已迁移"的一次性标记(见 7.3)。
 
 ### 7.2 输出注册表与热重载(OutputManager)
 
@@ -86,11 +85,10 @@ broker 地址、凭据属于"部署环境"信息,天然适合 yaml 这类**可�
   - **设备通知**:scheduler 经 `Manager.Notifiers()` 动态获取实现 `DeviceNotifier` 的输出,热重载后自动跟随最新输出。
 - `BuildContext{GatewayID, Write}` 由 main 注入:gatewayID 用于 topic/标识,Write 为下行写回调(落到 `core.WritePoint`),二者属网关上下文而非输出自身配置,故不进注册表。
 
-### 7.3 旧 config.yaml 一次性迁移
+### 7.3 配置来源切换
 
-- 输出配置原在 config.yaml;升级后首次启动,若输出表为空且 yaml 有 `mqtt`/`thingsboard`/`tdengine` 段,则自动导入 SQLite 并写 `meta["outputs_migrated"]="1"`。
-- 迁移标记防止"用户在 UI 删光输出后重启又被旧 yaml 覆盖"。
-- 迁移后 config.yaml 里的输出段不再生效(仅作为迁移种子保留),配置一律以 Web UI 为准。
+- 北向输出配置从 config.yaml 移除,改由 Web UI 写入 SQLite;项目未对外发布,故不做旧 yaml 迁移,配置文件输出段直接删除。
+- config.yaml 保留的仅剩引导配置(存储路径 / HTTP / 日志 / 鉴权开关 / 调度池大小)。
 
 ### 7.4 API 与权限
 

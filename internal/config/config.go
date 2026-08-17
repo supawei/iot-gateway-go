@@ -5,10 +5,6 @@ import (
 	"os"
 
 	"gopkg.in/yaml.v3"
-
-	"iot-gateway-go/internal/output/mqtt"
-	"iot-gateway-go/internal/output/tdengine"
-	"iot-gateway-go/internal/output/thingsboard"
 )
 
 const (
@@ -31,10 +27,7 @@ type Config struct {
 		Enabled    *bool  `yaml:"enabled"` // 默认 true;显式 false 关闭鉴权(逃生舱)
 		SessionTTL string `yaml:"sessionTtl"`
 	} `yaml:"auth"`
-	MQTT        mqtt.Config        `yaml:"mqtt"`
-	ThingsBoard thingsboard.Config `yaml:"thingsboard"`
-	TDengine    tdengine.Config    `yaml:"tdengine"`
-	Storage     struct {
+	Storage struct {
 		SqlitePath string `yaml:"sqlitePath"`
 	} `yaml:"storage"`
 	Scheduler struct {

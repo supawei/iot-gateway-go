@@ -56,10 +56,6 @@ CREATE TABLE IF NOT EXISTS output (
     type    TEXT NOT NULL,
     config  TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1
-);
-CREATE TABLE IF NOT EXISTS meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
 );`
 
 // ErrConnectionInUse 表示连接仍被设备引用,不可删除。
@@ -432,32 +428,6 @@ func scanOutput(row rowScanner) (model.Output, error) {
 	o.Config = json.RawMessage(config)
 	o.Enabled = enabled != 0
 	return o, nil
-}
-
-// ---- 元数据(键值) ----
-
-// SetMeta 写入一个元数据键值(用于一次性迁移标记等)。
-func (s *Store) SetMeta(key, value string) error {
-	if _, err := s.db.Exec(
-		`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-		key, value,
-	); err != nil {
-		return fmt.Errorf("set meta: %w", err)
-	}
-	return nil
-}
-
-// GetMeta 读取元数据键值;不存在返回 ("", false, nil)。
-func (s *Store) GetMeta(key string) (string, bool, error) {
-	var value string
-	err := s.db.QueryRow("SELECT value FROM meta WHERE key = ?", key).Scan(&value)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", false, nil
-		}
-		return "", false, fmt.Errorf("get meta: %w", err)
-	}
-	return value, true, nil
 }
 
 func scanClient(row rowScanner) (model.Client, error) {
