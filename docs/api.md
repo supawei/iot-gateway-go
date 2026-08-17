@@ -205,17 +205,16 @@ PollBlock:
 
 `POST /api/v1/connections`
 
-创建或整体覆盖一个连接。`id` 必填。
+创建或整体覆盖一个连接。`id` 可省略,省略时后台自动生成(格式 `conn-<8位十六进制>`);显式传入同 `id` 则覆盖更新。
 
 **请求体**:Connection 对象
 
-**响应**:`201 Created` + 创建的 Connection
+**响应**:`201 Created` + 创建的 Connection(含生成的 `id`)
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/connections \
   -H 'Content-Type: application/json' \
   -d '{
-    "id": "conn-1",
     "name": "车间 Modbus TCP",
     "driver": "modbus",
     "config": {"mode":"tcp","address":"192.168.1.5:502"}
@@ -258,17 +257,16 @@ curl -X POST http://localhost:8080/api/v1/connections \
 
 `POST /api/v1/devices`
 
-创建或整体覆盖一个设备(含点位)。`id` 必填,`connectionId` 必须指向已存在的连接。
+创建或整体覆盖一个设备(含点位)。`id` 可省略,省略时后台自动生成(格式 `dev-<8位十六进制>`);`connectionId` 必须指向已存在的连接。
 
 **请求体**:Device 对象
 
-**响应**:`201 Created` + 创建的 Device
+**响应**:`201 Created` + 创建的 Device(含生成的 `id`)
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/devices \
   -H 'Content-Type: application/json' \
   -d '{
-    "id": "sensor-01",
     "name": "温湿度传感器",
     "connectionId": "conn-1",
     "params": {"slaveId":1},
@@ -315,12 +313,12 @@ curl -X POST http://localhost:8080/api/v1/devices \
 
 `POST /api/v1/devices/{deviceId}/clone`
 
-基于源设备复制出新设备,点表(`points`)整体拷贝,避免同型号设备重复配点。请求体提供新设备的 `id` 与 `name`(必填),其余字段未提供则从源设备继承、提供则覆盖。
+基于源设备复制出新设备,点表(`points`)整体拷贝,避免同型号设备重复配点。请求体提供新设备 `name`(必填),`id` 可省略(后台自动生成);其余字段未提供则从源设备继承、提供则覆盖。
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `id` | 是 | 新设备 ID |
 | `name` | 是 | 新设备名称 |
+| `id` | 否 | 不传则后台自动生成(`dev-<8位十六进制>`) |
 | `connectionId` | 否 | 不传则继承源设备 |
 | `params` | 否 | 不传则继承源设备(常用于改 `slaveId`) |
 | `intervalMs` | 否 | 不传则继承源设备 |
@@ -329,10 +327,10 @@ curl -X POST http://localhost:8080/api/v1/devices \
 **响应**:`201 Created` + 新建的 Device;源设备不存在则 `404`
 
 ```bash
-# 复制 sensor-01 为 sensor-02,仅改从机地址
+# 复制 sensor-01(ID 自动生成),仅改从机地址
 curl -X POST http://localhost:8080/api/v1/devices/sensor-01/clone \
   -H 'Content-Type: application/json' \
-  -d '{"id":"sensor-02","name":"温湿度-2","params":{"slaveId":2}}'
+  -d '{"name":"温湿度-2","params":{"slaveId":2}}'
 ```
 
 #### 写入设备点位

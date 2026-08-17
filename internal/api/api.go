@@ -1,11 +1,14 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"iot-gateway-go/internal/auth"
 	"iot-gateway-go/internal/core"
@@ -85,8 +88,7 @@ func (a *API) createConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if conn.ID == "" {
-		writeError(w, http.StatusBadRequest, errors.New("connection id is required"))
-		return
+		conn.ID = a.uniqueConnectionID()
 	}
 	if !a.checkEndpointConflict(w, conn) {
 		return
@@ -96,6 +98,42 @@ func (a *API) createConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, conn)
+}
+
+// idRetryLimit 是自动生成 ID 撞已有 ID 时的重试次数;8 位十六进制随机空间下
+// 实际碰撞概率趋近于零,重试只是兜底。
+const idRetryLimit = 5
+
+// generateID 生成短随机 ID:前缀 + 8 位十六进制(如 conn-1a2b3c4d)。
+func generateID(prefix string) string {
+	var buf [4]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// crypto/rand 失败几乎不可能发生,用纳秒时间戳兜底保证仍有唯一性
+		return fmt.Sprintf("%s%x", prefix, time.Now().UnixNano())
+	}
+	return prefix + hex.EncodeToString(buf[:])
+}
+
+// uniqueConnectionID 生成未占用的连接 ID。
+func (a *API) uniqueConnectionID() string {
+	for range idRetryLimit {
+		candidate := generateID("conn-")
+		if _, err := a.store.GetConnection(candidate); err != nil {
+			return candidate
+		}
+	}
+	return generateID("conn-")
+}
+
+// uniqueDeviceID 生成未占用的设备 ID。
+func (a *API) uniqueDeviceID() string {
+	for range idRetryLimit {
+		candidate := generateID("dev-")
+		if _, err := a.store.GetDevice(candidate); err != nil {
+			return candidate
+		}
+	}
+	return generateID("dev-")
 }
 
 // checkEndpointConflict 阻止两个 Connection 指向同一物理端点(同串口/同 DTU 地址),
@@ -200,8 +238,7 @@ func (a *API) createDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if device.ID == "" {
-		writeError(w, http.StatusBadRequest, errors.New("device id is required"))
-		return
+		device.ID = a.uniqueDeviceID()
 	}
 	if err := a.store.SaveDevice(device); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -231,9 +268,12 @@ func (a *API) cloneDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if req.ID == "" || req.Name == "" {
-		writeError(w, http.StatusBadRequest, errors.New("clone requires id and name"))
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, errors.New("clone requires name"))
 		return
+	}
+	if req.ID == "" {
+		req.ID = a.uniqueDeviceID()
 	}
 	cloned := model.Device{
 		ID:           req.ID,

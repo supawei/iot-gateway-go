@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -213,19 +214,6 @@ func TestGetDeviceNotFound(t *testing.T) {
 	}
 }
 
-func TestCreateDeviceMissingID(t *testing.T) {
-	apiInstance := newTestAPI(t)
-	handler := apiInstance.Routes()
-	seedConnection(t, handler)
-
-	device := sampleDevice()
-	device.ID = ""
-	rec := doRequest(t, handler, "POST", "/api/v1/devices", device)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("create missing id: got %d want %d", rec.Code, http.StatusBadRequest)
-	}
-}
-
 func TestListDevices(t *testing.T) {
 	apiInstance := newTestAPI(t)
 	handler := apiInstance.Routes()
@@ -361,12 +349,67 @@ func TestCloneDevice(t *testing.T) {
 	}
 }
 
+// TestCreateAutoID 验证连接/设备新增不带 id 时由后台生成(conn-/dev- 前缀),
+// 两次生成互不相同;克隆不带 id 同样自动生成。
+func TestCreateAutoID(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
+	newConn := sampleConnection()
+	newConn.ID = ""
+	rec := doRequest(t, handler, "POST", "/api/v1/connections", newConn)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create connection without id: got %d", rec.Code)
+	}
+	var createdConn model.Connection
+	if err := json.Unmarshal(rec.Body.Bytes(), &createdConn); err != nil {
+		t.Fatalf("unmarshal connection: %v", err)
+	}
+	if !strings.HasPrefix(createdConn.ID, "conn-") || len(createdConn.ID) == len("conn-") {
+		t.Fatalf("connection id not auto-generated: %q", createdConn.ID)
+	}
+
+	device := sampleDevice()
+	device.ID = ""
+	device.ConnectionID = createdConn.ID
+	rec = doRequest(t, handler, "POST", "/api/v1/devices", device)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create device without id: got %d", rec.Code)
+	}
+	var firstCreated model.Device
+	if err := json.Unmarshal(rec.Body.Bytes(), &firstCreated); err != nil {
+		t.Fatalf("unmarshal device: %v", err)
+	}
+	if !strings.HasPrefix(firstCreated.ID, "dev-") || len(firstCreated.ID) == len("dev-") {
+		t.Fatalf("device id not auto-generated: %q", firstCreated.ID)
+	}
+
+	// 第二台不带 id 的设备应得到不同 id
+	device.Name = "第二台"
+	rec = doRequest(t, handler, "POST", "/api/v1/devices", device)
+	var secondCreated model.Device
+	json.Unmarshal(rec.Body.Bytes(), &secondCreated)
+	if secondCreated.ID == firstCreated.ID {
+		t.Fatalf("auto ids collide: %q", firstCreated.ID)
+	}
+
+	rec = doRequest(t, handler, "POST", "/api/v1/devices/"+firstCreated.ID+"/clone", map[string]any{"name": "克隆"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("clone without id: got %d", rec.Code)
+	}
+	var cloned model.Device
+	json.Unmarshal(rec.Body.Bytes(), &cloned)
+	if !strings.HasPrefix(cloned.ID, "dev-") || cloned.ID == firstCreated.ID {
+		t.Fatalf("clone id not auto-generated: %q", cloned.ID)
+	}
+}
+
 func TestCloneDeviceMissingSource(t *testing.T) {
 	apiInstance := newTestAPI(t)
 	handler := apiInstance.Routes()
 
 	rec := doRequest(t, handler, "POST", "/api/v1/devices/nonexistent/clone",
-		map[string]any{"id": "x", "name": "x"})
+		map[string]any{"name": "x"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("clone missing source: got %d want %d", rec.Code, http.StatusNotFound)
 	}

@@ -20,7 +20,6 @@ const loading = ref(false)
 const dialogVisible = ref(false)
 const editingId = ref('')
 const form = reactive({
-  id: '',
   name: '',
   connectionId: '',
   intervalMs: 1000,
@@ -81,7 +80,7 @@ function resetParams() {
 function openCreate() {
   editingId.value = ''
   Object.assign(form, {
-    id: '', name: '', connectionId: connections.value[0]?.id || '',
+    name: '', connectionId: connections.value[0]?.id || '',
     intervalMs: 1000, enabled: true, points: [],
   })
   resetParams()
@@ -90,7 +89,6 @@ function openCreate() {
 
 function openEdit(row) {
   editingId.value = row.id
-  form.id = row.id
   form.name = row.name
   form.connectionId = row.connectionId
   form.intervalMs = row.intervalMs
@@ -111,7 +109,6 @@ async function save() {
     return
   }
   const payload = {
-    id: form.id,
     name: form.name,
     connectionId: form.connectionId,
     intervalMs: Number(form.intervalMs) || 0,
@@ -155,18 +152,17 @@ async function remove(row) {
 // ---- 克隆 ----
 const cloneVisible = ref(false)
 const cloneSource = ref(null)
-const cloneForm = reactive({ id: '', name: '' })
+const cloneForm = reactive({ name: '' })
 
 function openClone(row) {
   cloneSource.value = row
-  cloneForm.id = ''
-  cloneForm.name = ''
+  cloneForm.name = `${row.name || row.id}-copy`
   cloneVisible.value = true
 }
 
 async function doClone() {
   try {
-    await api.cloneDevice(cloneSource.value.id, { id: cloneForm.id, name: cloneForm.name })
+    await api.cloneDevice(cloneSource.value.id, { name: cloneForm.name })
     ElMessage.success('已克隆')
     cloneVisible.value = false
     load()
@@ -322,12 +318,7 @@ onUnmounted(() => {
       <el-form :model="form" label-width="90px">
         <el-row :gutter="14">
           <el-col :span="12">
-            <el-form-item label="ID" required>
-              <el-input v-model="form.id" :disabled="!!editingId" placeholder="sensor-01" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="名称">
+            <el-form-item label="名称" required>
               <el-input v-model="form.name" placeholder="温湿度传感器" />
             </el-form-item>
           </el-col>
@@ -384,9 +375,6 @@ onUnmounted(() => {
     <!-- 克隆对话框 -->
     <el-dialog v-model="cloneVisible" title="克隆设备" width="420px" destroy-on-close>
       <el-form :model="cloneForm" label-width="70px">
-        <el-form-item label="新 ID" required>
-          <el-input v-model="cloneForm.id" placeholder="sensor-02" />
-        </el-form-item>
         <el-form-item label="名称" required>
           <el-input v-model="cloneForm.name" placeholder="温湿度-2" />
         </el-form-item>

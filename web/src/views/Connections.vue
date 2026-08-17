@@ -12,7 +12,7 @@ const loading = ref(false)
 const dialogVisible = ref(false)
 const editingId = ref('')
 
-const form = reactive({ id: '', name: '', driver: '' })
+const form = reactive({ name: '', driver: '' })
 const configModel = ref({})
 
 const driverMap = computed(() => {
@@ -41,7 +41,6 @@ function resetConfig(driver) {
 
 function openCreate() {
   editingId.value = ''
-  form.id = ''
   form.name = ''
   const first = drivers.value[0]?.name || ''
   resetConfig(first)
@@ -50,7 +49,6 @@ function openCreate() {
 
 function openEdit(row) {
   editingId.value = row.id
-  form.id = row.id
   form.name = row.name
   form.driver = row.driver
   configModel.value = modelFromValue(driverMap.value[row.driver]?.config || [], row.config)
@@ -65,7 +63,7 @@ async function save() {
     ElMessage.error(e.message)
     return
   }
-  const payload = { id: form.id, name: form.name, driver: form.driver, config }
+  const payload = { name: form.name, driver: form.driver, config }
   try {
     if (editingId.value) {
       await api.updateConnection(editingId.value, payload)
@@ -141,9 +139,6 @@ onMounted(load)
       destroy-on-close
     >
       <el-form label-width="90px">
-        <el-form-item label="ID" required>
-          <el-input v-model="form.id" :disabled="!!editingId" placeholder="conn-1" />
-        </el-form-item>
         <el-form-item label="名称">
           <el-input v-model="form.name" placeholder="车间 Modbus TCP" />
         </el-form-item>
