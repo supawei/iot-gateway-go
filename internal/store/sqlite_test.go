@@ -17,6 +17,23 @@ func newTestStore(t *testing.T) *Store {
 	return st
 }
 
+// TestDSNPragmas 验证并发相关的 PRAGMA 注入逻辑。
+func TestDSNPragmas(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"gateway.db", "file:gateway.db?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"},
+		{"/data/gateway.db", "file:/data/gateway.db?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"},
+		{":memory:", ":memory:"},
+		{"file:existing.db?_pragma=journal_mode(MEMORY)", "file:existing.db?_pragma=journal_mode(MEMORY)"},
+	}
+	for _, tc := range cases {
+		if got := dsnWithPragmas(tc.in); got != tc.want {
+			t.Errorf("dsnWithPragmas(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func sampleConnection() model.Connection {
 	return model.Connection{
 		ID:     "conn-1",

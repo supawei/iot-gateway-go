@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 
@@ -81,7 +82,8 @@ type Store struct {
 }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	dsn := dsnWithPragmas(path)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -98,6 +100,18 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("bootstrap gateway settings: %w", err)
 	}
 	return &Store{db: db, changeCh: make(chan struct{}, 1)}, nil
+}
+
+// dsnWithPragmas 为连接串附加并发相关的 PRAGMA：
+//   - busy_timeout: 写锁竞争时等待而不是立即报 SQLITE_BUSY（多协程并发写必需）
+//   - journal_mode(WAL): 读写并发不互相阻塞（WAL 允许读与写同时进行）
+//
+// :memory: 数据库无需（也不适用）这些 pragma，原样返回。
+func dsnWithPragmas(path string) string {
+	if path == ":memory:" || strings.Contains(path, "?") {
+		return path
+	}
+	return "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 }
 
 func (s *Store) Close() error {
