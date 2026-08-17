@@ -107,11 +107,6 @@ onMounted(load)
 
     <div class="panel">
       <el-table v-loading="loading" :data="list" empty-text="暂无连接">
-        <el-table-column label="ID" min-width="140">
-          <template #default="{ row }">
-            <span class="mono">{{ row.id }}</span>
-          </template>
-        </el-table-column>
         <el-table-column prop="name" label="名称" min-width="150" />
         <el-table-column label="驱动" width="150">
           <template #default="{ row }">

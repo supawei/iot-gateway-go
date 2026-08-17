@@ -34,6 +34,12 @@ const statusMap = computed(() => {
   return m
 })
 
+const connectionNameMap = computed(() => {
+  const m = {}
+  for (const c of connections.value) m[c.id] = c.name || c.id
+  return m
+})
+
 const driverMap = computed(() => {
   const m = {}
   for (const d of drivers.value) m[d.name] = d
@@ -260,15 +266,10 @@ onUnmounted(() => {
 
     <div class="panel">
       <el-table v-loading="loading" :data="list" empty-text="暂无设备">
-        <el-table-column label="ID" min-width="140">
-          <template #default="{ row }">
-            <span class="mono">{{ row.id }}</span>
-          </template>
-        </el-table-column>
         <el-table-column prop="name" label="名称" min-width="140" />
         <el-table-column label="连接" min-width="140">
           <template #default="{ row }">
-            <span class="mono">{{ row.connectionId }}</span>
+            {{ connectionNameMap[row.connectionId] || row.connectionId }}
           </template>
         </el-table-column>
         <el-table-column label="状态" width="100">
@@ -327,7 +328,12 @@ onUnmounted(() => {
           <el-col :span="12">
             <el-form-item label="连接" required>
               <el-select v-model="form.connectionId" style="width: 100%" placeholder="选择连接" @change="resetParams">
-                <el-option v-for="c in connections" :key="c.id" :label="`${c.id} (${c.driver})`" :value="c.id" />
+                <el-option
+                  v-for="c in connections"
+                  :key="c.id"
+                  :label="`${connectionNameMap[c.id]} (${c.driver})`"
+                  :value="c.id"
+                />
               </el-select>
             </el-form-item>
           </el-col>
