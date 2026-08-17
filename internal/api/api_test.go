@@ -114,7 +114,8 @@ func TestDeleteConnectionBlockedByDevice(t *testing.T) {
 	}
 }
 
-// endpointDriverMock 按配置里的 endpoint 字段返回端点 key,模拟支持冲突检测的驱动。
+// endpointDriverMock 按配置里的 endpoint 字段返回共享命名空间的端点 key,
+// 模拟支持冲突检测的驱动;两个注册名模拟"不同协议的驱动撞同一物理端点"。
 type endpointDriverMock struct{}
 
 func (*endpointDriverMock) Open(context.Context, driver.OpenRequest) (driver.Conn, error) {
@@ -128,29 +129,37 @@ func (*endpointDriverMock) EndpointKey(config json.RawMessage) string {
 	if err := json.Unmarshal(config, &cfg); err != nil || cfg.Endpoint == "" {
 		return ""
 	}
-	return cfg.Endpoint
+	return "serial|" + cfg.Endpoint
 }
 
-// TestCreateConnectionEndpointConflict 验证同驱动两个连接指向同一物理端点被 409 拒绝;
-// 改指向其他端点、以及更新自身(同 ID)不受影响。
+// TestCreateConnectionEndpointConflict 验证两个连接(可跨驱动)指向同一物理端点被
+// 409 拒绝;改指向其他端点、以及更新自身(同 ID)不受影响。
 func TestCreateConnectionEndpointConflict(t *testing.T) {
-	driver.Register("mock-endpoint", &endpointDriverMock{})
+	driver.Register("mock-endpoint-a", &endpointDriverMock{})
+	driver.Register("mock-endpoint-b", &endpointDriverMock{})
 	apiInstance := newTestAPI(t)
 	handler := apiInstance.Routes()
 
-	first := model.Connection{ID: "conn-a", Name: "a", Driver: "mock-endpoint",
+	first := model.Connection{ID: "conn-a", Name: "a", Driver: "mock-endpoint-a",
 		Config: json.RawMessage(`{"endpoint":"/dev/ttyS0"}`)}
 	if rec := doRequest(t, handler, "POST", "/api/v1/connections", first); rec.Code != http.StatusCreated {
 		t.Fatalf("create first: got %d", rec.Code)
 	}
 
-	duplicate := model.Connection{ID: "conn-b", Name: "b", Driver: "mock-endpoint",
+	sameDriver := model.Connection{ID: "conn-b", Name: "b", Driver: "mock-endpoint-a",
 		Config: json.RawMessage(`{"endpoint":"/dev/ttyS0"}`)}
-	if rec := doRequest(t, handler, "POST", "/api/v1/connections", duplicate); rec.Code != http.StatusConflict {
+	if rec := doRequest(t, handler, "POST", "/api/v1/connections", sameDriver); rec.Code != http.StatusConflict {
 		t.Fatalf("create duplicate endpoint: got %d want %d", rec.Code, http.StatusConflict)
 	}
 
-	other := model.Connection{ID: "conn-b", Name: "b", Driver: "mock-endpoint",
+	// 跨驱动撞同一串口同样拒绝:一个串口只允许一个连接,与协议无关
+	crossDriver := model.Connection{ID: "conn-c", Name: "c", Driver: "mock-endpoint-b",
+		Config: json.RawMessage(`{"endpoint":"/dev/ttyS0"}`)}
+	if rec := doRequest(t, handler, "POST", "/api/v1/connections", crossDriver); rec.Code != http.StatusConflict {
+		t.Fatalf("create cross-driver duplicate endpoint: got %d want %d", rec.Code, http.StatusConflict)
+	}
+
+	other := model.Connection{ID: "conn-b", Name: "b", Driver: "mock-endpoint-a",
 		Config: json.RawMessage(`{"endpoint":"/dev/ttyS1"}`)}
 	if rec := doRequest(t, handler, "POST", "/api/v1/connections", other); rec.Code != http.StatusCreated {
 		t.Fatalf("create other endpoint: got %d", rec.Code)

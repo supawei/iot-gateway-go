@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -26,14 +27,22 @@ type opcuaDriver struct {
 	pool map[string]*sharedSession
 }
 
-// EndpointKey 归一化物理端点(server URL):两个连接指向同一 server 会各自建
-// session,虽不似总线那般冲突,但重复配置几乎必属误配,保存时同样拒绝。
+// EndpointKey 从 endpoint URL 提取 host:port 进跨驱动共享命名空间:
+// 同一 server 端点只允许一个连接,重复配置几乎必属误配,保存时拒绝。
 func (*opcuaDriver) EndpointKey(connection json.RawMessage) string {
 	cfg, err := parseConnConfig(connection)
 	if err != nil {
 		return ""
 	}
-	return "opcua|" + strings.ToLower(strings.TrimSpace(cfg.Endpoint))
+	parsed, err := url.Parse(strings.TrimSpace(cfg.Endpoint))
+	if err != nil || parsed.Hostname() == "" {
+		return ""
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = defaultEndpointPort
+	}
+	return "tcp|" + strings.ToLower(parsed.Hostname()) + ":" + port
 }
 
 // ConfigSchema 声明 Connection.config 结构。
@@ -556,6 +565,9 @@ const (
 
 	defaultPublishInterval = 1 * time.Second
 	defaultQueueSize       = 10
+
+	// opc.tcp URL 未写端口时的缺省值,用于端点归一化
+	defaultEndpointPort = "4840"
 )
 
 func parseConnConfig(raw json.RawMessage) (connConfig, error) {

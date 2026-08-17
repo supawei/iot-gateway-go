@@ -277,8 +277,8 @@ func TestEndpointKey(t *testing.T) {
 	}{
 		{"tcp address", `{"mode":"tcp","address":"192.168.1.5:502"}`, "tcp|192.168.1.5:502"},
 		{"tcp address normalized", `{"mode":"tcp","address":"  Host.example.COM:502 "}`, "tcp|host.example.com:502"},
-		{"rtu serial port", `{"mode":"rtu","serialPort":"/dev/ttyS0"}`, "rtu|/dev/ttys0"},
-		{"rtu-over-tcp", `{"mode":"rtu-over-tcp","address":"10.0.0.7:9000"}`, "rtu-over-tcp|10.0.0.7:9000"},
+		{"rtu serial port", `{"mode":"rtu","serialPort":"/dev/ttyS0"}`, "serial|/dev/ttys0"},
+		{"rtu-over-tcp same endpoint as tcp", `{"mode":"rtu-over-tcp","address":"192.168.1.5:502"}`, "tcp|192.168.1.5:502"},
 		{"invalid config", `{"mode":"tcp"`, ""},
 		{"unknown mode", `{"mode":"udp","address":"x"}`, ""},
 	}

@@ -98,20 +98,13 @@ func (a *API) createConnection(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, conn)
 }
 
-// checkEndpointConflict 阻止两个 Connection 指向同一物理端点(同串口/同 DTU 地址):
-// 连接池按 ConnectionID 复用,重复端点意味着两条并发通道写同一条 485 总线,帧碰撞。
-// 驱动未注册/未实现 EndpointResolver/端点无法识别时跳过检查(保持旧行为,校验留给采集期)。
+// checkEndpointConflict 阻止两个 Connection 指向同一物理端点(同串口/同 DTU 地址),
+// 不限驱动:同一串口/DTU 上不同协议的连接同样会并发写同一条总线,帧碰撞。
+// key 由各连接自己的驱动按共享命名空间(serial|/tcp|/listen|)计算。
+// 驱动未注册/未实现 EndpointResolver/端点无法识别时跳过检查(校验留给采集期)。
 // 返回 false 表示已写响应应终止。
 func (a *API) checkEndpointConflict(w http.ResponseWriter, conn model.Connection) bool {
-	drv, err := driver.Get(conn.Driver)
-	if err != nil {
-		return true
-	}
-	resolver, canResolve := drv.(driver.EndpointResolver)
-	if !canResolve {
-		return true
-	}
-	endpointKey := resolver.EndpointKey(conn.Config)
+	endpointKey := a.endpointKey(conn)
 	if endpointKey == "" {
 		return true
 	}
@@ -121,16 +114,29 @@ func (a *API) checkEndpointConflict(w http.ResponseWriter, conn model.Connection
 		return false
 	}
 	for _, other := range existing {
-		if other.ID == conn.ID || other.Driver != conn.Driver {
+		if other.ID == conn.ID {
 			continue
 		}
-		if resolver.EndpointKey(other.Config) == endpointKey {
+		if a.endpointKey(other) == endpointKey {
 			writeError(w, http.StatusConflict, fmt.Errorf(
 				"endpoint already used by connection %q (%s)", other.ID, other.Name))
 			return false
 		}
 	}
 	return true
+}
+
+// endpointKey 取连接的物理端点标识;驱动缺失或无该能力返回空串。
+func (a *API) endpointKey(conn model.Connection) string {
+	drv, err := driver.Get(conn.Driver)
+	if err != nil {
+		return ""
+	}
+	resolver, canResolve := drv.(driver.EndpointResolver)
+	if !canResolve {
+		return ""
+	}
+	return resolver.EndpointKey(conn.Config)
 }
 
 func (a *API) listConnections(w http.ResponseWriter, r *http.Request) {

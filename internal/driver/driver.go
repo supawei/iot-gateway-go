@@ -98,10 +98,15 @@ type Field struct {
 	ShowWhen    *ShowWhen `json:"showWhen,omitempty"`    // 显示条件
 }
 
-// EndpointResolver 是驱动的可选能力:从 Connection.config 计算物理端点标识
-// (串口路径/DTU 地址/server endpoint 等归一化后的 key)。网关据此阻止两个
-// Connection 指向同一物理总线:连接池按 ConnectionID 复用,重复端点会产生两条
-// 并发通道写同一条 485 总线,导致帧碰撞。返回空串表示无法识别,跳过检查。
+// EndpointResolver 是驱动的可选能力:从 Connection.config 计算物理端点标识。
+// key 属于跨驱动的共享命名空间,不含协议/驱动信息,按物理资源取值:
+//   - serial|<串口路径>
+//   - tcp|<host:port>(设备或 DTU 端点)
+//   - listen|<本地绑定地址>(监听型)
+//
+// 网关据此在所有连接间(不限驱动)阻止两个 Connection 指向同一物理总线/端点:
+// 连接池按 ConnectionID 复用,同一串口/DTU 出现两条并发通道会同时写同一条
+// 485 总线,导致帧碰撞。返回空串表示无法识别,跳过检查。
 type EndpointResolver interface {
 	EndpointKey(config json.RawMessage) string
 }

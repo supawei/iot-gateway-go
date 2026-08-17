@@ -15,6 +15,7 @@ import (
 	"math"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,13 +34,21 @@ type modbusListenDriver struct {
 	pool map[string]*sharedListener
 }
 
-// EndpointKey 归一化物理端点(监听地址):两个连接监听同一地址会 bind 冲突,保存时拒绝。
+// EndpointKey 归一化本地绑定地址:通配 host(空/0.0.0.0/::)归一为空,
+// ":502" 与 "0.0.0.0:502" 是同一绑定,两个连接监听同址会 bind 冲突。
 func (*modbusListenDriver) EndpointKey(connection json.RawMessage) string {
 	cfg, err := parseConnConfig(connection)
 	if err != nil {
 		return ""
 	}
-	return "listen|" + cfg.Listen
+	host, port, err := net.SplitHostPort(strings.ToLower(strings.TrimSpace(cfg.Listen)))
+	if err != nil {
+		return ""
+	}
+	if host == "0.0.0.0" || host == "::" {
+		host = ""
+	}
+	return "listen|" + host + ":" + port
 }
 
 // ConfigSchema 声明 Connection.config 结构。
