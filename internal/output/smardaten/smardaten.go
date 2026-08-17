@@ -286,6 +286,7 @@ func connectMQTT(broker, clientID, username, password string, port, protoVer int
 	opts.SetClientID(clientID)
 
 	opts.SetKeepAlive(keepAlive * time.Second)
+	opts.SetConnectTimeout(5 * time.Second) // 初始连接超时，避免阻塞 New() 导致 HTTP 挂起
 	opts.SetAutoReconnect(true)
 	opts.SetConnectRetry(true)
 	opts.SetConnectRetryInterval(2 * time.Second)
