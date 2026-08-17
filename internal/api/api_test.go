@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"iot-gateway-go/internal/auth"
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/status"
@@ -24,7 +25,8 @@ func newTestAPI(t *testing.T) *API {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return New(st, status.NewRegistry(), values.NewRegistry())
+	// 默认关闭鉴权,保持既有测试行为(与历史接口一致);鉴权相关测试单独开启。
+	return New(st, status.NewRegistry(), values.NewRegistry(), nil, false)
 }
 
 func doRequest(t *testing.T, handler http.Handler, method, path string, body interface{}) *httptest.ResponseRecorder {
@@ -433,7 +435,7 @@ func TestStatusEndpoints(t *testing.T) {
 	reg.SetOnline("d1", time.Now())
 	reg.SetOffline("d2", "connection refused")
 
-	handler := New(st, reg, values.NewRegistry()).Routes()
+	handler := New(st, reg, values.NewRegistry(), nil, false).Routes()
 
 	rec := doRequest(t, handler, "GET", "/api/v1/status", nil)
 	if rec.Code != http.StatusOK {
@@ -486,7 +488,7 @@ func TestGetDeviceValues(t *testing.T) {
 		Quality: model.QualityGood, Timestamp: time.Now(),
 	})
 
-	handler := New(st, status.NewRegistry(), reg).Routes()
+	handler := New(st, status.NewRegistry(), reg, nil, false).Routes()
 
 	rec := doRequest(t, handler, "GET", "/api/v1/devices/d1/values", nil)
 	if rec.Code != http.StatusOK {
@@ -541,4 +543,179 @@ func TestListDriversEndpoint(t *testing.T) {
 		}
 	}
 	t.Fatal("api-schema-driver not in response")
+}
+
+// ---- 鉴权与授权 ----
+
+// newAuthAPI 构造开启鉴权的测试 API,并预置管理员。
+func newAuthAPI(t *testing.T) (*API, *auth.Manager) {
+	t.Helper()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	authz := auth.NewManager(st, time.Hour)
+	if _, err := authz.BootstrapAdmin(); err != nil {
+		t.Fatalf("bootstrap admin: %v", err)
+	}
+	return New(st, status.NewRegistry(), values.NewRegistry(), authz, true), authz
+}
+
+// loginAs 登录并返回 Bearer token;默认用预置管理员账号。
+func loginAs(t *testing.T, handler http.Handler, user, pass string) (string, bool) {
+	t.Helper()
+	rec := doRequest(t, handler, "POST", "/api/v1/auth/login", map[string]string{"username": user, "password": pass})
+	if rec.Code != http.StatusOK {
+		return "", false
+	}
+	var resp struct {
+		Token              string `json:"token"`
+		MustChangePassword bool   `json:"mustChangePassword"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	return resp.Token, resp.MustChangePassword
+}
+
+func doRequestAuth(t *testing.T, handler http.Handler, method, path, token string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	var bodyReader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+	req := httptest.NewRequest(method, path, bodyReader)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestLoginAndProtectedEndpoint(t *testing.T) {
+	apiInstance, _ := newAuthAPI(t)
+	handler := apiInstance.Routes()
+
+	// 未带 token 访问业务接口 → 401
+	rec := doRequest(t, handler, "GET", "/api/v1/status", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: got %d want 401", rec.Code)
+	}
+
+	// 登录拿 token(首次须改密)
+	token, mustChange := loginAs(t, handler, auth.DefaultAdminUser, auth.DefaultAdminPassword)
+	if token == "" || !mustChange {
+		t.Fatalf("login: token=%q mustChange=%v", token, mustChange)
+	}
+
+	// 首次登录未改密访问业务接口 → 403(password_change_required)
+	rec = doRequestAuth(t, handler, "GET", "/api/v1/status", token, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("must change password: got %d want 403", rec.Code)
+	}
+
+	// 改密后可正常访问
+	rec = doRequestAuth(t, handler, "PUT", "/api/v1/auth/password", token,
+		map[string]string{"oldPassword": auth.DefaultAdminPassword, "newPassword": "newpass123"})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("change password: got %d", rec.Code)
+	}
+	rec = doRequestAuth(t, handler, "GET", "/api/v1/status", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("after change password: got %d want 200", rec.Code)
+	}
+}
+
+func TestScopeAuthorization(t *testing.T) {
+	apiInstance, authz := newAuthAPI(t)
+	handler := apiInstance.Routes()
+
+	// 创建一个只读三方 client
+	c, key, err := authz.CreateClient("mes-ro", "只读", []string{"devices:read", "status:read", "values:read"})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	if c.ID == "" || key == "" {
+		t.Fatal("create client result empty")
+	}
+
+	// 允许读
+	rec := doRequestAuth(t, handler, "GET", "/api/v1/status", key, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("client read status: got %d want 200", rec.Code)
+	}
+	rec = doRequestAuth(t, handler, "GET", "/api/v1/devices", key, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("client read devices: got %d want 200", rec.Code)
+	}
+	// 拒绝写
+	rec = doRequestAuth(t, handler, "POST", "/api/v1/devices", key, map[string]any{"id": "d1"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("client write devices: got %d want 403", rec.Code)
+	}
+}
+
+func TestClientsCRUDRequiresAdmin(t *testing.T) {
+	apiInstance, authz := newAuthAPI(t)
+	handler := apiInstance.Routes()
+
+	// 未登录 → 401
+	rec := doRequest(t, handler, "GET", "/api/v1/clients", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("list clients no token: got %d want 401", rec.Code)
+	}
+
+	// admin 登录改密后 → 可管理
+	token, _ := loginAs(t, handler, auth.DefaultAdminUser, auth.DefaultAdminPassword)
+	doRequestAuth(t, handler, "PUT", "/api/v1/auth/password", token,
+		map[string]string{"oldPassword": auth.DefaultAdminPassword, "newPassword": "newpass123"})
+
+	rec = doRequestAuth(t, handler, "POST", "/api/v1/clients", token,
+		map[string]any{"id": "mes-ro", "name": "MES", "scopes": []string{"devices:read"}})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create client: got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID     string `json:"id"`
+		APIKey string `json:"apiKey"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	if created.ID != "mes-ro" || created.APIKey == "" {
+		t.Fatalf("create client response: %+v", created)
+	}
+
+	rec = doRequestAuth(t, handler, "GET", "/api/v1/clients", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list clients: got %d", rec.Code)
+	}
+
+	rec = doRequestAuth(t, handler, "DELETE", "/api/v1/clients/mes-ro", token, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete client: got %d", rec.Code)
+	}
+
+	// 三方 client 无权管理 clients(即便有 devices:read)
+	_, key, _ := authz.CreateClient("other", "other", []string{"devices:read"})
+	rec = doRequestAuth(t, handler, "GET", "/api/v1/clients", key, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("client list clients: got %d want 403", rec.Code)
+	}
+}
+
+func TestAuthDisabledBypasses(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	// 鉴权关闭:业务接口无需 token(逃生舱,兼容旧部署)
+	handler := New(st, status.NewRegistry(), values.NewRegistry(), nil, false).Routes()
+	rec := doRequest(t, handler, "GET", "/api/v1/status", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auth disabled: got %d want 200", rec.Code)
+	}
 }

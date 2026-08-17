@@ -27,6 +27,10 @@ type Config struct {
 	HTTP struct {
 		Addr string `yaml:"addr"`
 	} `yaml:"http"`
+	Auth struct {
+		Enabled    *bool  `yaml:"enabled"` // 默认 true;显式 false 关闭鉴权(逃生舱)
+		SessionTTL string `yaml:"sessionTtl"`
+	} `yaml:"auth"`
 	MQTT        mqtt.Config        `yaml:"mqtt"`
 	ThingsBoard thingsboard.Config `yaml:"thingsboard"`
 	TDengine    tdengine.Config    `yaml:"tdengine"`
@@ -74,6 +78,10 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Scheduler.PoolSize <= 0 {
 		cfg.Scheduler.PoolSize = 16
+	}
+	if cfg.Auth.Enabled == nil {
+		enabled := true
+		cfg.Auth.Enabled = &enabled
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = defaultLogLevel

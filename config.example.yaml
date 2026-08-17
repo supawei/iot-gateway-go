@@ -4,6 +4,11 @@ gateway:
 http:
   addr: ":8080"
 
+# API 鉴权(默认启用;管理员由数据库预置,首次登录强制改密)
+# auth:
+#   enabled: true      # 显式 false 关闭鉴权(逃生舱)
+#   sessionTtl: "24h"  # 管理员会话有效期
+
 mqtt:
   broker: "tcp://127.0.0.1:1883"
   clientId: "iot-gateway-gw-01"

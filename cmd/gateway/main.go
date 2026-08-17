@@ -15,6 +15,7 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"iot-gateway-go/internal/api"
+	"iot-gateway-go/internal/auth"
 	"iot-gateway-go/internal/config"
 	"iot-gateway-go/internal/core"
 	"iot-gateway-go/internal/model"
@@ -64,6 +65,22 @@ func main() {
 	valuesReg := values.NewRegistry()
 	dataPoints := make(chan model.DataPoint, datapointBufferSize)
 
+	// 鉴权:预置默认管理员(首次登录强制改密),内存 session TTL 来自配置。
+	sessionTTL := 24 * time.Hour
+	if cfg.Auth.SessionTTL != "" {
+		if d, err := time.ParseDuration(cfg.Auth.SessionTTL); err == nil && d > 0 {
+			sessionTTL = d
+		} else {
+			fatal("invalid auth.sessionTtl", "value", cfg.Auth.SessionTTL)
+		}
+	}
+	authz := auth.NewManager(st, sessionTTL)
+	if created, err := authz.BootstrapAdmin(); err != nil {
+		fatal("bootstrap admin failed", "err", err)
+	} else if created {
+		slog.Warn("bootstrap admin created, login and change the default password", "user", auth.DefaultAdminUser)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -84,7 +101,11 @@ func main() {
 	// 根路由挂内嵌前端(SPA),/api/ 挂 REST 接口,单端口同时提供界面与 API。
 	mux := http.NewServeMux()
 	mux.Handle("/", web.Handler())
-	mux.Handle("/api/", api.New(st, statusReg, valuesReg).Routes())
+	authEnabled := true
+	if cfg.Auth.Enabled != nil {
+		authEnabled = *cfg.Auth.Enabled
+	}
+	mux.Handle("/api/", api.New(st, statusReg, valuesReg, authz, authEnabled).Routes())
 
 	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: mux}
 	go func() {

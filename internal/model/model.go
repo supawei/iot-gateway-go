@@ -14,6 +14,24 @@ type Connection struct {
 	Config json.RawMessage `json:"config"`
 }
 
+// User 是登录管理员账号。密码只存 bcrypt 哈希,不落明文。
+type User struct {
+	ID                 string `json:"id"`
+	PasswordHash       string `json:"-"` // bcrypt 哈希,永不序列化返回
+	MustChangePassword bool   `json:"mustChangePassword"`
+	Enabled            bool   `json:"enabled"`
+}
+
+// Client 是三方系统接入主体,凭 API Key(只存哈希)+ 绑定 scope 授权。
+type Client struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	APIKeyHash string   `json:"-"` // SHA-256 哈希,永不序列化返回
+	Scopes     []string `json:"scopes"`
+	Enabled    bool     `json:"enabled"`
+	CreatedAt  string   `json:"createdAt"`
+}
+
 // Device 表示一个物理或逻辑设备,引用一个 Connection 并携带设备级协议参数。
 // IntervalMs 为设备级采集周期,连读时按此周期批量读取所有点位。
 type Device struct {

@@ -35,6 +35,20 @@ CREATE TABLE IF NOT EXISTS point (
     scale       REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (device_id, name),
     FOREIGN KEY (device_id) REFERENCES device(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS user (
+    id                   TEXT PRIMARY KEY,
+    password_hash        TEXT NOT NULL,
+    must_change_password INTEGER NOT NULL DEFAULT 1,
+    enabled              INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS client (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    api_key_hash TEXT NOT NULL,
+    scopes       TEXT NOT NULL DEFAULT '[]',
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    created_at   TEXT NOT NULL
 );`
 
 // ErrConnectionInUse 表示连接仍被设备引用,不可删除。
@@ -221,6 +235,133 @@ func (s *Store) DeletePoint(deviceID, name string) error {
 	}
 	s.notify()
 	return nil
+}
+
+// ---- 用户 ----
+
+// SaveUser 插入或更新用户(upsert)。密码哈希与改密标志由上层(auth)计算。
+func (s *Store) SaveUser(u model.User) error {
+	mustChange, enabled := 0, 0
+	if u.MustChangePassword {
+		mustChange = 1
+	}
+	if u.Enabled {
+		enabled = 1
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO user (id, password_hash, must_change_password, enabled) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash, must_change_password=excluded.must_change_password, enabled=excluded.enabled`,
+		u.ID, u.PasswordHash, mustChange, enabled,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert user: %w", err)
+	}
+	return nil
+}
+
+// GetUser 返回用户;不存在返回 sql.ErrNoRows 包装的错误。
+func (s *Store) GetUser(id string) (model.User, error) {
+	row := s.db.QueryRow("SELECT id, password_hash, must_change_password, enabled FROM user WHERE id = ?", id)
+	var u model.User
+	var mustChange, enabled int
+	if err := row.Scan(&u.ID, &u.PasswordHash, &mustChange, &enabled); err != nil {
+		return model.User{}, fmt.Errorf("get user %q: %w", id, err)
+	}
+	u.MustChangePassword = mustChange != 0
+	u.Enabled = enabled != 0
+	return u, nil
+}
+
+// CountUsers 返回用户数,用于判断是否需要预置管理员。
+func (s *Store) CountUsers() (int, error) {
+	var n int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM user").Scan(&n); err != nil {
+		return 0, fmt.Errorf("count users: %w", err)
+	}
+	return n, nil
+}
+
+// ---- 三方 client ----
+
+// SaveClient 插入或更新三方 client;scope 以 JSON 数组存。
+func (s *Store) SaveClient(c model.Client) error {
+	scopes, err := json.Marshal(c.Scopes)
+	if err != nil {
+		return fmt.Errorf("marshal scopes: %w", err)
+	}
+	enabled := 0
+	if c.Enabled {
+		enabled = 1
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO client (id, name, api_key_hash, scopes, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, api_key_hash=excluded.api_key_hash, scopes=excluded.scopes, enabled=excluded.enabled`,
+		c.ID, c.Name, c.APIKeyHash, string(scopes), enabled, c.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert client: %w", err)
+	}
+	return nil
+}
+
+// GetClient 返回三方 client;不存在返回 sql.ErrNoRows 包装的错误。
+func (s *Store) GetClient(id string) (model.Client, error) {
+	row := s.db.QueryRow("SELECT id, name, api_key_hash, scopes, enabled, created_at FROM client WHERE id = ?", id)
+	c, err := scanClient(row)
+	if err != nil {
+		return model.Client{}, fmt.Errorf("get client %q: %w", id, err)
+	}
+	return c, nil
+}
+
+// GetClientByKeyHash 按 API Key 的 SHA-256 哈希查找三方 client(认证用)。
+func (s *Store) GetClientByKeyHash(hash string) (model.Client, bool) {
+	row := s.db.QueryRow("SELECT id, name, api_key_hash, scopes, enabled, created_at FROM client WHERE api_key_hash = ?", hash)
+	c, err := scanClient(row)
+	if err != nil {
+		return model.Client{}, false
+	}
+	return c, true
+}
+
+// ListClients 返回全部三方 client,按 ID 排序。
+func (s *Store) ListClients() ([]model.Client, error) {
+	rows, err := s.db.Query("SELECT id, name, api_key_hash, scopes, enabled, created_at FROM client ORDER BY id")
+	if err != nil {
+		return nil, fmt.Errorf("query clients: %w", err)
+	}
+	defer rows.Close()
+	clients := make([]model.Client, 0)
+	for rows.Next() {
+		c, err := scanClient(rows)
+		if err != nil {
+			return nil, err
+		}
+		clients = append(clients, c)
+	}
+	return clients, rows.Err()
+}
+
+// DeleteClient 删除三方 client。
+func (s *Store) DeleteClient(id string) error {
+	if _, err := s.db.Exec("DELETE FROM client WHERE id = ?", id); err != nil {
+		return fmt.Errorf("delete client: %w", err)
+	}
+	return nil
+}
+
+func scanClient(row rowScanner) (model.Client, error) {
+	var c model.Client
+	var scopes string
+	var enabled int
+	if err := row.Scan(&c.ID, &c.Name, &c.APIKeyHash, &scopes, &enabled, &c.CreatedAt); err != nil {
+		return model.Client{}, err
+	}
+	if err := json.Unmarshal([]byte(scopes), &c.Scopes); err != nil {
+		return model.Client{}, fmt.Errorf("unmarshal scopes: %w", err)
+	}
+	c.Enabled = enabled != 0
+	return c, nil
 }
 
 func (s *Store) queryDevices(query string, args ...any) ([]model.Device, error) {
