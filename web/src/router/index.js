@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import Dashboard from '../views/Dashboard.vue'
 import Connections from '../views/Connections.vue'
 import Devices from '../views/Devices.vue'
+import Clients from '../views/Clients.vue'
 import Login from '../views/Login.vue'
 import ChangePassword from '../views/ChangePassword.vue'
 import auth from '../stores/auth'
@@ -14,6 +15,7 @@ const routes = [
   { path: '/dashboard', name: 'dashboard', component: Dashboard, meta: { title: '概览' } },
   { path: '/connections', name: 'connections', component: Connections, meta: { title: '连接' } },
   { path: '/devices', name: 'devices', component: Devices, meta: { title: '设备' } },
+  { path: '/clients', name: 'clients', component: Clients, meta: { title: '三方授权' } },
 ]
 
 const router = createRouter({
