@@ -72,7 +72,7 @@ async function load() {
 }
 
 function addPoint() {
-  form.points.push({ name: '', address: '', dataType: 'int16', scale: 0 })
+  form.points.push({ name: '', address: '', dataType: 'int16', scale: 1 })
 }
 
 function removePoint(i) {
