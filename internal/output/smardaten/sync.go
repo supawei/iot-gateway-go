@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 
 	"iot-gateway-go/internal/model"
 )
@@ -349,6 +350,9 @@ func convertDLT645Config(raw map[string]interface{}) map[string]interface{} {
 
 // convertDevice 将平台设备转换为网关 Device。
 func convertDevice(dev PlatformDevice, ctrl PlatformController) (model.Device, error) {
+	// 从 controller configuration 提取功能码（modbus 类型专用，用于地址前缀）
+	functionName := modbusFunctionOf(ctrl)
+
 	// 构建 Points：从 sensorList 中筛选该设备 properties 引用的点位
 	pointIDs := make(map[string]bool)
 	for _, prop := range dev.Properties {
@@ -364,7 +368,12 @@ func convertDevice(dev PlatformDevice, ctrl PlatformController) (model.Device, e
 			Name:    sensor.PointID,
 			Address: sensor.ItemName,
 			DataType: dataTypeToModel(sensor.DataType),
-			Scale:   0,
+			Scale:   scaleOf(sensor),
+		}
+		// modbus 类型：地址补功能码前缀（"2" → "holding:2"），
+		// 网关 modbus 驱动的 parseAddress 严格要求 "function:register" 格式。
+		if functionName != "" && !strings.Contains(point.Address, ":") {
+			point.Address = functionName + ":" + point.Address
 		}
 		points = append(points, point)
 	}
@@ -392,6 +401,43 @@ func convertDevice(dev PlatformDevice, ctrl PlatformController) (model.Device, e
 		IntervalMs:  intervalMs,
 		Enabled:     true,
 	}, nil
+}
+
+// modbusFunctionOf 返回 controller 的 modbus 功能码名（holding/coil/input/discrete）；
+// 非 modbus 类型返回空串（地址无需前缀）。
+func modbusFunctionOf(ctrl PlatformController) string {
+	switch ctrl.Type {
+	case "1", "2", "23": // modbus-rtu / modbus-tcp / modbus-rtu-over-tcp
+	default:
+		return ""
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(ctrl.Specs.Configuration, &raw); err != nil {
+		return ""
+	}
+	fc, ok := getInt(raw, "functionCode")
+	if !ok {
+		return ""
+	}
+	return functionCodeToName(fc)
+}
+
+// scaleOf 从 sensor 的 exDesc 提取缩放系数（caliMultiple）。
+// 平台倍数为 0 或缺省时回退 1.0。
+func scaleOf(sensor PlatformSensor) float64 {
+	if len(sensor.ExDesc) == 0 {
+		return 0
+	}
+	var ex struct {
+		CaliMultiple float64 `json:"caliMultiple"`
+	}
+	if err := json.Unmarshal(sensor.ExDesc, &ex); err != nil {
+		return 0
+	}
+	if ex.CaliMultiple == 0 {
+		return 0
+	}
+	return ex.CaliMultiple
 }
 
 // convertDeviceParams 从 controller configuration 提取设备级参数。
@@ -431,7 +477,7 @@ func buildPollBlocks(functionCode int, points []model.Point) []map[string]interf
 	// 解析每个点位的地址和宽度，计算寄存器范围
 	ranges := make([]addrRange, 0, len(points))
 	for _, p := range points {
-		addr, err := strconv.Atoi(p.Address)
+		addr, err := registerOf(p.Address)
 		if err != nil {
 			continue
 		}
@@ -469,6 +515,15 @@ func buildPollBlocks(functionCode int, points []model.Point) []map[string]interf
 	}
 
 	return blocks
+}
+
+// registerOf 从点位地址提取寄存器号，兼容 "holding:2" 和纯数字 "2" 两种格式。
+func registerOf(addr string) (int, error) {
+	// 带功能码前缀：取冒号后部分
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		addr = addr[i+1:]
+	}
+	return strconv.Atoi(strings.TrimSpace(addr))
 }
 
 // dataTypeWidthForPoint 根据 model.DataType 返回寄存器宽度。
