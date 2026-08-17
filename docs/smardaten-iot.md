@@ -1,6 +1,6 @@
 # smardaten-iot 私有 IoT 平台对接设计文档
 
-> **状态**: 已实现（阶段 1 完成）
+> **状态**: 已实现（阶段 1 完成 + 自动同步 + 稳定性修复）
 > **关联**: 平台交互契约文档 `iot_platform_interaction.md`
 > **更新**: 2026-08-18
 
@@ -306,11 +306,14 @@ platformOutput
 
 ```
 internal/output/smardaten/
-├── smardaten.go      # 主文件：Output 实现、MQTT 连接、数据缓冲、下行处理
-├── application.go    # application.json 解析与 topic 映射
-└── http.go           # RSA 鉴权 HTTP 下载
+├── smardaten.go        # 主文件：Output 实现、MQTT 连接、数据缓冲、下行处理
+├── application.go      # application.json 解析与 topic 映射
+├── http.go             # RSA 鉴权 HTTP 下载
+├── sync.go             # application.json → 网关配置自动同步（类型感知转换）
+└── smardaten_test.go   # 配置解析回归测试
 
-cmd/gateway/main.go   # 新增 import: _ "iot-gateway-go/internal/output/smardaten"
+cmd/gateway/main.go     # 新增 import: _ "iot-gateway-go/internal/output/smardaten"
+internal/output/registry.go  # BuildContext 增加 StoreAccessor（供插件自动同步）
 ```
 
 ---
@@ -329,13 +332,64 @@ cmd/gateway/main.go   # 新增 import: _ "iot-gateway-go/internal/output/smardat
 | 6 | 服务调用（通道 5） | 5 | ✅ |
 | 7 | 设备诊断（通道 6） | 6 | ✅ |
 | 8 | 变化上报模式（pubMode=1） | 3 | ✅ |
+| 9 | **自动同步**：application.json → 网关 Connection/Device/Point | — | ✅ |
 
 ### 阶段 2：扩展（待后续）
 
 | 序号 | 内容 | 通道 |
 |---|---|---|
-| 9 | 协议驱动管理（通道 2）+ 驱动下载（通道 9） | 2, 9 |
-| 10 | DTU 状态上报（通道 7） | 7 |
+| 10 | 协议驱动管理（通道 2）+ 驱动下载（通道 9） | 2, 9 |
+| 11 | DTU 状态上报（通道 7） | 7 |
+
+---
+
+## 8.5 自动同步设计
+
+### 背景
+
+平台是模型驱动架构：`application.json` 已包含控制器连接参数、设备、点位等全部配置信息。若网关侧再手工配置一遍 Connection/Device/Point，属于重复劳动。自动同步让**平台成为唯一配置源**，网关收到配置后自动创建/更新采集配置。
+
+### 流程
+
+```
+application.json（本地启动加载 / 平台 configUpdate 下发）
+    │
+    ├─ controllers[].specs.configuration
+    │       ▼ 按 type 走类型感知转换器
+    │       ├─ type=1 (modbus-rtu): com→serialPort, parity 0→"N", timeOut→"10s"
+    │       ├─ type=2/23 (modbus-tcp/rtu-over-tcp): ip+port→address
+    │       ├─ type=3 (opcua): ip+port→"opc.tcp://..."
+    │       └─ type=21/24 (dlt645): ip+port→address
+    │       ▼ Connection{ID, Name, Driver, Config} → store.SaveConnection()
+    │
+    └─ devices[].properties + controllers[].sensorList
+            ▼ 按 deviceId 匹配控制器 → 构建 Device
+            ▼ slaveId 从 controller config 移到 Device.Params
+            ▼ functionCode → pollBlocks（合并连续地址）
+            ▼ Device{ID, Name, ConnectionID, Params, Points} → store.SaveDevice()
+```
+
+### 关键转换
+
+| 平台字段 | 网关字段 | 转换逻辑 |
+|---|---|---|
+| `controllers[].type` | `Connection.Driver` | 查表：1/2/23→"modbus", 3→"opcua", 21/24→"modbus" |
+| `specs.configuration.com` | `Connection.Config.serialPort` | 编号→设备路径（1→/dev/ttyS2） |
+| `specs.configuration.parity` | `Connection.Config.parity` | 0→"N", 1→"O", 2→"E" |
+| `specs.configuration.timeOut` | `Connection.Config.timeout` | 毫秒→duration 字符串 |
+| `specs.configuration.ip+port` | `Connection.Config.address/endpoint` | 拼接 |
+| `specs.configuration.slaveId` | `Device.Params.slaveId` | 跨层移动（一控制器多从站） |
+| `specs.configuration.functionCode` | `Device.Params.pollBlocks[].function` | 1→coil, 2→discrete, 3→holding, 4→input |
+| `sensorList[].pointId` | `Point.Name` | 直接（与平台上报 key 一致） |
+| `sensorList[].itemName` | `Point.Address` | 直接 |
+| `sensorList[].dataType` | `Point.DataType` | 0→bool, 1→int16, 2→int32, 3→int64, 4→float32, 5→float64, 6→string |
+| `specs.period` | `Device.IntervalMs` | 秒→毫秒 |
+
+### 语义
+
+- 以 `controllerId`/`deviceId` 为 key 做 upsert，不覆盖网关本地独有的配置
+- 平台下发的配置更新（通道 1）触发重新同步，scheduler 经 `store.OnChange` 自动热加载
+- 用户在 Web UI 手动修改后，下次平台下发会覆盖（平台为权威源）
 
 ---
 
@@ -356,15 +410,17 @@ cmd/gateway/main.go   # 新增 import: _ "iot-gateway-go/internal/output/smardat
 
 ## 10. 开放问题
 
-1. **application.json 的 deviceId 与 Go 网关 Device.ID 的映射关系**：平台下发的 deviceId 是 UUID 格式（如 `07cb199ec8c34d51a28432762448a4e8`），Go 网关的 Device.ID 由用户自定义。需要明确映射策略：是要求用户创建设备时使用平台 deviceId 作为 Device.ID，还是在插件内部维护映射表？
+1. ~~**application.json 的 deviceId 与 Go 网关 Device.ID 的映射关系**~~ ✅ **已解决**：自动同步功能直接以 `devices[].deviceId` 作为 `Device.ID`，无需用户手动对齐。
 
-2. **pointId 与 Point.Name 的映射**：同样的问题。平台用 `pointId`（数字字符串），Go 网关用 `Point.Name`（用户自定义）。建议初期约定：创建点位时 `Point.Name` 使用平台 `pointId`。
+2. ~~**pointId 与 Point.Name 的映射**~~ ✅ **已解决**：自动同步以 `sensorList[].pointId` 作为 `Point.Name`，与平台上报 key 天然一致。
 
 3. **服务调用的 get 语义**：平台 `serviceType=get` 要求返回设备当前属性值，但 Go 网关的采集是定时拉取，无实时缓存。需要 `values.Registry` 提供最新值查询能力。
 
 4. **设备诊断 DC1003（终端设备连通性）**：需要 driver 层提供"探测设备是否可达"的能力，当前 `Driver` 接口无此方法，需评估是否扩展。
 
 5. **多平台连接**：若同一网关需同时对接多个 smardaten-iot 平台实例，当前每个插件实例维护一个 MQTT 连接的设计可以支持（创建多个 output 配置即可），但 application.json 的隔离需要确认。
+
+6. **自动同步的覆盖语义**：平台下发配置时会 upsert 覆盖同名 Connection/Device。若网关本地设备与平台设备 ID 冲突，会被平台配置覆盖（预期行为，平台为权威源）。若需保留本地设备，需引入"本地优先"标志或命名空间隔离。
 
 ---
 
@@ -398,23 +454,35 @@ cmd/gateway/main.go   # 新增 import: _ "iot-gateway-go/internal/output/smardat
 | 三个诊断 item_id（DC1001/DC1002/DC1003） | ✅ DC1001 + DC1003（DC1002 DTU 不适用） |
 | 枚举值：dataType / statusCode / 控制器类型 | ✅ 已实现 |
 
-### 11.3 简化实现说明
+### 11.3 稳定性修复记录
+
+| 问题 | 原因 | 修复 |
+|---|---|---|
+| `cannot unmarshal string into Config.pubMode of type int` | Web UI FieldEnum 发字符串，Config 字段是 int | 引入 `flexInt` 类型（数字/字符串/null 均可解析） |
+| `cannot unmarshal number into Config.port of type string` | FieldInt 发数字，但被误改为 string | 所有数值字段统一用 `flexInt`，彻底消除类型不匹配 |
+| 新增输出后网关不响应（HTTP 挂起） | MQTT `Connect()` 无超时，broker 不可达时阻塞 | `SetConnectTimeout(5s)` |
+| 更新网关 ID 报 `connection lost before Subscribe completed` | 重载时新旧连接 clientID 相同，broker 踢旧连接 | clientID 改用 gatewayID 生成，重载时新旧唯一 |
+
+### 11.4 简化实现说明
 
 - **pubMode=0（及时上报）**："所有属性至少被刷新过一次才发"的门槛当前简化为每次 flush 上报所有最新值，未做 iRefresh 轮次计数；如需严格对齐，需在 scheduler 侧增加采集轮次计数器
 - **服务调用 get**：从缓冲区取最新值，而非实时读取设备；如需实时值，需依赖 `values.Registry` 的最新值查询能力
 
-### 11.4 未实现项（deferred）
+### 11.5 未实现项（deferred）
 
 - 通道 2（协议驱动管理）：平台运维功能，非核心数据流
 - 通道 7（DTU 状态上报）：Go 网关暂无 DTU 透传场景
 - 通道 9（驱动下载）：依赖通道 2
 - 诊断 DC1002（DTU 在线检测）：Go 网关无 DTU 场景
 
-### 11.5 代码统计
+### 11.6 代码统计
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `internal/output/smardaten/smardaten.go` | ~715 | 插件注册、MQTT 连接、数据缓冲、上下行处理、flush |
+| `internal/output/smardaten/smardaten.go` | ~780 | 插件注册、MQTT 连接、数据缓冲、上下行处理、flush |
 | `internal/output/smardaten/application.go` | ~372 | application.json 解析、平台消息类型、topic 映射 |
+| `internal/output/smardaten/sync.go` | ~330 | application.json → 网关配置自动同步 |
 | `internal/output/smardaten/http.go` | ~199 | RSA 加密、HTTP 下载、TLS 跳过校验 |
-| **合计** | **~1286** | |
+| `internal/output/smardaten/smardaten_test.go` | ~110 | 配置解析回归测试 |
+| `internal/output/registry.go` | +12 | BuildContext.Store 注入 |
+| **合计** | **~1800** | |
