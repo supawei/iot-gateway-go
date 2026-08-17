@@ -469,7 +469,7 @@ Field 字段与驱动一致:`name`/`label`/`type`(`string`/`password`/`int`/`num
 
 `POST /api/v1/outputs`
 
-创建或整体覆盖一个输出。`id`、`type` 必填。
+创建或整体覆盖一个输出。`type` 必填;`id` 可省略,省略时后台自动生成(格式 `out-<8位十六进制>`)。
 
 **请求体**:Output 对象
 
@@ -478,7 +478,7 @@ Field 字段与驱动一致:`name`/`label`/`type`(`string`/`password`/`int`/`num
 ```bash
 curl -X POST http://localhost:8080/api/v1/outputs \
   -H 'Content-Type: application/json' \
-  -d '{"id":"mqtt-1","name":"MQTT 主站","type":"mqtt","enabled":true,"config":{"broker":"tcp://127.0.0.1:1883","qos":1}}'
+  -d '{"name":"MQTT 主站","type":"mqtt","enabled":true,"config":{"broker":"tcp://127.0.0.1:1883","qos":1}}'
 ```
 
 #### 更新输出

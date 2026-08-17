@@ -900,14 +900,23 @@ func TestOutputCRUD(t *testing.T) {
 	}
 }
 
-// TestCreateOutputMissingID 验证创建缺 id 返回 400。
-func TestCreateOutputMissingID(t *testing.T) {
+// TestCreateOutputAutoID 验证创建输出不带 id 时由后台生成(out- 前缀)。
+func TestCreateOutputAutoID(t *testing.T) {
 	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
 	o := sampleOutput()
 	o.ID = ""
-	rec := doRequest(t, apiInstance.Routes(), "POST", "/api/v1/outputs", o)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("create missing id: got %d want 400", rec.Code)
+	rec := doRequest(t, handler, "POST", "/api/v1/outputs", o)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create output without id: got %d want %d, body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var created model.Output
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.HasPrefix(created.ID, "out-") || len(created.ID) == len("out-") {
+		t.Fatalf("output id not auto-generated: %q", created.ID)
 	}
 }
 

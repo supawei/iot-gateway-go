@@ -13,7 +13,7 @@ const loading = ref(false)
 const dialogVisible = ref(false)
 const editingId = ref('')
 
-const form = reactive({ id: '', name: '', type: '', enabled: true })
+const form = reactive({ name: '', type: '', enabled: true })
 const configModel = ref({})
 
 const typeMap = computed(() => {
@@ -50,7 +50,6 @@ function resetConfig(type) {
 
 function openCreate() {
   editingId.value = ''
-  form.id = ''
   form.name = ''
   form.enabled = true
   const first = types.value[0]?.type || ''
@@ -60,7 +59,6 @@ function openCreate() {
 
 function openEdit(row) {
   editingId.value = row.id
-  form.id = row.id
   form.name = row.name
   form.type = row.type
   form.enabled = row.enabled
@@ -76,7 +74,7 @@ async function save() {
     ElMessage.error(e.message)
     return
   }
-  const payload = { id: form.id, name: form.name, type: form.type, enabled: form.enabled, config }
+  const payload = { name: form.name, type: form.type, enabled: form.enabled, config }
   try {
     if (editingId.value) {
       await api.updateOutput(editingId.value, payload)
@@ -123,11 +121,6 @@ onMounted(load)
         配置数据上送目标(MQTT / ThingsBoard / TDengine);保存后立即热重载,无需重启网关。
       </p>
       <el-table v-loading="loading" :data="list" empty-text="暂无输出">
-        <el-table-column label="ID" min-width="140">
-          <template #default="{ row }">
-            <span class="mono">{{ row.id }}</span>
-          </template>
-        </el-table-column>
         <el-table-column prop="name" label="名称" min-width="140" />
         <el-table-column label="类型" width="130">
           <template #default="{ row }">
@@ -163,9 +156,6 @@ onMounted(load)
       destroy-on-close
     >
       <el-form label-width="100px">
-        <el-form-item label="ID" required>
-          <el-input v-model="form.id" :disabled="!!editingId" placeholder="mqtt-1" />
-        </el-form-item>
         <el-form-item label="名称">
           <el-input v-model="form.name" placeholder="MQTT 主站" />
         </el-form-item>

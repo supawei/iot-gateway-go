@@ -136,6 +136,17 @@ func (a *API) uniqueDeviceID() string {
 	return generateID("dev-")
 }
 
+// uniqueOutputID 生成未占用的输出 ID。
+func (a *API) uniqueOutputID() string {
+	for range idRetryLimit {
+		candidate := generateID("out-")
+		if _, err := a.store.GetOutput(candidate); err != nil {
+			return candidate
+		}
+	}
+	return generateID("out-")
+}
+
 // checkEndpointConflict 阻止两个 Connection 指向同一物理端点(同串口/同 DTU 地址),
 // 不限驱动:同一串口/DTU 上不同协议的连接同样会并发写同一条总线,帧碰撞。
 // key 由各连接自己的驱动按共享命名空间(serial|/tcp|/listen|)计算。
@@ -454,8 +465,7 @@ func (a *API) createOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if o.ID == "" {
-		writeError(w, http.StatusBadRequest, errors.New("output id is required"))
-		return
+		o.ID = a.uniqueOutputID()
 	}
 	if o.Type == "" {
 		writeError(w, http.StatusBadRequest, errors.New("output type is required"))
