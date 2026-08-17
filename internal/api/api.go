@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"iot-gateway-go/internal/auth"
 	"iot-gateway-go/internal/core"
@@ -72,6 +73,9 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/outputs/{outputId}", a.require(auth.ScopeOutputsRead, a.getOutput))
 	mux.HandleFunc("PUT /api/v1/outputs/{outputId}", a.require(auth.ScopeOutputsWrite, a.putOutput))
 	mux.HandleFunc("DELETE /api/v1/outputs/{outputId}", a.require(auth.ScopeOutputsWrite, a.deleteOutput))
+	// 网关设置(网关 ID,默认预置,管理员可改)
+	mux.HandleFunc("GET /api/v1/gateway", a.require(auth.ScopeGatewayRead, a.getGateway))
+	mux.HandleFunc("PUT /api/v1/gateway", a.require(auth.ScopeGatewayWrite, a.putGateway))
 	return mux
 }
 
@@ -430,6 +434,45 @@ func decodeOutput(w http.ResponseWriter, r *http.Request) (model.Output, bool) {
 		return model.Output{}, false
 	}
 	return o, true
+}
+
+// ---- 网关设置 ----
+
+type gatewayRequest struct {
+	ID string `json:"id"`
+}
+
+// getGateway 返回网关 ID(默认由 store 预置)。
+func (a *API) getGateway(w http.ResponseWriter, r *http.Request) {
+	id, err := a.store.GetGatewayID()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, gatewayRequest{ID: id})
+}
+
+// putGateway 修改网关 ID:网关 ID 参与 MQTT topic 拼装,保存后触发热重载以应用新 ID。
+func (a *API) putGateway(w http.ResponseWriter, r *http.Request) {
+	var req gatewayRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	id := strings.TrimSpace(req.ID)
+	if id == "" {
+		writeError(w, http.StatusBadRequest, errors.New("gateway id is required"))
+		return
+	}
+	if err := a.store.SetSetting(store.SettingGatewayID, id); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.reloadOutputs(); err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("gateway saved but reload failed: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, gatewayRequest{ID: id})
 }
 
 // ---- 鉴权中间件 ----

@@ -1,11 +1,13 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { Refresh } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { Edit, Refresh } from '@element-plus/icons-vue'
 import api from '../api'
 
 const devices = ref([])
 const connections = ref([])
 const statuses = ref([])
+const gatewayId = ref('')
 const loading = ref(false)
 
 const statusMap = computed(() => {
@@ -19,16 +21,45 @@ const onlineCount = computed(() => statuses.value.filter((s) => s.online).length
 async function load() {
   loading.value = true
   try {
-    const [d, c, s] = await Promise.all([
+    const [d, c, s, g] = await Promise.all([
       api.listDevices(),
       api.listConnections(),
       api.listStatus(),
+      api.getGateway(),
     ])
     devices.value = d
     connections.value = c
     statuses.value = s
+    gatewayId.value = g.id
+  } catch (e) {
+    ElMessage.error(e.message)
   } finally {
     loading.value = false
+  }
+}
+
+// ---- 修改网关 ID ----
+const editVisible = ref(false)
+const editForm = ref({ id: '' })
+
+function openEdit() {
+  editForm.value = { id: gatewayId.value }
+  editVisible.value = true
+}
+
+async function saveGateway() {
+  const id = (editForm.value.id || '').trim()
+  if (!id) {
+    ElMessage.warning('网关 ID 不能为空')
+    return
+  }
+  try {
+    const res = await api.updateGateway({ id })
+    gatewayId.value = res.id
+    ElMessage.success('已保存,输出已按新 ID 热重载')
+    editVisible.value = false
+  } catch (e) {
+    ElMessage.error(e.message)
   }
 }
 
@@ -60,7 +91,30 @@ onMounted(load)
         <div class="k">连接数</div>
         <div class="v">{{ connections.length }}</div>
       </div>
+      <div class="stat">
+        <div class="k">
+          网关 ID
+          <el-button link type="primary" :icon="Edit" style="margin-left: 4px" @click="openEdit">改</el-button>
+        </div>
+        <div class="v mono" style="font-size: 22px">{{ gatewayId || '—' }}</div>
+      </div>
     </div>
+
+    <!-- 修改网关 ID -->
+    <el-dialog v-model="editVisible" title="修改网关 ID" width="420px" destroy-on-close>
+      <el-form label-width="90px">
+        <el-form-item label="网关 ID" required>
+          <el-input v-model="editForm.id" placeholder="gw-01" class="mono" />
+        </el-form-item>
+        <p class="form-hint" style="margin: 0">
+          网关 ID 用于 MQTT 输出 topic 等标识,保存后输出立即按新 ID 热重载。
+        </p>
+      </el-form>
+      <template #footer>
+        <el-button @click="editVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveGateway">保存</el-button>
+      </template>
+    </el-dialog>
 
     <div class="panel">
       <h2 class="panel-title">设备状态</h2>

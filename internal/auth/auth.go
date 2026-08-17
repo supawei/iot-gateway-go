@@ -40,6 +40,8 @@ const (
 	ScopeClientsWrite     Scope = "clients:write"
 	ScopeOutputsRead      Scope = "outputs:read"
 	ScopeOutputsWrite     Scope = "outputs:write"
+	ScopeGatewayRead      Scope = "gateway:read"
+	ScopeGatewayWrite     Scope = "gateway:write"
 )
 
 // principalKind 区分主体类型。

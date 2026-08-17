@@ -140,3 +140,4 @@
 | 配置 schema | `SchemaProvider` 由驱动声明,前端动态渲染 | 替代手写 JSON,避免前端硬编码各驱动字段;`showWhen` 处理模式相关字段 |
 | 北向输出配置 | 迁移到 SQLite + Web UI(原"保留 yaml"结论反转) | 完成 API 鉴权与 OutputManager 后,产品化诉求(UI 免重启配置)成为主导;见分析文档 |
 | 配置/数据库变更 | 开发期不做迁移,直接改结构 | 未发布无存量部署;发布后再引入版本化迁移,见 [docs/development-conventions.md](docs/development-conventions.md) |
+| 网关 ID | 从 config.yaml 迁到 SQLite(默认预置,Web UI 可改) | 属运行时配置而非引导配置,与输出配置一致走数据库 + 热重载;yaml 只留引导项 |

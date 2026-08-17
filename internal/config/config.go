@@ -16,10 +16,8 @@ const (
 )
 
 // Config 是网关自身配置,来自 YAML 文件。
+// 注意:网关 ID 已迁移到 SQLite(settings 表,Web UI 可改),不在 yaml 里。
 type Config struct {
-	Gateway struct {
-		ID string `yaml:"id"`
-	} `yaml:"gateway"`
 	HTTP struct {
 		Addr string `yaml:"addr"`
 	} `yaml:"http"`
@@ -60,9 +58,6 @@ func Load(path string) (Config, error) {
 }
 
 func applyDefaults(cfg *Config) {
-	if cfg.Gateway.ID == "" {
-		cfg.Gateway.ID = "iot-gateway"
-	}
 	if cfg.HTTP.Addr == "" {
 		cfg.HTTP.Addr = ":8080"
 	}

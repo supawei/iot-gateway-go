@@ -10,9 +10,6 @@ func TestApplyDefaults(t *testing.T) {
 	var cfg Config
 	applyDefaults(&cfg)
 
-	if cfg.Gateway.ID != "iot-gateway" {
-		t.Errorf("gateway.id = %q, want iot-gateway", cfg.Gateway.ID)
-	}
 	if cfg.HTTP.Addr != ":8080" {
 		t.Errorf("http.addr = %q, want :8080", cfg.HTTP.Addr)
 	}

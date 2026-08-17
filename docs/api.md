@@ -492,6 +492,34 @@ curl -X POST http://localhost:8080/api/v1/outputs \
 
 > **鉴权**:输出配置含云端凭据(密码 / Access Token),`outputs:read` / `outputs:write` 属敏感 scope,只应授予可信主体(默认仅管理员持有)。
 
+### 网关设置
+
+网关 ID 存 SQLite(默认 `iot-gateway`,首次启动预置),管理员可经 Web UI(概览页)修改。
+
+#### 获取网关 ID
+
+`GET /api/v1/gateway`
+
+**响应**:`200 OK`
+
+```json
+{ "id": "iot-gateway" }
+```
+
+#### 修改网关 ID
+
+`PUT /api/v1/gateway`
+
+网关 ID 参与 MQTT 输出 topic(`gateway/{id}/device/{deviceId}/data`)等标识;保存后输出立即热重载以应用新 ID。
+
+**请求体**:
+
+```json
+{ "id": "gw-02" }
+```
+
+**响应**:`200 OK` + 更新后的 ID;`id` 为空则 `400`;保存成功但热重载失败返回 `502`(旧输出保持运行)
+
 ### 点位
 
 #### 添加点位

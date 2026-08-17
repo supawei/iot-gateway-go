@@ -233,6 +233,36 @@ func TestDeleteOutput(t *testing.T) {
 	}
 }
 
+func TestGatewaySettings(t *testing.T) {
+	st := newTestStore(t)
+
+	// Open 时预置默认网关 ID
+	id, err := st.GetGatewayID()
+	if err != nil {
+		t.Fatalf("get default gateway id: %v", err)
+	}
+	if id != DefaultGatewayID {
+		t.Fatalf("default gateway id = %q, want %q", id, DefaultGatewayID)
+	}
+
+	// 不存在 key 返回 ok=false
+	if _, ok, err := st.GetSetting("no.such.key"); err != nil || ok {
+		t.Fatalf("get missing setting: ok=%v err=%v", ok, err)
+	}
+
+	// 修改并读回
+	if err := st.SetSetting(SettingGatewayID, "gw-02"); err != nil {
+		t.Fatalf("set gateway id: %v", err)
+	}
+	got, err := st.GetGatewayID()
+	if err != nil {
+		t.Fatalf("get gateway id: %v", err)
+	}
+	if got != "gw-02" {
+		t.Fatalf("gateway id = %q, want gw-02", got)
+	}
+}
+
 func TestOnChange(t *testing.T) {
 	st := newTestStore(t)
 	saveSampleConnection(t, st)

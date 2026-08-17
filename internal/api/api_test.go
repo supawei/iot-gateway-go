@@ -856,6 +856,93 @@ func TestOutputsRequireScope(t *testing.T) {
 	}
 }
 
+// TestGatewayEndpoint 验证网关 ID 的读取与修改(默认预置,可改)。
+func TestGatewayEndpoint(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
+	rec := doRequest(t, handler, "GET", "/api/v1/gateway", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get gateway: got %d want 200", rec.Code)
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body.ID != store.DefaultGatewayID {
+		t.Fatalf("default gateway id = %q, want %q", body.ID, store.DefaultGatewayID)
+	}
+
+	rec = doRequest(t, handler, "PUT", "/api/v1/gateway", map[string]any{"id": "gw-02"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update gateway: got %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doRequest(t, handler, "GET", "/api/v1/gateway", nil)
+	json.Unmarshal(rec.Body.Bytes(), &body)
+	if body.ID != "gw-02" {
+		t.Fatalf("gateway id after update = %q, want gw-02", body.ID)
+	}
+
+	// 空 ID → 400
+	rec = doRequest(t, handler, "PUT", "/api/v1/gateway", map[string]any{"id": "  "})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("update empty id: got %d want 400", rec.Code)
+	}
+}
+
+// TestGatewayRequiresScope 验证网关设置接口受 scope 保护。
+func TestGatewayRequiresScope(t *testing.T) {
+	apiInstance, authz := newAuthAPI(t)
+	handler := apiInstance.Routes()
+
+	// 未登录 → 401
+	rec := doRequest(t, handler, "GET", "/api/v1/gateway", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("get gateway no token: got %d want 401", rec.Code)
+	}
+
+	// 无 gateway scope 的三方 client → 403
+	_, key, _ := authz.CreateClient("ro", "只读", []string{"devices:read"})
+	rec = doRequestAuth(t, handler, "GET", "/api/v1/gateway", key, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("client get gateway: got %d want 403", rec.Code)
+	}
+}
+
+// TestGatewayWriteTriggersReload 验证修改网关 ID 后触发热重载(MQTT topic 依赖网关 ID)。
+func TestGatewayWriteTriggersReload(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	var mu sync.Mutex
+	var reloads int
+	mgr := output.NewManager(func() ([]output.Output, error) {
+		mu.Lock()
+		reloads++
+		mu.Unlock()
+		return nil, nil
+	})
+
+	handler := New(st, status.NewRegistry(), values.NewRegistry(), nil, false, mgr).Routes()
+	rec := doRequest(t, handler, "PUT", "/api/v1/gateway", map[string]any{"id": "gw-02"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update gateway: got %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	got := reloads
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("want 1 reload got %d", got)
+	}
+}
+
 // TestOutputWriteTriggersReload 验证写/删输出后触发热重载。
 func TestOutputWriteTriggersReload(t *testing.T) {
 	st, err := store.Open(":memory:")

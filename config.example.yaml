@@ -1,5 +1,4 @@
-gateway:
-  id: "gw-01"
+# 网关 ID 已迁移到 SQLite(默认 iot-gateway),经 Web UI「概览」页修改,不在 yaml 里。
 
 http:
   addr: ":8080"

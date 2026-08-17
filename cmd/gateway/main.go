@@ -62,7 +62,8 @@ func main() {
 		return err
 	}
 	// 输出管理器:从 SQLite 读配置动态构建,Web UI 变更后热重载(原子替换 + 关闭旧输出)。
-	outputs := output.NewManager(buildOutputs(st, cfg.Gateway.ID, write))
+	// 网关 ID 亦存 SQLite(settings 表),每次重载时读取,故改 ID 后热重载即生效。
+	outputs := output.NewManager(buildOutputs(st, write))
 	if err := outputs.Reload(); err != nil {
 		// 首次构建失败不退出:API 仍可修复配置并触发热重载。
 		slog.Warn("initial output reload failed", "err", err)
@@ -175,12 +176,16 @@ func fatal(msg string, args ...any) {
 	os.Exit(1)
 }
 
-// buildOutputs 返回输出管理器的构建函数:每次重载都从 SQLite 读最新输出配置,
+// buildOutputs 返回输出管理器的构建函数:每次重载都从 SQLite 读最新网关 ID 与输出配置,
 // 逐个经 registry 构造为 Output 实例。任一输出构建失败即整体失败并关闭已构建部分,
 // 由 Manager 保留旧输出(原子替换语义)。
-func buildOutputs(st *store.Store, gatewayID string, write output.WriteFunc) output.BuildFunc {
-	bc := output.BuildContext{GatewayID: gatewayID, Write: write}
+func buildOutputs(st *store.Store, write output.WriteFunc) output.BuildFunc {
 	return func() ([]output.Output, error) {
+		gatewayID, err := st.GetGatewayID()
+		if err != nil {
+			return nil, err
+		}
+		bc := output.BuildContext{GatewayID: gatewayID, Write: write}
 		configs, err := st.ListOutputs()
 		if err != nil {
 			return nil, err

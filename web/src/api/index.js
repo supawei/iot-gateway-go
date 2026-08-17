@@ -82,6 +82,10 @@ export const api = {
   listStatus: () => http.get('/status'),
   getDeviceValues: (id) => http.get(`/devices/${id}/values`),
 
+  // 网关设置
+  getGateway: () => http.get('/gateway'),
+  updateGateway: (data) => http.put('/gateway', data),
+
   // 驱动
   listDrivers: () => http.get('/drivers'),
 }

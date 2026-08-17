@@ -36,6 +36,13 @@ const SCOPE_GROUPS = [
     ],
   },
   {
+    label: '网关',
+    options: [
+      { value: 'gateway:read', label: '读网关设置' },
+      { value: 'gateway:write', label: '修改网关设置' },
+    ],
+  },
+  {
     label: '其他',
     options: [
       { value: 'drivers:read', label: '读驱动列表' },

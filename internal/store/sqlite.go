@@ -56,10 +56,23 @@ CREATE TABLE IF NOT EXISTS output (
     type    TEXT NOT NULL,
     config  TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );`
 
 // ErrConnectionInUse 表示连接仍被设备引用,不可删除。
 var ErrConnectionInUse = errors.New("connection is referenced by devices")
+
+// 网关级设置项 key(settings 表)。
+const (
+	// SettingGatewayID 是网关 ID,默认 DefaultGatewayID,管理员可经 Web UI 修改。
+	SettingGatewayID = "gateway.id"
+)
+
+// DefaultGatewayID 是首次启动预置的默认网关 ID(与旧 config.yaml 默认值一致)。
+const DefaultGatewayID = "iot-gateway"
 
 // Store 负责连接/设备/点位配置的持久化与变更通知。
 type Store struct {
@@ -75,6 +88,14 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
+	}
+	// 预置默认网关设置(幂等):数据库为空时内置默认网关 ID。
+	if _, err := db.Exec(
+		`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`,
+		SettingGatewayID, DefaultGatewayID,
+	); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("bootstrap gateway settings: %w", err)
 	}
 	return &Store{db: db, changeCh: make(chan struct{}, 1)}, nil
 }
@@ -428,6 +449,45 @@ func scanOutput(row rowScanner) (model.Output, error) {
 	o.Config = json.RawMessage(config)
 	o.Enabled = enabled != 0
 	return o, nil
+}
+
+// ---- 网关设置(键值) ----
+
+// GetSetting 读取网关设置;不存在返回 ("", false, nil)。
+func (s *Store) GetSetting(key string) (string, bool, error) {
+	var value string
+	err := s.db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&value)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("get setting %q: %w", key, err)
+	}
+	return value, true, nil
+}
+
+// SetSetting 写入网关设置(upsert)。
+func (s *Store) SetSetting(key, value string) error {
+	if _, err := s.db.Exec(
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		key, value,
+	); err != nil {
+		return fmt.Errorf("set setting %q: %w", key, err)
+	}
+	return nil
+}
+
+// GetGatewayID 返回网关 ID;未设置时回退默认值(正常由 Open 预置,防御性兜底)。
+func (s *Store) GetGatewayID() (string, error) {
+	v, ok, err := s.GetSetting(SettingGatewayID)
+	if err != nil {
+		return "", err
+	}
+	if !ok || v == "" {
+		return DefaultGatewayID, nil
+	}
+	return v, nil
 }
 
 func scanClient(row rowScanner) (model.Client, error) {
