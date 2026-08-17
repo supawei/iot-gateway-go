@@ -18,3 +18,7 @@
 # 编辑器/系统
 *.swp
 .DS_Store
+
+# 平台下发的运行时配置
+/config/application.json
+/config/application.json.tmp
