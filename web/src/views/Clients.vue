@@ -62,7 +62,7 @@ const loading = ref(false)
 
 const dialogVisible = ref(false)
 const editingId = ref('')
-const form = reactive({ id: '', name: '', scopes: [], enabled: true })
+const form = reactive({ name: '', scopes: [], enabled: true })
 
 // 新建成功后的 API Key(仅展示一次)
 const keyVisible = ref(false)
@@ -81,7 +81,6 @@ async function load() {
 
 function openCreate() {
   editingId.value = ''
-  form.id = ''
   form.name = ''
   form.scopes = []
   form.enabled = true
@@ -90,7 +89,6 @@ function openCreate() {
 
 function openEdit(row) {
   editingId.value = row.id
-  form.id = row.id
   form.name = row.name
   form.scopes = [...(row.scopes ?? [])]
   form.enabled = row.enabled
@@ -103,7 +101,7 @@ async function save() {
       await api.updateClient(editingId.value, { scopes: form.scopes, enabled: form.enabled })
       ElMessage.success('已保存')
     } else {
-      const res = await api.createClient({ id: form.id, name: form.name, scopes: form.scopes })
+      const res = await api.createClient({ name: form.name, scopes: form.scopes })
       newKey.value = res.apiKey
       keyVisible.value = true
     }
@@ -155,11 +153,6 @@ onMounted(load)
         为 MES/SCADA 等三方系统创建 API Key 并按接口授权;API Key 创建后仅展示一次。
       </p>
       <el-table v-loading="loading" :data="list" empty-text="暂无三方系统">
-        <el-table-column label="ID" min-width="140">
-          <template #default="{ row }">
-            <span class="mono">{{ row.id }}</span>
-          </template>
-        </el-table-column>
         <el-table-column prop="name" label="名称" min-width="150" />
         <el-table-column label="权限" min-width="280">
           <template #default="{ row }">
@@ -198,10 +191,7 @@ onMounted(load)
       destroy-on-close
     >
       <el-form label-width="90px">
-        <el-form-item label="ID" required>
-          <el-input v-model="form.id" :disabled="!!editingId" placeholder="mes-readonly" />
-        </el-form-item>
-        <el-form-item label="名称">
+        <el-form-item label="名称" required>
           <el-input v-model="form.name" placeholder="MES 只读" />
         </el-form-item>
         <el-form-item v-if="editingId" label="启用">

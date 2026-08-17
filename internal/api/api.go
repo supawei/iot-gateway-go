@@ -147,6 +147,18 @@ func (a *API) uniqueOutputID() string {
 	return generateID("out-")
 }
 
+// uniqueClientID 生成未占用的三方 client ID。SaveClient 是 upsert,
+// 撞 ID 会静默覆盖已有 client 的 API Key,必须先查重。
+func (a *API) uniqueClientID() string {
+	for range idRetryLimit {
+		candidate := generateID("cli-")
+		if _, err := a.store.GetClient(candidate); err != nil {
+			return candidate
+		}
+	}
+	return generateID("cli-")
+}
+
 // checkEndpointConflict 阻止两个 Connection 指向同一物理端点(同串口/同 DTU 地址),
 // 不限驱动:同一串口/DTU 上不同协议的连接同样会并发写同一条总线,帧碰撞。
 // key 由各连接自己的驱动按共享命名空间(serial|/tcp|/listen|)计算。
@@ -766,8 +778,7 @@ func (a *API) createClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.ID == "" {
-		writeError(w, http.StatusBadRequest, errors.New("client id is required"))
-		return
+		req.ID = a.uniqueClientID()
 	}
 	c, key, err := a.auth.CreateClient(req.ID, req.Name, req.Scopes)
 	if err != nil {

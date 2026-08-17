@@ -740,6 +740,33 @@ func TestLoginAndProtectedEndpoint(t *testing.T) {
 	}
 }
 
+// TestCreateClientAutoID 验证创建三方 client 不带 id 时由后台生成(cli- 前缀),
+// API Key 仍一次性返回。
+func TestCreateClientAutoID(t *testing.T) {
+	apiInstance, _ := newAuthAPI(t)
+	handler := apiInstance.Routes()
+
+	token, _ := loginAs(t, handler, auth.DefaultAdminUser, auth.DefaultAdminPassword)
+	doRequestAuth(t, handler, "PUT", "/api/v1/auth/password", token,
+		map[string]string{"oldPassword": auth.DefaultAdminPassword, "newPassword": "newpass123"})
+	rec := doRequestAuth(t, handler, "POST", "/api/v1/clients", token,
+		map[string]any{"name": "MES", "scopes": []string{"devices:read"}})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create client without id: got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID     string `json:"id"`
+		APIKey string `json:"apiKey"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	if !strings.HasPrefix(created.ID, "cli-") || len(created.ID) == len("cli-") {
+		t.Fatalf("client id not auto-generated: %q", created.ID)
+	}
+	if created.APIKey == "" {
+		t.Fatal("apiKey missing in create response")
+	}
+}
+
 func TestScopeAuthorization(t *testing.T) {
 	apiInstance, authz := newAuthAPI(t)
 	handler := apiInstance.Routes()
