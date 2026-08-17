@@ -32,11 +32,10 @@ const (
 )
 
 // Config 是 smardaten-iot 平台输出的配置（存 SQLite，经 Web UI 配置）。
-// 注意：Port/ProtoVer/PubMode/MaxPubTime 使用 string 类型，
-// 因为 Web UI 的 FieldEnum 和 FieldInt 控件均发送字符串值。
+// 注意：ProtoVer/PubMode 使用 string 类型，因为 Web UI 的 FieldEnum 控件发送字符串值。
 type Config struct {
 	Broker   string `json:"broker"`   // MQTT broker 地址
-	Port     string `json:"port"`     // MQTT 端口
+	Port     int    `json:"port"`     // MQTT 端口
 	ProtoVer string `json:"protoVer"` // 311(3.1.1) 或 5
 	Username string `json:"username"` // MQTT 用户名
 	Password string `json:"password"` // MQTT 密码
@@ -47,7 +46,7 @@ type Config struct {
 	IotConfigPath string `json:"iotConfigPath"` // application.json 落盘路径
 
 	PubMode       string `json:"pubMode"`       // 0=及时上报, 1=变化上报
-	MaxPubTime    string `json:"maxPubTime"`    // 变化上报模式最大周期间隔（秒）
+	MaxPubTime    int    `json:"maxPubTime"`    // 变化上报模式最大周期间隔（秒）
 	FlushInterval string `json:"flushInterval"` // 数据聚合 flush 间隔
 }
 
@@ -97,7 +96,6 @@ type platformOutput struct {
 	pubMode    int // 0=及时, 1=变化
 	maxPubTime int // 秒
 	protoVer   int // 311 或 5
-	port       int // MQTT 端口
 
 	// 数据缓冲
 	mu          sync.Mutex
@@ -132,11 +130,10 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 	}
 
 	// 解析字符串配置值
-	port, _ := strconv.Atoi(cfg.Port)
 	protoVer, _ := strconv.Atoi(cfg.ProtoVer)
 	pubMode, _ := strconv.Atoi(cfg.PubMode)
-	maxPubTime, err := strconv.Atoi(cfg.MaxPubTime)
-	if err != nil || maxPubTime <= 0 {
+	maxPubTime := cfg.MaxPubTime
+	if maxPubTime <= 0 {
 		maxPubTime = defaultMaxPubTime
 	}
 
@@ -156,7 +153,7 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 	}
 
 	// 构建 MQTT 连接
-	client, err := connectMQTT(cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, port, protoVer)
+	client, err := connectMQTT(cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, cfg.Port, protoVer)
 	if err != nil {
 		return nil, fmt.Errorf("mqtt connect: %w", err)
 	}
@@ -173,7 +170,6 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 		pubMode:       pubMode,
 		maxPubTime:    maxPubTime,
 		protoVer:      protoVer,
-		port:          port,
 		pending:       make(map[string][]model.DataPoint),
 		lastValues:    make(map[string]map[string]float64),
 		lastPubTime:   make(map[string]time.Time),
