@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strconv"
 	"sync"
 	"time"
 
@@ -31,10 +32,12 @@ const (
 )
 
 // Config 是 smardaten-iot 平台输出的配置（存 SQLite，经 Web UI 配置）。
+// 注意：Port/ProtoVer/PubMode/MaxPubTime 使用 string 类型，
+// 因为 Web UI 的 FieldEnum 和 FieldInt 控件均发送字符串值。
 type Config struct {
 	Broker   string `json:"broker"`   // MQTT broker 地址
-	Port     int    `json:"port"`     // MQTT 端口
-	ProtoVer int    `json:"protoVer"` // 311(3.1.1) 或 5
+	Port     string `json:"port"`     // MQTT 端口
+	ProtoVer string `json:"protoVer"` // 311(3.1.1) 或 5
 	Username string `json:"username"` // MQTT 用户名
 	Password string `json:"password"` // MQTT 密码
 	ClientID string `json:"clientId"` // MQTT Client ID
@@ -43,8 +46,8 @@ type Config struct {
 	IotRsaKeyPath string `json:"iotRsaKeyPath"` // RSA 公钥路径（PEM SPKI）
 	IotConfigPath string `json:"iotConfigPath"` // application.json 落盘路径
 
-	PubMode       int    `json:"pubMode"`       // 0=及时上报, 1=变化上报
-	MaxPubTime    int    `json:"maxPubTime"`    // 变化上报模式最大周期间隔（秒）
+	PubMode       string `json:"pubMode"`       // 0=及时上报, 1=变化上报
+	MaxPubTime    string `json:"maxPubTime"`    // 变化上报模式最大周期间隔（秒）
 	FlushInterval string `json:"flushInterval"` // 数据聚合 flush 间隔
 }
 
@@ -90,6 +93,12 @@ type platformOutput struct {
 	topics     *topicMapping
 	downloader *httpDownloader
 
+	// 解析后的配置值
+	pubMode    int // 0=及时, 1=变化
+	maxPubTime int // 秒
+	protoVer   int // 311 或 5
+	port       int // MQTT 端口
+
 	// 数据缓冲
 	mu          sync.Mutex
 	pending     map[string][]model.DataPoint // 待上报数据点
@@ -121,8 +130,14 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 	if cfg.IotConfigPath == "" {
 		cfg.IotConfigPath = "config/application.json"
 	}
-	if cfg.MaxPubTime <= 0 {
-		cfg.MaxPubTime = defaultMaxPubTime
+
+	// 解析字符串配置值
+	port, _ := strconv.Atoi(cfg.Port)
+	protoVer, _ := strconv.Atoi(cfg.ProtoVer)
+	pubMode, _ := strconv.Atoi(cfg.PubMode)
+	maxPubTime, err := strconv.Atoi(cfg.MaxPubTime)
+	if err != nil || maxPubTime <= 0 {
+		maxPubTime = defaultMaxPubTime
 	}
 
 	flushInterval := defaultFlushInterval
@@ -141,7 +156,7 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 	}
 
 	// 构建 MQTT 连接
-	client, err := connectMQTT(cfg, gatewayID)
+	client, err := connectMQTT(cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, port, protoVer)
 	if err != nil {
 		return nil, fmt.Errorf("mqtt connect: %w", err)
 	}
@@ -155,6 +170,10 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 		cfg:           cfg,
 		topics:        newTopicMapping(),
 		downloader:    downloader,
+		pubMode:       pubMode,
+		maxPubTime:    maxPubTime,
+		protoVer:      protoVer,
+		port:          port,
 		pending:       make(map[string][]model.DataPoint),
 		lastValues:    make(map[string]map[string]float64),
 		lastPubTime:   make(map[string]time.Time),
@@ -234,18 +253,16 @@ func (o *platformOutput) Close() error {
 // ---------- MQTT 连接 ----------
 
 // connectMQTT 建立到平台的 MQTT 连接。
-func connectMQTT(cfg Config, gatewayID string) (pahomqtt.Client, error) {
+func connectMQTT(broker, clientID, username, password string, port, protoVer int) (pahomqtt.Client, error) {
 	opts := pahomqtt.NewClientOptions()
 
-	broker := cfg.Broker
-	if cfg.Port > 0 {
-		broker = fmt.Sprintf("tcp://%s:%d", stripProtocol(cfg.Broker), cfg.Port)
+	if port > 0 {
+		broker = fmt.Sprintf("tcp://%s:%d", stripProtocol(broker), port)
 	}
 	opts.AddBroker(broker)
 
-	clientID := cfg.ClientID
 	if clientID == "" {
-		clientID = "gw-dev-manage-" + gatewayID
+		clientID = "gw-dev-manage-" + broker
 	}
 	opts.SetClientID(clientID)
 
@@ -255,17 +272,17 @@ func connectMQTT(cfg Config, gatewayID string) (pahomqtt.Client, error) {
 	opts.SetConnectRetryInterval(2 * time.Second)
 	opts.SetMaxReconnectInterval(30 * time.Second)
 
-	if cfg.Username != "" {
-		opts.SetUsername(cfg.Username)
-		opts.SetPassword(cfg.Password)
+	if username != "" {
+		opts.SetUsername(username)
+		opts.SetPassword(password)
 	}
 
 	// 协议版本
-	protoVer := uint(3) // 默认 3.1.1
-	if cfg.ProtoVer == 5 {
-		protoVer = 4 // paho 用 4 表示 MQTT 5.0
+	pv := uint(3) // 默认 3.1.1
+	if protoVer == 5 {
+		pv = 4 // paho 用 4 表示 MQTT 5.0
 	}
-	opts.SetProtocolVersion(protoVer)
+	opts.SetProtocolVersion(pv)
 
 	client := pahomqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
@@ -610,7 +627,7 @@ func (o *platformOutput) buildPropertyReport(deviceID string, points []model.Dat
 	}
 
 	// 根据 pubMode 决定上报策略
-	if o.cfg.PubMode == pubModeTimely {
+	if o.pubMode == pubModeTimely {
 		// 及时上报：设备所有属性至少被刷新过一次后才发
 		// 简化：每次 flush 时上报所有最新值
 		for pointID, dp := range latest {
@@ -650,7 +667,7 @@ func (o *platformOutput) buildPropertyReport(deviceID string, points []model.Dat
 		}
 
 		// 无变化且未超 maxPubTime 则跳过
-		if !hasChange && time.Since(lastPub) < time.Duration(o.cfg.MaxPubTime)*time.Second {
+		if !hasChange && time.Since(lastPub) < time.Duration(o.maxPubTime)*time.Second {
 			return nil
 		}
 
