@@ -1,12 +1,17 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
-import { useRoute } from 'vue-router'
-import { Odometer, Link, Cpu } from '@element-plus/icons-vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { Odometer, Link, Cpu, SwitchButton } from '@element-plus/icons-vue'
 import api from './api'
+import auth from './stores/auth'
 
 const route = useRoute()
+const router = useRouter()
 const online = ref(false)
 let timer = null
+
+// 登录/改密等全屏页无侧边栏
+const isPublic = computed(() => route.meta.public === true || route.meta.bare === true)
 
 async function checkApi() {
   try {
@@ -17,7 +22,13 @@ async function checkApi() {
   }
 }
 
+async function logout() {
+  await auth.logout()
+  router.replace('/login')
+}
+
 onMounted(() => {
+  if (!auth.state.enabled) return
   checkApi()
   timer = setInterval(checkApi, 10000)
 })
@@ -26,7 +37,7 @@ onUnmounted(() => clearInterval(timer))
 
 <template>
   <el-container class="app">
-    <el-aside width="220px">
+    <el-aside v-if="!isPublic" width="220px">
       <div class="sidebar">
         <div class="brand">
           <span class="brand-mark">◆</span>
@@ -49,10 +60,12 @@ onUnmounted(() => clearInterval(timer))
         <div class="side-foot">
           <span class="dot" :class="{ ok: online }"></span>
           <span>{{ online ? '后端已连接' : '后端未连接' }}</span>
+          <span class="side-user">{{ auth.state.me?.id || '' }}</span>
+          <el-icon class="side-logout" title="退出登录" @click="logout"><SwitchButton /></el-icon>
         </div>
       </div>
     </el-aside>
-    <el-main class="main">
+    <el-main class="main" :class="{ 'main-public': isPublic }">
       <router-view />
     </el-main>
   </el-container>
@@ -61,5 +74,19 @@ onUnmounted(() => clearInterval(timer))
 <style scoped>
 .app {
   height: 100%;
+}
+.main-public {
+  padding: 0;
+}
+.side-user {
+  margin-left: auto;
+  color: #6b7280;
+}
+.side-logout {
+  cursor: pointer;
+  color: #9aa1ac;
+}
+.side-logout:hover {
+  color: #2563eb;
 }
 </style>

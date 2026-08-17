@@ -34,6 +34,7 @@ func New(st *store.Store, statusReg *status.Registry, valuesReg *values.Registry
 func (a *API) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	// 认证(登录匿名;登出/查自己/改密仅需已认证,不受改密门禁限制)
+	mux.HandleFunc("GET /api/v1/auth/status", a.authStatus)
 	mux.HandleFunc("POST /api/v1/auth/login", a.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", a.requireAuth(a.logout))
 	mux.HandleFunc("GET /api/v1/auth/me", a.requireAuth(a.me))
@@ -387,6 +388,11 @@ type loginResponse struct {
 	ID                 string   `json:"id"`
 	Scopes             []string `json:"scopes"`
 	MustChangePassword bool     `json:"mustChangePassword"`
+}
+
+// authStatus 返回鉴权是否启用(匿名可调,供前端决定是否走登录流程)。
+func (a *API) authStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": a.authEnabled})
 }
 
 func (a *API) login(w http.ResponseWriter, r *http.Request) {

@@ -6,15 +6,57 @@ const http = axios.create({
   timeout: 10000,
 })
 
+const TOKEN_KEY = 'iotgw_token'
+
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY) || ''
+}
+
+export function setToken(token) {
+  if (token) localStorage.setItem(TOKEN_KEY, token)
+  else localStorage.removeItem(TOKEN_KEY)
+}
+
+// 请求拦截:自动附带 Bearer token。
+http.interceptors.request.use((config) => {
+  const token = getToken()
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+// 响应拦截:解包 data;401 时清 token 并跳登录(登录接口自身除外)。
 http.interceptors.response.use(
   (res) => res.data,
   (err) => {
+    const status = err.response?.status
+    const code = err.response?.data?.code
+    if (status === 401 && !err.config?.url?.includes('/auth/login')) {
+      setToken('')
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.assign('/login')
+      }
+    }
     const msg = err.response?.data?.error || err.message || '请求失败'
-    return Promise.reject(new Error(msg))
+    const e = new Error(msg)
+    e.code = code
+    return Promise.reject(e)
   },
 )
 
 export const api = {
+  // 鉴权
+  authStatus: () => http.get('/auth/status'),
+  login: (data) => http.post('/auth/login', data),
+  logout: () => http.post('/auth/logout'),
+  me: () => http.get('/auth/me'),
+  changePassword: (data) => http.put('/auth/password', data),
+
+  // 三方 client
+  listClients: () => http.get('/clients'),
+  createClient: (data) => http.post('/clients', data),
+  updateClient: (id, data) => http.put(`/clients/${id}`, data),
+  deleteClient: (id) => http.delete(`/clients/${id}`),
+
   // 连接
   listConnections: () => http.get('/connections'),
   createConnection: (data) => http.post('/connections', data),

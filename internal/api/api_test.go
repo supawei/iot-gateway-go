@@ -706,6 +706,19 @@ func TestClientsCRUDRequiresAdmin(t *testing.T) {
 	}
 }
 
+func TestAuthStatusEndpoint(t *testing.T) {
+	enabled, _ := newAuthAPI(t)
+	rec := doRequest(t, enabled.Routes(), "GET", "/api/v1/auth/status", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auth status: got %d", rec.Code)
+	}
+	var body map[string]bool
+	json.Unmarshal(rec.Body.Bytes(), &body)
+	if body["enabled"] != true {
+		t.Fatalf("auth status enabled should be true: %v", body)
+	}
+}
+
 func TestAuthDisabledBypasses(t *testing.T) {
 	st, err := store.Open(":memory:")
 	if err != nil {
