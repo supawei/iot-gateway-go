@@ -32,28 +32,34 @@ const (
 )
 
 // Config 是 smardaten-iot 平台输出的配置（存 SQLite，经 Web UI 配置）。
-// ProtoVer/PubMode 使用 flexInt 类型，兼容 Web UI 发送的数字或字符串。
+// 所有数值字段使用 flexInt 类型，兼容 Web UI 发送的数字或字符串。
 type Config struct {
-	Broker   string `json:"broker"`   // MQTT broker 地址
-	Port     int    `json:"port"`     // MQTT 端口
+	Broker   string  `json:"broker"`   // MQTT broker 地址
+	Port     flexInt `json:"port"`     // MQTT 端口
 	ProtoVer flexInt `json:"protoVer"` // 311(3.1.1) 或 5
-	Username string `json:"username"` // MQTT 用户名
-	Password string `json:"password"` // MQTT 密码
-	ClientID string `json:"clientId"` // MQTT Client ID
+	Username string  `json:"username"` // MQTT 用户名
+	Password string  `json:"password"` // MQTT 密码
+	ClientID string  `json:"clientId"` // MQTT Client ID
 
-	IotAppID      string `json:"iotAppId"`      // 应用 ID（RSA 加密后作 HTTP appId header）
-	IotRsaKeyPath string `json:"iotRsaKeyPath"` // RSA 公钥路径（PEM SPKI）
-	IotConfigPath string `json:"iotConfigPath"` // application.json 落盘路径
+	IotAppID      string  `json:"iotAppId"`      // 应用 ID（RSA 加密后作 HTTP appId header）
+	IotRsaKeyPath string  `json:"iotRsaKeyPath"` // RSA 公钥路径（PEM SPKI）
+	IotConfigPath string  `json:"iotConfigPath"` // application.json 落盘路径
 
 	PubMode       flexInt `json:"pubMode"`       // 0=及时上报, 1=变化上报
-	MaxPubTime    int     `json:"maxPubTime"`    // 变化上报模式最大周期间隔（秒）
+	MaxPubTime    flexInt `json:"maxPubTime"`    // 变化上报模式最大周期间隔（秒）
 	FlushInterval string  `json:"flushInterval"` // 数据聚合 flush 间隔
 }
 
-// flexInt 兼容 JSON 数字和字符串，用于 FieldEnum 配置字段。
+// flexInt 兼容 JSON 数字和字符串，用于 Web UI 配置字段。
+// null 视为 0（与 Go 对 int 的默认行为一致）。
 type flexInt int
 
 func (f *flexInt) UnmarshalJSON(data []byte) error {
+	// null 视为 0
+	if string(data) == "null" {
+		*f = 0
+		return nil
+	}
 	// 尝试数字
 	var n int
 	if err := json.Unmarshal(data, &n); err == nil {
@@ -155,7 +161,7 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 	// 解析配置值
 	protoVer := int(cfg.ProtoVer)
 	pubMode := int(cfg.PubMode)
-	maxPubTime := cfg.MaxPubTime
+	maxPubTime := int(cfg.MaxPubTime)
 	if maxPubTime <= 0 {
 		maxPubTime = defaultMaxPubTime
 	}
@@ -176,7 +182,7 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 	}
 
 	// 构建 MQTT 连接
-	client, err := connectMQTT(cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, gatewayID, cfg.Port, protoVer)
+	client, err := connectMQTT(cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, gatewayID, int(cfg.Port), protoVer)
 	if err != nil {
 		return nil, fmt.Errorf("mqtt connect: %w", err)
 	}
