@@ -70,11 +70,12 @@ type Listener interface {
 
 // NodeInfo 描述服务器节点树中的一个节点,供 Web UI 节点选择器渲染。
 type NodeInfo struct {
-	NodeID      string `json:"nodeId"`      // 完整地址(如 OPC UA NodeID "ns=2;i=1001"),可直接写入 Point.Address
-	BrowseName  string `json:"browseName"`  // 浏览名
-	DisplayName string `json:"displayName"` // 展示名(优先于 BrowseName 显示)
-	NodeClass   string `json:"nodeClass"`   // 节点类型(Object/Variable/Method/...)
-	HasChildren bool   `json:"hasChildren"` // 是否可能有子节点(供前端懒加载提示)
+	NodeID      string `json:"nodeId"`             // 完整地址(如 OPC UA NodeID "ns=2;i=1001"),可直接写入 Point.Address
+	BrowseName  string `json:"browseName"`         // 浏览名
+	DisplayName string `json:"displayName"`        // 展示名(优先于 BrowseName 显示)
+	NodeClass   string `json:"nodeClass"`          // 节点类型(Variable/Object/Method/...)
+	HasChildren bool   `json:"hasChildren"`        // 是否可能有子节点(供前端懒加载提示)
+	DataType    string `json:"dataType,omitempty"` // 仅 Variable 节点:数据类型短名(如 "float64"),可直接回填 Point.dataType
 }
 
 // Browser 是南向驱动的可选浏览能力:按连接浏览服务器节点树,供点位编辑时

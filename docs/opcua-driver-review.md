@@ -139,7 +139,9 @@ gopcua v0.9.1 的重连状态机在断线后:
 | ~~可观测性~~(已完成) | Read 整批失败透出真实错误原因 ✅;订阅 `StatusChangeNotification` 透出日志 ✅ |
 | ~~节点浏览/发现~~(已完成) | `driver.Browser` 能力 + opcua Browse(层次引用,懒加载)+ `POST /api/v1/connections/{id}/browse` + Web UI 点位"浏览选择"节点树 ✅ |
 | ~~P1-① 安全模式~~(已完成) | `securityMode`(sign/signAndEncrypt)+ `securityPolicy` + 客户端证书自动生成/导入 + `serverThumbprint` 指纹信任锚,设计见 [docs/opcua-security-design.md](docs/opcua-security-design.md) ✅ |
-| P2(按需) | 方法调用、历史数据、数组/扩展类型、订阅失效→设备离线联动、订阅背压、stateCh 健壮性、modbus 错误透出对齐、浏览返回变量 DataType 提示、CA 证书链校验(当前以指纹为信任锚) |
+| P2(按需) | 方法调用、历史数据、数组/扩展类型、订阅失效→设备离线联动、订阅背压、stateCh 健壮性、modbus 错误透出对齐、CA 证书链校验(当前以指纹为信任锚) |
+
+> 浏览返回变量 DataType(原 P2)已随本轮补齐:Variable 节点批量读 DataType 属性映射为短名(`bool`/`int32`/`float64`/`string`),Web UI 选中节点自动回填点位 `dataType`。
 
 > 集成测试(原 P2)已补齐:基于 gopcua 进程内 server 的 `TestReadE2E`/`TestProbeE2E`/`TestSubscribeE2E`/`TestBrowseE2E` 及安全模式 `TestSecurity*E2E` 均已通过。
 

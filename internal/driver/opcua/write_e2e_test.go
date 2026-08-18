@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gopcua/opcua/id"
 	"github.com/gopcua/opcua/server"
 	"github.com/gopcua/opcua/ua"
 
@@ -62,6 +63,11 @@ func getE2EEnv(t *testing.T) *e2eEnv {
 		objects.AddRef(e2eInst.dblNode, server.RefTypeIDOrganizes, true)
 		objects.AddRef(e2eInst.boolNode, server.RefTypeIDOrganizes, true)
 		objects.AddRef(e2eInst.strNode, server.RefTypeIDOrganizes, true)
+		// 给变量节点设真实 DataType 属性,供浏览测试断言 DataType 带回映射
+		e2eInst.intNode.SetAttribute(ua.AttributeIDDataType, server.DataValueFromValue(ua.NewNumericNodeID(0, id.Int32)))
+		e2eInst.dblNode.SetAttribute(ua.AttributeIDDataType, server.DataValueFromValue(ua.NewNumericNodeID(0, id.Double)))
+		e2eInst.boolNode.SetAttribute(ua.AttributeIDDataType, server.DataValueFromValue(ua.NewNumericNodeID(0, id.Boolean)))
+		e2eInst.strNode.SetAttribute(ua.AttributeIDDataType, server.DataValueFromValue(ua.NewNumericNodeID(0, id.String)))
 		time.Sleep(150 * time.Millisecond) // 等服务监听就绪
 	})
 	if e2eErr != nil {
@@ -302,6 +308,9 @@ func TestBrowseE2E(t *testing.T) {
 		"BoolVar":   env.boolNode.ID().String(),
 		"StrVar":    env.strNode.ID().String(),
 	}
+	wantType := map[string]string{
+		"IntVar": "int32", "DoubleVar": "float64", "BoolVar": "bool", "StrVar": "string",
+	}
 	for name, nid := range want {
 		n, ok := byName[name]
 		if !ok {
@@ -314,6 +323,10 @@ func TestBrowseE2E(t *testing.T) {
 		// 不能是 gopcua 的 "NodeClassVariable" 前缀形式。
 		if n.NodeClass != "Variable" {
 			t.Fatalf("%s nodeClass = %q, want Variable", name, n.NodeClass)
+		}
+		// 回归:Variable 节点须带回映射后的 dataType 短名(前端可回填 Point.dataType)
+		if n.DataType != wantType[name] {
+			t.Fatalf("%s dataType = %q, want %q", name, n.DataType, wantType[name])
 		}
 	}
 }

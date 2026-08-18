@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gopcua/opcua"
+	"github.com/gopcua/opcua/id"
 	"github.com/gopcua/opcua/ua"
 
 	"iot-gateway-go/internal/model"
@@ -417,6 +418,32 @@ func TestNormalizeNodeClass(t *testing.T) {
 	for _, c := range cases {
 		if got := normalizeNodeClass(c.in); got != c.want {
 			t.Fatalf("normalizeNodeClass(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestDataTypeName 覆盖 dataTypeName 映射:标准类型转短名,未识别类型返回原始 NodeID。
+func TestDataTypeName(t *testing.T) {
+	cases := []struct {
+		nid  *ua.NodeID
+		want string
+	}{
+		{ua.NewNumericNodeID(0, id.Boolean), "bool"},
+		{ua.NewNumericNodeID(0, id.Int16), "int16"},
+		{ua.NewNumericNodeID(0, id.UInt16), "uint16"},
+		{ua.NewNumericNodeID(0, id.Int32), "int32"},
+		{ua.NewNumericNodeID(0, id.UInt32), "uint32"},
+		{ua.NewNumericNodeID(0, id.Int64), "int64"},
+		{ua.NewNumericNodeID(0, id.Float), "float32"},
+		{ua.NewNumericNodeID(0, id.Double), "float64"},
+		{ua.NewNumericNodeID(0, id.String), "string"},
+		{ua.NewNumericNodeID(0, id.DateTime), "i=13"},  // 未映射类型 -> 原始 NodeID(gopcua ns=0 省略前缀)
+		{ua.NewNumericNodeID(2, id.Int32), "ns=2;i=6"}, // 非 0 命名空间 -> 原始 NodeID
+		{nil, ""},
+	}
+	for _, c := range cases {
+		if got := dataTypeName(c.nid); got != c.want {
+			t.Fatalf("dataTypeName(%v) = %q, want %q", c.nid, got, c.want)
 		}
 	}
 }

@@ -276,7 +276,7 @@ curl -X POST http://localhost:8080/api/v1/connections \
 
 ```json
 [
-  { "nodeId": "ns=2;i=1001", "browseName": "Temperature", "displayName": "Temperature", "nodeClass": "Variable", "hasChildren": false }
+  { "nodeId": "ns=2;i=1001", "browseName": "Temperature", "displayName": "Temperature", "nodeClass": "Variable", "hasChildren": false, "dataType": "float64" }
 ]
 ```
 
@@ -286,6 +286,7 @@ curl -X POST http://localhost:8080/api/v1/connections \
 | `browseName` / `displayName` | 浏览名 / 展示名(展示时优先用 displayName) |
 | `nodeClass` | `Object` / `Variable` / `Method` 等 |
 | `hasChildren` | 是否可能有子节点(前端据此懒加载展开) |
+| `dataType` | 仅 `Variable` 节点:数据类型短名(如 `bool`/`int32`/`float64`/`string`),可直接回填 `Point.dataType`;未识别的类型返回原始 NodeID 字符串作提示 |
 
 **错误**:连接不存在 `404`;驱动不支持浏览 `501`;浏览失败(连接不可达等)`502`。
 

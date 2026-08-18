@@ -120,6 +120,10 @@ function pickNode(data) {
   }
   if (browseTarget.value) {
     browseTarget.value.address = data.nodeId
+    // 服务端带回的 dataType 短名(如 "float64")若在可选类型内,一并回填点位类型
+    if (data.dataType && DATA_TYPES.includes(data.dataType)) {
+      browseTarget.value.dataType = data.dataType
+    }
   }
   browseVisible.value = false
 }
@@ -444,7 +448,7 @@ onUnmounted(() => {
       >
         <template #default="{ data }">
           <span class="mono">{{ data.displayName || data.browseName }}</span>
-          <span class="node-class">{{ data.nodeClass }}</span>
+          <span class="node-class">{{ data.nodeClass }}{{ data.dataType ? ' · ' + data.dataType : '' }}</span>
         </template>
       </el-tree>
       <template #footer>

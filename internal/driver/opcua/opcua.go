@@ -116,6 +116,8 @@ func (d *opcuaDriver) Browse(ctx context.Context, connectionID string, connConfi
 		return nil, fmt.Errorf("opcua browse %q: %w", parent, err)
 	}
 	infos := make([]driver.NodeInfo, 0, len(refs))
+	var vars []*ua.NodeID // 需要读 DataType 属性的 Variable 节点(批量一次 Read)
+	var varIdx []int
 	for _, r := range refs {
 		if !r.IsForward {
 			continue
@@ -131,8 +133,68 @@ func (d *opcuaDriver) Browse(ctx context.Context, connectionID string, connConfi
 			NodeClass:   normalizeNodeClass(r.NodeClass),
 			HasChildren: r.NodeClass == ua.NodeClassObject || r.NodeClass == ua.NodeClassVariable || r.NodeClass == ua.NodeClassMethod,
 		})
+		if r.NodeClass == ua.NodeClassVariable {
+			vars = append(vars, nid)
+			varIdx = append(varIdx, len(infos)-1)
+		}
+	}
+	if len(vars) > 0 {
+		fillDataTypes(ctx, shared.client, vars, varIdx, infos)
 	}
 	return infos, nil
+}
+
+// fillDataTypes 批量读取 Variable 节点的 DataType 属性(单次 Read 请求),映射为
+// 友好短名回填到 NodeInfo.DataType。读取失败仅记日志,不阻断浏览。
+func fillDataTypes(ctx context.Context, client *opcua.Client, nodes []*ua.NodeID, indices []int, infos []driver.NodeInfo) {
+	nodesToRead := make([]*ua.ReadValueID, len(nodes))
+	for i, n := range nodes {
+		nodesToRead[i] = &ua.ReadValueID{NodeID: n, AttributeID: ua.AttributeIDDataType}
+	}
+	resp, err := client.Read(ctx, &ua.ReadRequest{NodesToRead: nodesToRead})
+	if err != nil {
+		slog.Debug("opcua browse: read data types failed", "err", err)
+		return
+	}
+	for row, dv := range resp.Results {
+		if row >= len(indices) || dv == nil || dv.Status != ua.StatusOK || dv.Value == nil {
+			continue
+		}
+		infos[indices[row]].DataType = dataTypeName(dv.Value.NodeID())
+	}
+}
+
+// dataTypeName 把 DataType 属性返回的 NodeID 映射为网关支持的 dataType 短名;
+// 未识别的类型返回原始 NodeID 字符串作为提示(前端不作为可选 dataType 回填)。
+func dataTypeName(nid *ua.NodeID) string {
+	if nid == nil {
+		return ""
+	}
+	if nid.Namespace() != 0 {
+		return nid.String()
+	}
+	switch nid.IntID() {
+	case id.Boolean:
+		return "bool"
+	case id.Int16:
+		return "int16"
+	case id.UInt16:
+		return "uint16"
+	case id.Int32:
+		return "int32"
+	case id.UInt32:
+		return "uint32"
+	case id.Int64:
+		return "int64"
+	case id.Float:
+		return "float32"
+	case id.Double:
+		return "float64"
+	case id.String:
+		return "string"
+	default:
+		return nid.String()
+	}
 }
 
 // normalizeNodeClass 把 ua.NodeClass 枚举转成友好短名(Variable/Object/Method...)——
