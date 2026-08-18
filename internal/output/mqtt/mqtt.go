@@ -60,7 +60,7 @@ func init() {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			return nil, fmt.Errorf("mqtt config: %w", err)
 		}
-		return New(cfg, bc.GatewayID)
+		return New(cfg, bc.GatewayID, bc.OutputID, bc.Backfill)
 	})
 }
 
@@ -68,6 +68,11 @@ type mqttOutput struct {
 	client    pahomqtt.Client
 	gatewayID string
 	qos       byte
+
+	// 断网补传(见 docs/offline-backfill-design.md):outputID 为补传队列隔离键,
+	// backfill 为持久化队列(未接线时 nil,退化为"失败丢弃 + 告警")。
+	outputID string
+	backfill output.BackfillSink
 
 	flushInterval time.Duration
 	batchMax      int
@@ -84,7 +89,7 @@ type mqttOutput struct {
 	output.SendStats
 }
 
-func New(cfg Config, gatewayID string) (output.Output, error) {
+func New(cfg Config, gatewayID string, outputID string, backfill output.BackfillSink) (output.Output, error) {
 	if cfg.QoS == 0 {
 		cfg.QoS = defaultQoS
 	}
@@ -117,6 +122,8 @@ func New(cfg Config, gatewayID string) (output.Output, error) {
 		client:        client,
 		gatewayID:     gatewayID,
 		qos:           cfg.QoS,
+		outputID:      outputID,
+		backfill:      backfill,
 		flushInterval: flushInterval,
 		batchMax:      batchMax,
 	}
@@ -135,25 +142,34 @@ func (m *mqttOutput) Publish(dp model.DataPoint) error {
 		return m.publishNow(dp)
 	}
 	// 批量模式:入缓冲,由 flusher 每窗口聚合为每设备一条消息。
+	// 缓冲满不再丢弃:启用补传时落库待续传。
+	var toSave []model.DataPoint
 	m.mu.Lock()
 	if m.pendingCount >= maxPendingPoints {
-		m.mu.Unlock()
-		slog.Warn("mqtt pending buffer full, drop datapoint", "device", dp.DeviceID, "point", dp.Point)
-		return nil
+		toSave = append(toSave, dp)
+	} else {
+		m.pending[dp.DeviceID] = append(m.pending[dp.DeviceID], dp)
+		m.pendingCount++
 	}
-	m.pending[dp.DeviceID] = append(m.pending[dp.DeviceID], dp)
-	m.pendingCount++
 	m.mu.Unlock()
+	if len(toSave) > 0 {
+		m.saveBackfill(toSave)
+	}
 	return nil
 }
 
 // publishNow 即时模式:单点一条消息(payload 为单个 DataPoint 对象)。
+// 发送失败时落库补传,恢复后由 Manager 重放。
 func (m *mqttOutput) publishNow(dp model.DataPoint) error {
 	payload, err := json.Marshal(dp)
 	if err != nil {
 		return fmt.Errorf("marshal datapoint: %w", err)
 	}
-	return m.publish(m.deviceTopic(dp.DeviceID), payload)
+	if err := m.publish(m.deviceTopic(dp.DeviceID), payload); err != nil {
+		m.saveBackfill([]model.DataPoint{dp})
+		return err
+	}
+	return nil
 }
 
 // deviceTopic 返回设备数据 topic:gateway/{gw}/device/{dev}/data。
@@ -195,7 +211,8 @@ func (m *mqttOutput) flushOnce() {
 }
 
 // publishBatch 把同一设备的点按 batchMax 拆条发布;payload 为 DataPoint 数组。
-// 首条失败即停止该设备剩余拆分(有界等待后已确认不可达,避免叠加超时)。
+// 首条失败即停止该设备剩余拆分(有界等待后已确认不可达,避免叠加超时),
+// 并把未发出的点落库补传,恢复后重放。
 func (m *mqttOutput) publishBatch(deviceID string, points []model.DataPoint) {
 	topic := m.deviceTopic(deviceID)
 	for start := 0; start < len(points); start += m.batchMax {
@@ -210,9 +227,26 @@ func (m *mqttOutput) publishBatch(deviceID string, points []model.DataPoint) {
 		}
 		if err := m.publish(topic, payload); err != nil {
 			slog.Error("mqtt publish batch failed", "device", deviceID, "points", end-start, "err", err)
+			m.saveBackfill(points[start:]) // 失败条 + 未发送的剩余条落库待续传
 			return
 		}
 	}
+}
+
+// saveBackfill 把无法即时送出的数据点持久化到补传队列(断网续传)。
+// 未接线补传(backfill==nil)或落库失败时仅告警,不阻塞调用方。
+func (m *mqttOutput) saveBackfill(dps []model.DataPoint) {
+	if len(dps) == 0 || m.backfill == nil {
+		return
+	}
+	if err := m.backfill.Save(m.outputID, dps); err != nil {
+		slog.Error("mqtt backfill save failed", "err", err)
+	}
+}
+
+// BackfillHealthy 实现 output.BackfillHealthy:仅在 MQTT 已连接时允许重放补传队列。
+func (m *mqttOutput) BackfillHealthy() bool {
+	return m.client != nil && m.client.IsConnected()
 }
 
 // publish 有界等待发布单条消息;成功/失败更新上送统计。

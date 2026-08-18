@@ -10,13 +10,14 @@ import (
 	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/output/mqtttest"
 	"iot-gateway-go/internal/output/mqttutil"
+	"sync"
 )
 
 // TestNewNonBlockingUnreachable broker 不可达(黑洞地址)时,New 必须在 ConnectProbe 附近
 // 返回且不报错(非阻塞构造),这是「启动不卡」的回归测试。
 func TestNewNonBlockingUnreachable(t *testing.T) {
 	start := time.Now()
-	out, err := New(Config{Broker: "tcp://192.0.2.1:1883", ClientID: "test", QoS: 1}, "gw-01")
+	out, err := New(Config{Broker: "tcp://192.0.2.1:1883", ClientID: "test", QoS: 1}, "gw-01", "", nil)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("New should not fail on unreachable broker, got %v", err)
@@ -34,7 +35,7 @@ func TestNewNonBlockingUnreachable(t *testing.T) {
 // 绝不永久阻塞(「发送不卡」的回归测试)。
 func TestPublishTimeout(t *testing.T) {
 	b := mqtttest.StartSilent(t)
-	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "test", QoS: 1}, "gw-01")
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "test", QoS: 1}, "gw-01", "", nil)
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -54,7 +55,7 @@ func TestPublishTimeout(t *testing.T) {
 // TestRuntimeStatusConnected 连接建立后 RuntimeStatus 应上报 connected=true。
 func TestRuntimeStatusConnected(t *testing.T) {
 	b := mqtttest.StartSilent(t)
-	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "st", QoS: 1}, "gw-01")
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "st", QoS: 1}, "gw-01", "", nil)
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -107,7 +108,7 @@ func waitMessages(t *testing.T, b *mqtttest.RecordingBroker, n int) []mqtttest.R
 // 不同设备分条;默认即时模式仍是单点单条。
 func TestBatchPublishesGroupedByDevice(t *testing.T) {
 	b := mqtttest.StartRecording(t)
-	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "batch", QoS: 1, FlushInterval: "50ms"}, "gw-01")
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "batch", QoS: 1, FlushInterval: "50ms"}, "gw-01", "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -152,7 +153,7 @@ func TestBatchPublishesGroupedByDevice(t *testing.T) {
 // TestBatchMaxSplits 单条消息点数超过 batchMax 时拆分。
 func TestBatchMaxSplits(t *testing.T) {
 	b := mqtttest.StartRecording(t)
-	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "split", QoS: 1, FlushInterval: "50ms", BatchMax: 2}, "gw-01")
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "split", QoS: 1, FlushInterval: "50ms", BatchMax: 2}, "gw-01", "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -192,7 +193,7 @@ func TestBatchMaxSplits(t *testing.T) {
 // TestBatchCloseFlushes Close 会发送剩余缓冲。
 func TestBatchCloseFlushes(t *testing.T) {
 	b := mqtttest.StartRecording(t)
-	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "close", QoS: 1, FlushInterval: "1h"}, "gw-01")
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "close", QoS: 1, FlushInterval: "1h"}, "gw-01", "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -220,7 +221,7 @@ func TestBatchCloseFlushes(t *testing.T) {
 // TestImmediateSingleObject 默认即时模式:单点一条消息,payload 为单个对象而非数组。
 func TestImmediateSingleObject(t *testing.T) {
 	b := mqtttest.StartRecording(t)
-	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "imm", QoS: 1}, "gw-01")
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "imm", QoS: 1}, "gw-01", "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -242,5 +243,97 @@ func TestImmediateSingleObject(t *testing.T) {
 	}
 	if got.Point != "temperature" {
 		t.Fatalf("point = %q", got.Point)
+	}
+}
+
+// ---- 断网补传接入 ----
+
+// fakeBackfillSink 记录被保存到补传队列的点。
+type fakeBackfillSink struct {
+	mu  sync.Mutex
+	dps []model.DataPoint
+}
+
+func (f *fakeBackfillSink) Save(_ string, dps []model.DataPoint) error {
+	f.mu.Lock()
+	f.dps = append(f.dps, dps...)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeBackfillSink) saved() []model.DataPoint {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]model.DataPoint(nil), f.dps...)
+}
+
+func waitSaved(t *testing.T, sink *fakeBackfillSink, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if len(sink.saved()) > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("points not saved to backfill within %v", timeout)
+}
+
+// TestImmediatePublishFailSavesToBackfill 即时模式发送失败(半死 broker 无 PUBACK)→ 落库补传。
+func TestImmediatePublishFailSavesToBackfill(t *testing.T) {
+	b := mqtttest.StartSilent(t)
+	sink := &fakeBackfillSink{}
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "bf-imm", QoS: 1}, "gw-01", "out-1", sink)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer out.Close()
+	waitMQTTConnected(t, out)
+
+	dp := model.DataPoint{DeviceID: "d1", Point: "temperature", Value: 25.5, Timestamp: time.Now()}
+	err = out.Publish(dp)
+	if !errors.Is(err, mqttutil.ErrPublishTimeout) {
+		t.Fatalf("Publish err = %v, want ErrPublishTimeout", err)
+	}
+	got := sink.saved()
+	if len(got) != 1 || got[0].DeviceID != "d1" || got[0].Point != "temperature" {
+		t.Fatalf("saved points = %+v, want [d1/temperature]", got)
+	}
+}
+
+// TestBatchPublishFailSavesToBackfill 批量模式 flush 发布失败 → 未发出的点落库补传。
+func TestBatchPublishFailSavesToBackfill(t *testing.T) {
+	b := mqtttest.StartSilent(t)
+	sink := &fakeBackfillSink{}
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "bf-batch", QoS: 1, FlushInterval: "50ms"}, "gw-01", "out-1", sink)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer out.Close()
+	waitMQTTConnected(t, out)
+
+	now := time.Now()
+	out.Publish(model.DataPoint{DeviceID: "d1", Point: "p1", Value: 1, Timestamp: now})
+	out.Publish(model.DataPoint{DeviceID: "d1", Point: "p2", Value: 2, Timestamp: now})
+
+	// flush 有界等待 5s 后失败 → saveBackfill。
+	waitSaved(t, sink, 8*time.Second)
+	got := sink.saved()
+	if len(got) != 2 {
+		t.Fatalf("saved points = %d, want 2", len(got))
+	}
+}
+
+// TestBackfillHealthy 连接建立后 BackfillHealthy 为 true(允许重放)。
+func TestBackfillHealthy(t *testing.T) {
+	b := mqtttest.StartSilent(t)
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "bf-healthy", QoS: 1}, "gw-01", "out-1", nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer out.Close()
+	waitMQTTConnected(t, out)
+	if !out.(*mqttOutput).BackfillHealthy() {
+		t.Fatal("BackfillHealthy should be true when connected")
 	}
 }

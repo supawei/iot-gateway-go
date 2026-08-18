@@ -19,14 +19,16 @@
 
 - 跨设备合并(不同设备 topic 不同,天然无法合并)。
 - 服务端聚合语义(如 ThingsBoard 的按 ts 分组)——本输出保持"DataPoint 数组"这一自描述格式。
-- mqtt 输出的断网补传:不在本次范围(已有 backfill 基建,留待后续按需接入)。
+
+> **断网补传**:mqtt 输出已接入断网补传(与 thingsboard/smardaten 同模式):
+> 发送失败/缓冲满时落库,恢复后重放。见 §11.1。
 
 ## 3. 方案总览
 
 ```
 flushInterval 为空(默认) → 即时模式:Publish 同步单条发布(现状)
 flushInterval 非空        → 批量模式:
-    Publish(dp) ──▶ pending[deviceID] 追加(带上限,满则丢弃告警)
+    Publish(dp) ──▶ pending[deviceID] 追加(带上限,满则入补传队列)
                     runFlusher(每 flushInterval)──▶ 按设备各发一条消息
                     payload = DataPoint 数组,单条 > batchMax 时拆条
 ```
@@ -127,8 +129,9 @@ type mqttOutput struct {
 ### 11.1 代码变更(2026-08-18)
 
 - **`internal/output/mqtt/mqtt.go`**:`Config` 增加 `flushInterval`/`batchMax`,schema 同步;`New` 按 `flushInterval` 分支即时/批量;批量模式引入 pending 缓冲 + `runFlusher`(每窗口按设备聚合发布,payload 为 `[]DataPoint`,`batchMax` 拆条,有界等待),`Close` flush 剩余;`RuntimeStatus.Pending` 上报缓冲深度。
+- **断网补传接入**:mqtt 输出实现 `output.BackfillHealthy`(`IsConnected`)+ `BackfillSink` 注入(`bc.OutputID`/`bc.Backfill`);即时模式发送失败、批量模式缓冲满 / flush 发布失败均 `saveBackfill` 落库,恢复后由 Manager 重放——与 thingsboard/smardaten 同模式,数据完整性闭环。
 - **`internal/output/mqtttest/recording.go`**(新增):`RecordingBroker`(CONNACK/PUBACK/SUBACK/PINGRESP + 记录 PUBLISH),供批量条数/载荷断言。
-- **`internal/output/mqtt/mqtt_test.go`**:4 个新测试(按设备分组聚合 / `batchMax` 拆分 / Close flush 剩余 / 即时模式单对象 payload)。
+- **`internal/output/mqtt/mqtt_test.go`**:7 个新测试(按设备分组聚合 / `batchMax` 拆分 / Close flush 剩余 / 即时模式单对象 payload / 即时·批量失败落库补传 / `BackfillHealthy`)。
 - **`README.md`**:MQTT 输出批量模式说明。
 
 ### 11.2 测试
@@ -138,4 +141,4 @@ type mqttOutput struct {
 
 ### 11.3 已知限制(见 §7)
 
-- 批量模式引入一个 `flushInterval` 的发送延迟;缓冲满丢弃新点(与其他输出一致);mqtt 输出断网补传留待后续。
+- 批量模式引入一个 `flushInterval` 的发送延迟;缓冲满时新点入补传队列(与其他输出一致)。
