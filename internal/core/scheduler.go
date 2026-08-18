@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -20,21 +22,58 @@ const defaultInterval = 5 * time.Second
 
 // Scheduler 用 cron 统一调度采集任务,任务投递到 worker pool 执行。
 // 常驻 goroutine = cron 调度器 + poolSize 个 worker,与设备数解耦;
-// 配置变更时全量重载(停旧调度与 pool、按新配置重建)。
+// 配置变更时**增量 reconcile**:只增删改受影响的设备/连接,保留未变设备的
+// 连接与采集,消除全量重载造成的采集空窗与连接重连。见 docs/incremental-hot-reload-design.md。
 type Scheduler struct {
-	store         *store.Store
-	output        chan<- model.DataPoint
-	status        *status.Registry
-	values        *values.Registry
-	outputs       *output.Manager // 设备上下线通知的动态来源(热重载后自动跟随最新输出)
-	poolSize      int
-	baseCtx       context.Context
+	store    *store.Store
+	output   chan<- model.DataPoint
+	status   *status.Registry
+	values   *values.Registry
+	outputs  *output.Manager // 设备上下线通知的动态来源(热重载后自动跟随最新输出)
+	poolSize int
+
+	baseCtx context.Context
+
+	// 以下采集基础设施跨 reload 持久(首次创建,进程关闭才销毁)。
 	mu            sync.Mutex
+	runtimes      map[string]*deviceRuntime // deviceID -> 运行态(仅 reload 单 goroutine 访问)
 	cron          *cron.Cron
-	conns         []driver.Conn
 	taskCh        chan collectTask
 	workersDone   <-chan struct{}
+	collectCtx    context.Context
 	collectCancel context.CancelFunc
+}
+
+// collectMode 是设备的采集方式。
+type collectMode int
+
+const (
+	collectPoll      collectMode = iota // 按 intervalMs 周期 Read
+	collectSubscribe                    // 驱动推送(Subscriber)
+	collectListen                       // 驱动被动监听(Listener)
+)
+
+// deviceRuntime 跟踪单个设备的运行态,供增量 diff/reconcile。
+type deviceRuntime struct {
+	deviceID string
+	conn     driver.Conn
+	mode     collectMode
+	// poll:
+	cronID cron.EntryID
+	job    *deviceJob
+	// diff 键与内容
+	connKey    string
+	params     json.RawMessage
+	intervalMs int
+	sig        string // 采集规格签名(变化即需处理)
+}
+
+// desiredDevice 是新配置中一个待调度设备(含其连接配置)。
+type desiredDevice struct {
+	device  model.Device
+	conn    model.Connection
+	connKey string
+	sig     string
 }
 
 func NewScheduler(st *store.Store, dataPoints chan<- model.DataPoint, poolSize int, statusReg *status.Registry, valuesReg *values.Registry, outputs *output.Manager) *Scheduler {
@@ -63,123 +102,363 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	}
 }
 
+// reload 读取最新配置并增量 reconcile:未变设备零操作,变化设备只处理受影响部分。
 func (s *Scheduler) reload() error {
-	s.stopCollectors()
+	// 1. 确保采集基础设施(首次创建)。
+	s.ensureInfra()
 
-	collectCtx, cancel := context.WithCancel(s.baseCtx)
-	taskCh := make(chan collectTask, s.poolSize)
-	s.mu.Lock()
-	s.collectCancel = cancel
-	s.taskCh = taskCh
-	s.workersDone = s.startWorkers(taskCh)
-	s.mu.Unlock()
-
+	// 2. 读最新配置,构建 desired 计划。
 	devices, err := s.store.ListDevices()
 	if err != nil {
 		slog.Error("list devices failed", "err", err)
-		s.stopCollectors()
+		return err
+	}
+	desired, err := s.buildDesired(devices)
+	if err != nil {
 		return err
 	}
 
-	// 并行打开设备连接(受 poolSize 限流),避免串行连接超时拖慢启动/热加载。
-	type openedDevice struct {
-		device model.Device
-		conn   driver.Conn
+	// 3. 对旧运行态与 desired 做 diff + reconcile(单 goroutine,worker 不读 runtimes)。
+	old := s.runtimes
+	if old == nil {
+		old = map[string]*deviceRuntime{}
 	}
-	var (
-		openMu sync.Mutex
-		opened []openedDevice
-		wg     sync.WaitGroup
-		sem    = make(chan struct{}, s.poolSize)
-	)
-	for _, device := range devices {
-		if !device.Enabled || len(device.Points) == 0 {
-			continue
-		}
-		wg.Add(1)
-		go func(d model.Device) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			conn, ok := s.openDevice(collectCtx, d)
-			if !ok {
-				return
-			}
-			openMu.Lock()
-			opened = append(opened, openedDevice{d, conn})
-			openMu.Unlock()
-		}(device)
-	}
-	wg.Wait()
-
-	// 顺序注册采集方式(订阅/监听/cron);注册逻辑轻量,cron AddJob 须在 Start 前完成。
-	c := cron.New()
-	for _, od := range opened {
-		device, conn := od.device, od.conn
-		// 订阅模式:网关主动订阅,数据变化即推送。
-		if sub, isSub := conn.(driver.Subscriber); isSub {
-			if err := sub.Subscribe(collectCtx, device.Points, func(dp model.DataPoint) {
-				s.pushData(collectCtx, device.ID, dp)
-			}); err != nil {
-				slog.Error("subscribe failed", "device", device.ID, "err", err)
-				s.markOffline(device.ID, err.Error())
-				continue
-			}
-			s.markOnline(device.ID, time.Now())
-			continue
-		}
-		// 监听模式:网关被动 listen,设备连入上报数据即推送。
-		if lis, isListen := conn.(driver.Listener); isListen {
-			if err := lis.Listen(collectCtx, device.Points, func(dp model.DataPoint) {
-				s.pushData(collectCtx, device.ID, dp)
-			}); err != nil {
-				slog.Error("listen failed", "device", device.ID, "err", err)
-				s.markOffline(device.ID, err.Error())
-				continue
-			}
-			s.markOnline(device.ID, time.Now())
-			continue
-		}
-		job := &deviceJob{
-			taskCh:   taskCh,
-			conn:     conn,
-			points:   device.Points,
-			deviceID: device.ID,
-			ctx:      collectCtx,
-		}
-		if _, err := c.AddJob(intervalSpec(device.IntervalMs), job); err != nil {
-			slog.Error("add cron job failed", "device", device.ID, "err", err)
-			s.markOffline(device.ID, err.Error())
-		}
-	}
+	newRt := s.reconcile(old, desired)
 
 	s.mu.Lock()
-	s.cron = c
+	s.runtimes = newRt
 	s.mu.Unlock()
-	c.Start()
 	return nil
 }
 
-// stopCollectors 按"cancel Read -> 停 cron -> 关 taskCh -> 等 workers 退出 -> Close conns"顺序清理,
-// 保证关连接时无并发 Read:cron.Stop 后无 job 投递,workers 退出后无 Read 在执行。
-func (s *Scheduler) stopCollectors() {
+// ensureInfra 创建跨 reload 持久的基础设施(cron / taskCh / workers / collectCtx)。
+func (s *Scheduler) ensureInfra() {
 	s.mu.Lock()
-	cancel := s.collectCancel
-	c := s.cron
-	conns := s.conns
-	taskCh := s.taskCh
-	workersDone := s.workersDone
-	s.collectCancel = nil
-	s.cron = nil
-	s.conns = nil
-	s.taskCh = nil
-	s.workersDone = nil
-	s.mu.Unlock()
-
-	if cancel == nil {
+	defer s.mu.Unlock()
+	if s.taskCh != nil {
 		return
 	}
-	cancel()
+	collectCtx, cancel := context.WithCancel(s.baseCtx)
+	s.collectCtx = collectCtx
+	s.collectCancel = cancel
+	s.taskCh = make(chan collectTask, s.poolSize)
+	s.workersDone = s.startWorkers(s.taskCh)
+	c := cron.New()
+	c.Start()
+	s.cron = c
+}
+
+// buildDesired 把设备列表组装为 reconcile 的期望计划(跳过禁用/无点位设备)。
+func (s *Scheduler) buildDesired(devices []model.Device) (map[string]desiredDevice, error) {
+	connCache := make(map[string]model.Connection)
+	getConn := func(id string) (model.Connection, error) {
+		if c, ok := connCache[id]; ok {
+			return c, nil
+		}
+		c, err := s.store.GetConnection(id)
+		if err != nil {
+			return model.Connection{}, err
+		}
+		connCache[id] = c
+		return c, nil
+	}
+
+	desired := make(map[string]desiredDevice, len(devices))
+	for _, d := range devices {
+		if !d.Enabled || len(d.Points) == 0 {
+			continue
+		}
+		conn, err := getConn(d.ConnectionID)
+		if err != nil {
+			slog.Error("get connection failed", "device", d.ID, "connection", d.ConnectionID, "err", err)
+			s.markOffline(d.ID, "get connection failed: "+err.Error())
+			continue
+		}
+		desired[d.ID] = desiredDevice{
+			device:  d,
+			conn:    conn,
+			connKey: connKeyOf(d.ConnectionID, conn.Driver, conn.Config),
+			sig:     sigOf(d.Params, d.Points, d.IntervalMs),
+		}
+	}
+	return desired, nil
+}
+
+// connKeyOf 是连接级身份:连接配置/驱动/ID 变化即整体重开。
+func connKeyOf(connectionID, driverName string, cfg json.RawMessage) string {
+	return connectionID + "\x00" + driverName + "\x00" + string(cfg)
+}
+
+// sigOf 是设备采集规格签名:参数/点位/间隔变化即需处理。
+func sigOf(params json.RawMessage, points []model.Point, intervalMs int) string {
+	pts, _ := json.Marshal(points)
+	return string(params) + "\x00" + strconv.Itoa(intervalMs) + "\x00" + string(pts)
+}
+
+// reconcile 对新旧配置做 diff 并按连接组增量执行。
+// 规则见 docs/incremental-hot-reload-design.md §3/§4。
+func (s *Scheduler) reconcile(old map[string]*deviceRuntime, desired map[string]desiredDevice) map[string]*deviceRuntime {
+	newRt := make(map[string]*deviceRuntime, len(desired))
+
+	oldGroups := make(map[string][]string)
+	for id, rt := range old {
+		oldGroups[rt.connKey] = append(oldGroups[rt.connKey], id)
+	}
+	newGroups := make(map[string][]string)
+	for id, dd := range desired {
+		newGroups[dd.connKey] = append(newGroups[dd.connKey], id)
+	}
+
+	connKeys := make([]string, 0, len(oldGroups)+len(newGroups))
+	seen := make(map[string]bool)
+	for k := range oldGroups {
+		if !seen[k] {
+			seen[k] = true
+			connKeys = append(connKeys, k)
+		}
+	}
+	for k := range newGroups {
+		if !seen[k] {
+			seen[k] = true
+			connKeys = append(connKeys, k)
+		}
+	}
+
+	for _, ck := range connKeys {
+		oldIDs := oldGroups[ck]
+		newIDs := newGroups[ck]
+		switch {
+		case len(oldIDs) == 0:
+			// 连接新增:整组打开。
+			s.openAndRegisterBatch(newIDs, desired, newRt)
+		case len(newIDs) == 0:
+			// 连接删除:整组停止。
+			for _, id := range oldIDs {
+				s.stopDevice(old[id])
+			}
+		default:
+			s.reconcileGroup(ck, oldIDs, newIDs, old, desired, newRt)
+		}
+	}
+	return newRt
+}
+
+// reconcileGroup 处理"连接未变"的组内增量。
+func (s *Scheduler) reconcileGroup(_ string, oldIDs, newIDs []string, old map[string]*deviceRuntime, desired map[string]desiredDevice, newRt map[string]*deviceRuntime) {
+	oldSet := make(map[string]bool, len(oldIDs))
+	for _, id := range oldIDs {
+		oldSet[id] = true
+	}
+	newSet := make(map[string]bool, len(newIDs))
+	for _, id := range newIDs {
+		newSet[id] = true
+	}
+
+	// 组模式从任一旧运行态推断;订阅/监听组一旦出现删除或签名变化 → 整组重开
+	// (共享订阅无单设备卸载能力,整组重开保证正确清理,见设计文档 §4.4)。
+	groupMode := collectPoll
+	if len(oldIDs) > 0 {
+		groupMode = old[oldIDs[0]].mode
+	}
+	groupRestart := false
+	if groupMode != collectPoll {
+		for _, id := range oldIDs {
+			if dd, ok := desired[id]; !ok {
+				groupRestart = true
+				break
+			} else if old[id].sig != dd.sig {
+				groupRestart = true
+				break
+			}
+		}
+	}
+
+	if groupRestart {
+		// 整组重开:停全部旧,再开全部新。
+		for _, id := range oldIDs {
+			s.stopDevice(old[id])
+		}
+		s.openAndRegisterBatch(newIDs, desired, newRt)
+		return
+	}
+
+	// 逐设备:keep / poll 原地更新 / 参数变化重开 / 新增 / 删除。
+	for _, id := range newIDs {
+		rt, ok := old[id]
+		if !ok {
+			s.openAndRegisterBatch([]string{id}, desired, newRt)
+			continue
+		}
+		dd := desired[id]
+		if rt.sig == dd.sig {
+			newRt[id] = rt // 未变,零操作
+			continue
+		}
+		if s.updatePollDevice(rt, dd) {
+			rt.sig = dd.sig
+			newRt[id] = rt // 原地更新成功
+			continue
+		}
+		// 轮询设备参数变化:先开新(驱动池复用物理连接)→ 注册 → 关旧,避免设备级空窗。
+		s.openAndRegisterBatch([]string{id}, desired, newRt)
+		s.stopDevice(rt)
+	}
+	// 删除的设备(旧有、新无)。
+	for _, id := range oldIDs {
+		if !newSet[id] {
+			s.stopDevice(old[id])
+		}
+	}
+}
+
+// updatePollDevice 原地更新轮询设备的点位/间隔;参数变化返回 false(需重开连接)。
+func (s *Scheduler) updatePollDevice(rt *deviceRuntime, dd desiredDevice) bool {
+	if string(rt.params) != string(dd.device.Params) {
+		return false // 设备参数变化(如从机地址)须重开设备级 conn
+	}
+	if rt.intervalMs != dd.device.IntervalMs {
+		// 间隔变化:替换 cron 条目(新 job 携带新点位)。
+		s.cron.Remove(rt.cronID)
+		job := &deviceJob{taskCh: s.taskCh, conn: rt.conn, deviceID: rt.deviceID, ctx: s.collectCtx}
+		job.setPoints(dd.device.Points)
+		id, err := s.cron.AddJob(intervalSpec(dd.device.IntervalMs), job)
+		if err != nil {
+			slog.Error("add cron job failed", "device", dd.device.ID, "err", err)
+			s.markOffline(dd.device.ID, err.Error())
+			return false
+		}
+		rt.job = job
+		rt.cronID = id
+		rt.intervalMs = dd.device.IntervalMs
+		return true
+	}
+	// 仅点位变化:原地更新 job 点位,不重连不重排。
+	rt.job.setPoints(dd.device.Points)
+	return true
+}
+
+// openAndRegisterBatch 并行打开一批设备并注册采集方式;单设备也走此路径(串行退化为一次)。
+func (s *Scheduler) openAndRegisterBatch(ids []string, desired map[string]desiredDevice, newRt map[string]*deviceRuntime) {
+	if len(ids) == 0 {
+		return
+	}
+	type res struct {
+		id string
+		rt *deviceRuntime
+	}
+	results := make([]res, len(ids))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, s.poolSize)
+	for i, id := range ids {
+		dd := desired[id]
+		wg.Add(1)
+		go func(i int, id string, dd desiredDevice) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			conn, ok := s.openDevice(s.collectCtx, dd.device, dd.conn)
+			if !ok {
+				return
+			}
+			results[i] = res{id: id, rt: &deviceRuntime{
+				deviceID:   id,
+				conn:       conn,
+				connKey:    dd.connKey,
+				params:     dd.device.Params,
+				intervalMs: dd.device.IntervalMs,
+				sig:        dd.sig,
+			}}
+		}(i, id, dd)
+	}
+	wg.Wait()
+
+	for _, r := range results {
+		if r.rt == nil {
+			continue
+		}
+		if s.registerDevice(r.rt, desired[r.id]) {
+			newRt[r.id] = r.rt
+		} else {
+			r.rt.conn.Close() // 注册失败:释放连接,该设备跳过
+		}
+	}
+}
+
+// registerDevice 按驱动能力注册采集方式(订阅/监听/轮询),返回是否成功。
+func (s *Scheduler) registerDevice(rt *deviceRuntime, dd desiredDevice) bool {
+	device := dd.device
+	if sub, ok := rt.conn.(driver.Subscriber); ok {
+		rt.mode = collectSubscribe
+		if err := sub.Subscribe(s.collectCtx, device.Points, func(dp model.DataPoint) {
+			s.pushData(s.collectCtx, device.ID, dp)
+		}); err != nil {
+			slog.Error("subscribe failed", "device", device.ID, "err", err)
+			s.markOffline(device.ID, err.Error())
+			return false
+		}
+		s.markOnline(device.ID, time.Now())
+		return true
+	}
+	if lis, ok := rt.conn.(driver.Listener); ok {
+		rt.mode = collectListen
+		if err := lis.Listen(s.collectCtx, device.Points, func(dp model.DataPoint) {
+			s.pushData(s.collectCtx, device.ID, dp)
+		}); err != nil {
+			slog.Error("listen failed", "device", device.ID, "err", err)
+			s.markOffline(device.ID, err.Error())
+			return false
+		}
+		s.markOnline(device.ID, time.Now())
+		return true
+	}
+	// 轮询:注册 cron job。
+	rt.mode = collectPoll
+	job := &deviceJob{taskCh: s.taskCh, conn: rt.conn, deviceID: device.ID, ctx: s.collectCtx}
+	job.setPoints(device.Points)
+	id, err := s.cron.AddJob(intervalSpec(device.IntervalMs), job)
+	if err != nil {
+		slog.Error("add cron job failed", "device", device.ID, "err", err)
+		s.markOffline(device.ID, err.Error())
+		return false
+	}
+	rt.job = job
+	rt.cronID = id
+	rt.intervalMs = device.IntervalMs
+	return true
+}
+
+// stopDevice 停止单个设备:轮询移除 cron 条目,关闭设备连接(驱动池引用计数释放)。
+func (s *Scheduler) stopDevice(rt *deviceRuntime) {
+	if rt.mode == collectPoll && rt.job != nil {
+		s.cron.Remove(rt.cronID)
+	}
+	if rt.conn != nil {
+		if err := rt.conn.Close(); err != nil {
+			slog.Error("close device connection failed", "err", err)
+		}
+	}
+}
+
+// stopCollectors 进程关闭时的整体清理:取消采集、停 cron、关 taskCh、等 workers、
+// 关闭全部设备连接。补传队列等持久化数据不动(跨重启续传)。
+func (s *Scheduler) stopCollectors() {
+	s.mu.Lock()
+	collectCancel := s.collectCancel
+	c := s.cron
+	taskCh := s.taskCh
+	workersDone := s.workersDone
+	runtimes := s.runtimes
+	s.collectCancel = nil
+	s.cron = nil
+	s.taskCh = nil
+	s.workersDone = nil
+	s.runtimes = nil
+	s.mu.Unlock()
+
+	if collectCancel == nil {
+		return
+	}
+	collectCancel()
 	if c != nil {
 		<-c.Stop().Done()
 	}
@@ -189,20 +468,16 @@ func (s *Scheduler) stopCollectors() {
 	if workersDone != nil {
 		<-workersDone
 	}
-	for _, conn := range conns {
-		if err := conn.Close(); err != nil {
-			slog.Error("close device connection failed", "err", err)
+	for _, rt := range runtimes {
+		if rt.conn != nil {
+			if err := rt.conn.Close(); err != nil {
+				slog.Error("close device connection failed", "err", err)
+			}
 		}
 	}
 }
 
-func (s *Scheduler) openDevice(ctx context.Context, device model.Device) (driver.Conn, bool) {
-	connection, err := s.store.GetConnection(device.ConnectionID)
-	if err != nil {
-		slog.Error("get connection failed", "device", device.ID, "connection", device.ConnectionID, "err", err)
-		s.markOffline(device.ID, "get connection failed: "+err.Error())
-		return nil, false
-	}
+func (s *Scheduler) openDevice(ctx context.Context, device model.Device, connection model.Connection) (driver.Conn, bool) {
 	drv, err := driver.Get(connection.Driver)
 	if err != nil {
 		slog.Error("driver not registered", "device", device.ID, "driver", connection.Driver, "err", err)
@@ -220,9 +495,6 @@ func (s *Scheduler) openDevice(ctx context.Context, device model.Device) (driver
 		s.markOffline(device.ID, "open failed: "+err.Error())
 		return nil, false
 	}
-	s.mu.Lock()
-	s.conns = append(s.conns, conn)
-	s.mu.Unlock()
 	return conn, true
 }
 
@@ -332,18 +604,32 @@ type collectTask struct {
 	deviceID string
 }
 
+// deviceJob 是轮询采集的 cron job;points 可原地更新(增量热加载点位变化不重连)。
 type deviceJob struct {
 	taskCh   chan collectTask
 	conn     driver.Conn
-	points   []model.Point
 	deviceID string
 	ctx      context.Context
+	mu       sync.Mutex
+	points   []model.Point
+}
+
+func (j *deviceJob) setPoints(points []model.Point) {
+	j.mu.Lock()
+	j.points = points
+	j.mu.Unlock()
+}
+
+func (j *deviceJob) getPoints() []model.Point {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.points
 }
 
 // Run 到达采集周期时触发:把采集任务非阻塞投递到 pool,满则跳过本次(防堆积)。
 func (j *deviceJob) Run() {
 	select {
-	case j.taskCh <- collectTask{ctx: j.ctx, conn: j.conn, points: j.points, deviceID: j.deviceID}:
+	case j.taskCh <- collectTask{ctx: j.ctx, conn: j.conn, points: j.getPoints(), deviceID: j.deviceID}:
 	default:
 		slog.Warn("pool busy, skip collect", "device", j.deviceID)
 	}
