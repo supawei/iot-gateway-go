@@ -3,10 +3,12 @@ package opcua
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"testing"
 	"time"
 
+	"github.com/gopcua/opcua"
 	"github.com/gopcua/opcua/ua"
 
 	"iot-gateway-go/internal/model"
@@ -214,6 +216,47 @@ func TestNotificationToDataPoint(t *testing.T) {
 	if dp.Quality != model.QualityUncertain {
 		t.Fatalf("type mismatch quality: %v", dp.Quality)
 	}
+}
+
+// TestHandleNotification 覆盖订阅通知分派:DataChange 按 ClientHandle 回调、
+// 状态变更/错误/未知通知不 panic、未登记 handle 被忽略。
+func TestHandleNotification(t *testing.T) {
+	got := make(chan model.DataPoint, 4)
+	s := &sharedSession{
+		connectionID: "c1",
+		targets: map[uint32]subTarget{
+			1: {deviceID: "d1", point: model.Point{Name: "p", DataType: model.DataTypeInt32}, onData: func(dp model.DataPoint) { got <- dp }},
+		},
+	}
+
+	// DataChange:命中 handle 1 -> 回调
+	v, _ := ua.NewVariant(int32(5))
+	s.handleNotification(&opcua.PublishNotificationData{Value: &ua.DataChangeNotification{
+		MonitoredItems: []*ua.MonitoredItemNotification{
+			{ClientHandle: 1, Value: &ua.DataValue{Value: v, Status: ua.StatusOK}},
+		},
+	}})
+	dp := <-got
+	if dp.DeviceID != "d1" || dp.Point != "p" || dp.Value != int64(5) || dp.Quality != model.QualityGood {
+		t.Fatalf("data change dp: %+v", dp)
+	}
+
+	// 未登记 handle 被忽略,不回调
+	s.handleNotification(&opcua.PublishNotificationData{Value: &ua.DataChangeNotification{
+		MonitoredItems: []*ua.MonitoredItemNotification{{ClientHandle: 999}},
+	}})
+	select {
+	case <-got:
+		t.Fatal("unregistered handle should not be dispatched")
+	default:
+	}
+
+	// 状态变更通知(透出日志):不 panic
+	s.handleNotification(&opcua.PublishNotificationData{Value: &ua.StatusChangeNotification{Status: ua.StatusBadTimeout}})
+	// 通知级错误:不 panic
+	s.handleNotification(&opcua.PublishNotificationData{Error: errors.New("boom")})
+	// 未知通知类型:不 panic
+	s.handleNotification(&opcua.PublishNotificationData{Value: "unknown"})
 }
 
 func TestConnectionPoolAcquireRelease(t *testing.T) {

@@ -26,8 +26,9 @@ type Driver interface {
 
 // Conn 绑定单个设备连接,批量读取点位并返回协议无关的 DataPoint。
 // 协议的差异性(地址格式、读写细节)封死在实现内部。
-// Read 约定:error 仅用于整批配置级错误(此时结果无效);单点通信失败/解码异常
-// 用对应 DataPoint.Quality 表达(bad/uncertain),不阻断同批其他点位,error 为 nil。
+// Read 约定:error 仅用于整批错误(此时结果无效)——配置级错误或整批传输/会话失败
+// (如连接断开、请求超时);单点通信失败/解码异常用对应 DataPoint.Quality 表达
+// (bad/uncertain),不阻断同批其他点位,error 为 nil。
 type Conn interface {
 	Read(ctx context.Context, points []model.Point) ([]model.DataPoint, error)
 	Close() error

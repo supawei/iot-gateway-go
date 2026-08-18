@@ -95,11 +95,11 @@ gopcua v0.9.1 的重连状态机在断线后:
 ### 3.2 语义/一致性问题(低危)
 
 1. **时间戳来源不一致**:订阅模式 `notificationToDataPoint` 取服务端 `SourceTimestamp`(缺失时退回 `ServerTimestamp`/本地时间),而轮询模式 `Read` 一律用本地 `time.Now()`。同一设备切换模式后时间戳语义会变,北向按时间戳做时序判断时需注意。
-2. **Read 通信失败吞错误**:`client.Read` 出错仅 `slog.Error`,整批返回 bad;scheduler 侧最终以 `"all points bad"` 标记离线,**丢失真实错误原因**(不如把通信错误升级为带原因的离线)。属设计取舍,可改进。
+2. **~~Read 通信失败吞错误~~(已修复)**:原 `client.Read` 出错仅 `slog.Error`、整批返回 bad,离线原因退化为 `"all points bad"`。现整批传输/会话失败直接返回带原因的 error(如 `opcua read: ...`),scheduler 以真实错误标记离线;服务端可达时的单点错误仍走逐点 Quality。同步更新 `driver.Conn` 契约注释(整批错误含传输/会话失败)。注:modbus 仍为 all-bad + nil error,可后续对齐。
 3. **`encodeValue` 经 `toFloat64` 转 `int64`**:超过 2^53 的 int64 写入会丢精度(OPC UA int64 常规场景罕见,低危)。
 4. **~~`decodeValue` 未知 dataType 分支~~(已修复)**:原 `default: return raw, true` 在未知类型 + nil 值时会产生 `Quality=good` + `Value=nil` 的异常组合。已改为未知类型一律 `ok=false`(uncertain),并加单测(`TestDecodeValue`)。
 5. **~~Monitor 结果长度不匹配静默~~(已修复)**:原 `if row < len(resp.Results)` 对缺失结果行静默跳过;已改为缺失行显式 `slog.Warn`。
-6. **订阅失效不可见**:分发 goroutine 忽略 `StatusChangeNotification`(订阅丢失/重建事件),断线恢复靠库内重建,但**重建失败时设备不会转为离线**,运维无感知。建议把订阅状态变化透出到日志/设备状态。
+6. **订阅失效(部分修复)**:已把 `StatusChangeNotification` 透出为 `slog.Warn`(订阅丢失/重建失败可见);"重建失败时设备转为离线"需驱动→scheduler 的订阅级状态通道,仍待做(低优先)。
 
 ### 3.3 健壮性/工程性(低危)
 
@@ -136,10 +136,11 @@ gopcua v0.9.1 的重连状态机在断线后:
 | 优先级 | 事项 |
 |---|---|
 | ~~P0~~(已完成) | ① `decodeValue` 未知类型 `ok=false` ✅;② Monitor 结果缺失补日志 ✅;③ README NodeID 裸字符串陷阱 ✅ |
-| P1(生产化前) | ① 安全模式 `Sign`/`SignAndEncrypt` + 证书配置;② 节点浏览/发现(Web UI 选择器);③ Read 通信失败保留真实错误原因 |
-| P2(按需) | 方法调用、历史数据、数组/扩展类型、订阅状态透出、订阅背压、stateCh 健壮性、Read 通信错误透出 |
+| ~~可观测性~~(已完成) | Read 整批失败透出真实错误原因 ✅;订阅 `StatusChangeNotification` 透出日志 ✅ |
+| P1(生产化前) | ① 安全模式 `Sign`/`SignAndEncrypt` + 证书配置;② 节点浏览/发现(Web UI 选择器) |
+| P2(按需) | 方法调用、历史数据、数组/扩展类型、订阅失效→设备离线联动、订阅背压、stateCh 健壮性、modbus 错误透出对齐 |
 
-> 集成测试(原 P2)已随本轮补齐:基于 gopcua 进程内 server 的 `TestReadE2E`/`TestProbeE2E`/`TestSubscribeE2E` 均已通过。
+> 集成测试(原 P2)已补齐:基于 gopcua 进程内 server 的 `TestReadE2E`/`TestProbeE2E`/`TestSubscribeE2E` 均已通过。
 
 ---
 
@@ -151,6 +152,7 @@ gopcua v0.9.1 的重连状态机在断线后:
 - `TestParseNodeIDAddress`
 - `TestDecodeValue` / `TestEncodeValue`
 - `TestBuildWriteValue`(写值回归:DataValue 编码必须携带值内容,防 `EncodingMask` 缺失复发)
+- `TestHandleNotification`(订阅通知分派:DataChange 回调/未登记 handle 忽略/状态变更与错误通知不 panic)
 - `TestBuildMonitoredItems`
 - `TestNotificationToDataPoint`
 - `TestConnectionPoolAcquireRelease`

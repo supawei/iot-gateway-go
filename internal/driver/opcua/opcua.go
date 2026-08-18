@@ -189,10 +189,11 @@ func (c *opcuaConn) Read(ctx context.Context, points []model.Point) ([]model.Dat
 	}
 	resp, err := c.shared.client.Read(ctx, &ua.ReadRequest{NodesToRead: nodes})
 	if err != nil {
-		// 通信失败:全部点已初始化为 bad,照常返回让北向感知设备异常;
-		// 不把通信错误升级为整批配置级 error(语义对齐 Read 约定)。
+		// 整批传输/会话失败:结果无效,返回带原因的 error 让上层以真实错误标记离线
+		// (区别于"单点失败用 Quality 表达、error 为 nil"的约定;服务端可达时单点
+		// 错误仍走 resp 内逐点 status,不落此分支)。
 		slog.Error("opcua read failed", "device", c.deviceID, "err", err)
-		return results, nil
+		return results, fmt.Errorf("opcua read: %w", err)
 	}
 	applyReadResults(results, indices, resp.Results, points)
 	return results, nil
@@ -513,24 +514,34 @@ func (s *sharedSession) dispatch(sub *opcua.Subscription, notifyCh <-chan *opcua
 			if !ok {
 				return
 			}
-			if notif.Error != nil {
-				slog.Error("opcua subscription notification error", "connection", s.connectionID, "err", notif.Error)
+			s.handleNotification(notif)
+		}
+	}
+}
+
+// handleNotification 处理一条订阅通知:数据变化分派到 target 回调,状态变更透出日志,
+// 其余通知忽略。独立成方法便于单测。
+func (s *sharedSession) handleNotification(notif *opcua.PublishNotificationData) {
+	if notif.Error != nil {
+		slog.Error("opcua subscription notification error", "connection", s.connectionID, "err", notif.Error)
+		return
+	}
+	switch n := notif.Value.(type) {
+	case *ua.DataChangeNotification:
+		for _, item := range n.MonitoredItems {
+			s.subMu.Lock()
+			target, ok := s.targets[item.ClientHandle]
+			s.subMu.Unlock()
+			if !ok {
 				continue
 			}
-			dc, ok := notif.Value.(*ua.DataChangeNotification)
-			if !ok {
-				continue // 状态变更/事件通知,本实现只关心数据变化
-			}
-			for _, item := range dc.MonitoredItems {
-				s.subMu.Lock()
-				target, ok := s.targets[item.ClientHandle]
-				s.subMu.Unlock()
-				if !ok {
-					continue
-				}
-				target.onData(notificationToDataPoint(target.deviceID, target.point, item.Value))
-			}
+			target.onData(notificationToDataPoint(target.deviceID, target.point, item.Value))
 		}
+	case *ua.StatusChangeNotification:
+		// 订阅状态变更(断线转移/重建失败、被服务端删除等)透出日志,供运维感知订阅失效。
+		slog.Warn("opcua subscription status changed", "connection", s.connectionID, "status", n.Status, "diag", n.DiagnosticInfo)
+	default:
+		// 事件/其他通知,本实现只关心数据变化
 	}
 }
 
