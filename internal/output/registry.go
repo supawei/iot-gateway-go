@@ -55,10 +55,13 @@ var ErrNotProbeable = errors.New("driver does not support probe")
 type WriteFunc func(ctx context.Context, deviceID, point string, value interface{}) error
 
 // StoreAccessor 是插件访问网关配置存储的接口。
-// 实现者为 *store.Store;只暴露插件所需的写入方法,避免插件直接依赖 store 包。
+// 实现者为 *store.Store;只暴露插件所需的访问方法,避免插件直接依赖 store 包。
+// smardaten-iot 的配置同步用 Get* 做"内容对比、跳过无谓写入"(见 sync.go)。
 type StoreAccessor interface {
 	SaveConnection(conn model.Connection) error
 	SaveDevice(device model.Device) error
+	GetConnection(id string) (model.Connection, error)
+	GetDevice(id string) (model.Device, error)
 }
 
 // Descriptor 描述一种输出插件类型及其配置 schema,供 Web UI 渲染表单。

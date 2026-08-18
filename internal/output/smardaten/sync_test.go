@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/store"
 )
 
 // sampleApplicationJSON 是平台真实下发的 application.json 片段（脱敏），
@@ -148,7 +149,10 @@ func TestConvertConnectionType23(t *testing.T) {
 
 // TestRegisterOf 验证寄存器号提取兼容两种地址格式。
 func TestRegisterOf(t *testing.T) {
-	cases := []struct{ in string; want int }{
+	cases := []struct {
+		in   string
+		want int
+	}{
 		{"holding:2", 2},
 		{"coil:15", 15},
 		{"2", 2},
@@ -320,4 +324,144 @@ func TestConvertDeviceByteOrderMissing(t *testing.T) {
 
 func itoa(n int) string {
 	return strconv.Itoa(n)
+}
+
+// ---- 同步增量跳过(内容对比,无变化不写) ----
+
+// sampleSyncConfig 构造一个典型的 modbus-tcp 控制器 + 设备同步配置。
+func sampleSyncConfig() *ApplicationConfig {
+	return &ApplicationConfig{
+		Controllers: []PlatformController{{
+			ControllerID: "ctrl-1",
+			Type:         "2", // modbus-tcp
+			Specs: PlatformControllerSpecs{
+				Enable: 1,
+				Name:   "ctrl-1",
+				Period: 2,
+				Configuration: json.RawMessage(
+					`{"ip":"192.168.1.10","port":502,"slaveId":1,"functionCode":3}`),
+			},
+			SensorList: []PlatformSensor{
+				{PointID: "p1", ItemName: "0", DataType: 2}, // INT32
+				{PointID: "p2", ItemName: "1", DataType: 4}, // FLOAT
+			},
+		}},
+		Devices: []PlatformDevice{{
+			DeviceID:     "dev-1",
+			ControllerID: "ctrl-1",
+			Properties: []PlatformProperty{
+				{Identifier: "temp", PointID: "p1"},
+				{Identifier: "volt", PointID: "p2"},
+			},
+		}},
+	}
+}
+
+// TestSyncToGatewayIdempotent 相同配置二次同步应跳过写入(内容一致,不产生热加载通知)。
+func TestSyncToGatewayIdempotent(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	o := &platformOutput{store: st}
+
+	cfg := sampleSyncConfig()
+	o.syncToGateway(cfg)
+
+	conn, err := st.GetConnection("ctrl-1")
+	if err != nil || conn.ID != "ctrl-1" {
+		t.Fatalf("connection not synced: %v", err)
+	}
+	dev, err := st.GetDevice("dev-1")
+	if err != nil || len(dev.Points) != 2 {
+		t.Fatalf("device not synced: %v, points=%d", err, len(dev.Points))
+	}
+
+	// 已落库内容视为"目标":内容一致 → 不需要保存。
+	if o.connectionNeedsSave(conn) {
+		t.Fatal("identical connection should not need save")
+	}
+	if o.deviceNeedsSave(dev) {
+		t.Fatal("identical device should not need save")
+	}
+
+	// 再次同步:内容应保持不变(幂等)。
+	o.syncToGateway(cfg)
+	dev2, err := st.GetDevice("dev-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deviceEqual(dev2, dev) {
+		t.Fatal("idempotent sync changed device content")
+	}
+}
+
+// TestSyncNeedsSaveOnChange 内容变化时 needsSave 返回 true。
+func TestSyncNeedsSaveOnChange(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	o := &platformOutput{store: st}
+
+	cfg := sampleSyncConfig()
+	o.syncToGateway(cfg)
+	dev, _ := st.GetDevice("dev-1")
+
+	if !o.deviceNeedsSave(model.Device{ID: "nonexistent"}) {
+		t.Fatal("absent device should need save")
+	}
+
+	// 点位变化 → true
+	changed := dev
+	changed.Points = append([]model.Point(nil), dev.Points...)
+	changed.Points[0] = model.Point{Name: "p1", Address: "holding:100", DataType: model.DataTypeInt32}
+	if !o.deviceNeedsSave(changed) {
+		t.Fatal("point change should need save")
+	}
+
+	// 参数变化 → true
+	changed = dev
+	changed.Params = []byte(`{"slaveId":9}`)
+	if !o.deviceNeedsSave(changed) {
+		t.Fatal("param change should need save")
+	}
+
+	// 间隔变化 → true
+	changed = dev
+	changed.IntervalMs = 9999
+	if !o.deviceNeedsSave(changed) {
+		t.Fatal("interval change should need save")
+	}
+
+	// 连接配置变化 → true
+	conn, _ := st.GetConnection("ctrl-1")
+	if !o.connectionNeedsSave(model.Connection{ID: "ctrl-1"}) {
+		t.Fatal("absent connection should need save")
+	}
+	connChanged := conn
+	connChanged.Config = []byte(`{"ip":"10.0.0.1"}`)
+	if !o.connectionNeedsSave(connChanged) {
+		t.Fatal("connection config change should need save")
+	}
+}
+
+// TestJsonEqual JSON 语义比较忽略键序/格式差异。
+func TestJsonEqual(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{`{"a":1,"b":2}`, `{"b":2,"a":1}`, true}, // 键序不同
+		{`{"a": 1}`, `{"a":1}`, true},            // 空格不同
+		{`{"a":1}`, `{"a":2}`, false},            // 值不同
+		{`{"a":[1,2]}`, `{"a":[2,1]}`, false},    // 数组顺序敏感
+		{`{"a":"x"}`, `{"a":"x"}`, true},
+		{`not-json`, `not-json`, true}, // 非法 JSON 回退字节比较
+		{`not-json`, `other`, false},
+	}
+	for i, c := range cases {
+		if got := jsonEqual(json.RawMessage(c.a), json.RawMessage(c.b)); got != c.want {
+			t.Fatalf("case %d: jsonEqual(%s, %s) = %v, want %v", i, c.a, c.b, got, c.want)
+		}
+	}
 }

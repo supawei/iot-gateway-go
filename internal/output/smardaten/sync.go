@@ -1,10 +1,12 @@
 package smardaten
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -141,7 +143,9 @@ func dataTypeWidth(dt int) int {
 // ---------- 配置转换 ----------
 
 // syncToGateway 将 application.json 中的控制器和设备同步到网关 SQLite。
-// 以 controllerId/deviceId 为 key 做 upsert，不覆盖网关本地独有的配置。
+// 以 controllerId/deviceId 为 key 做 upsert,不覆盖网关本地独有的配置。
+// 同步前先与当前存储内容对比:**内容未变则跳过写入**(避免无谓的 SQLite 写与
+// 调度器热加载通知);只增改、不删除(平台移除的实体不自动删,防误删本地配置)。
 func (o *platformOutput) syncToGateway(cfg *ApplicationConfig) {
 	if o.store == nil {
 		return
@@ -158,12 +162,16 @@ func (o *platformOutput) syncToGateway(cfg *ApplicationConfig) {
 			slog.Warn("skip controller, convert failed", "controllerId", ctrl.ControllerID, "err", err)
 			continue
 		}
-		if err := o.store.SaveConnection(conn); err != nil {
-			slog.Error("save connection failed", "controllerId", ctrl.ControllerID, "err", err)
-			continue
+		if o.connectionNeedsSave(conn) {
+			if err := o.store.SaveConnection(conn); err != nil {
+				slog.Error("save connection failed", "controllerId", ctrl.ControllerID, "err", err)
+				continue
+			}
+			slog.Info("synced controller", "id", conn.ID, "name", conn.Name, "driver", conn.Driver)
+		} else {
+			slog.Debug("controller unchanged, skip", "id", conn.ID)
 		}
 		syncedControllers[ctrl.ControllerID] = true
-		slog.Info("synced controller", "id", conn.ID, "name", conn.Name, "driver", conn.Driver)
 	}
 
 	// 再同步设备 → Device
@@ -183,12 +191,77 @@ func (o *platformOutput) syncToGateway(cfg *ApplicationConfig) {
 			slog.Warn("skip device, convert failed", "deviceId", dev.DeviceID, "err", err)
 			continue
 		}
-		if err := o.store.SaveDevice(device); err != nil {
-			slog.Error("save device failed", "deviceId", dev.DeviceID, "err", err)
-			continue
+		if o.deviceNeedsSave(device) {
+			if err := o.store.SaveDevice(device); err != nil {
+				slog.Error("save device failed", "deviceId", dev.DeviceID, "err", err)
+				continue
+			}
+			slog.Info("synced device", "id", device.ID, "name", device.Name, "points", len(device.Points))
+		} else {
+			slog.Debug("device unchanged, skip", "id", device.ID)
 		}
-		slog.Info("synced device", "id", device.ID, "name", device.Name, "points", len(device.Points))
 	}
+}
+
+// connectionNeedsSave 目标连接当前不存在或内容不同才写入。
+func (o *platformOutput) connectionNeedsSave(target model.Connection) bool {
+	cur, err := o.store.GetConnection(target.ID)
+	if err != nil {
+		return true // 不存在或读取失败:保守写入
+	}
+	return !connectionEqual(cur, target)
+}
+
+// deviceNeedsSave 目标设备当前不存在或内容不同才写入。
+func (o *platformOutput) deviceNeedsSave(target model.Device) bool {
+	cur, err := o.store.GetDevice(target.ID)
+	if err != nil {
+		return true // 不存在或读取失败:保守写入
+	}
+	return !deviceEqual(cur, target)
+}
+
+// connectionEqual 判断存储中的连接与目标内容是否一致。
+func connectionEqual(cur, target model.Connection) bool {
+	return cur.Name == target.Name &&
+		cur.Driver == target.Driver &&
+		jsonEqual(cur.Config, target.Config)
+}
+
+// deviceEqual 判断存储中的设备与目标内容是否一致(含点位列表)。
+func deviceEqual(cur, target model.Device) bool {
+	return cur.Name == target.Name &&
+		cur.ConnectionID == target.ConnectionID &&
+		cur.IntervalMs == target.IntervalMs &&
+		cur.Enabled == target.Enabled &&
+		jsonEqual(cur.Params, target.Params) &&
+		pointsEqual(cur.Points, target.Points)
+}
+
+// pointsEqual 按序比较点位列表(Name/Address/DataType/Scale)。
+func pointsEqual(a, b []model.Point) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].Address != b[i].Address ||
+			a[i].DataType != b[i].DataType || a[i].Scale != b[i].Scale {
+			return false
+		}
+	}
+	return true
+}
+
+// jsonEqual 语义比较两份 JSON(忽略键序/格式差异);任一侧非法时回退字节比较。
+func jsonEqual(a, b json.RawMessage) bool {
+	var av, bv interface{}
+	if err := json.Unmarshal(a, &av); err != nil {
+		return bytes.Equal(a, b)
+	}
+	if err := json.Unmarshal(b, &bv); err != nil {
+		return bytes.Equal(a, b)
+	}
+	return reflect.DeepEqual(av, bv)
 }
 
 // findController 在控制器列表中按 ID 查找。
@@ -366,10 +439,10 @@ func convertDevice(dev PlatformDevice, ctrl PlatformController) (model.Device, e
 			continue
 		}
 		point := model.Point{
-			Name:    sensor.PointID,
-			Address: sensor.ItemName,
+			Name:     sensor.PointID,
+			Address:  sensor.ItemName,
 			DataType: dataTypeToModel(sensor.DataType),
-			Scale:   scaleOf(sensor),
+			Scale:    scaleOf(sensor),
 		}
 		// modbus 类型：地址补功能码前缀（"2" → "holding:2"），
 		// 网关 modbus 驱动的 parseAddress 严格要求 "function:register" 格式。
@@ -397,10 +470,10 @@ func convertDevice(dev PlatformDevice, ctrl PlatformController) (model.Device, e
 		ID:           dev.DeviceID,
 		Name:         dev.DeviceID, // 用 deviceId 作为名称
 		ConnectionID: ctrl.ControllerID,
-		Params:      paramsJSON,
-		Points:      points,
-		IntervalMs:  intervalMs,
-		Enabled:     true,
+		Params:       paramsJSON,
+		Points:       points,
+		IntervalMs:   intervalMs,
+		Enabled:      true,
 	}, nil
 }
 
