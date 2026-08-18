@@ -1189,3 +1189,101 @@ func TestOutputWriteTriggersReload(t *testing.T) {
 		t.Fatalf("want 3 reloads got %d", got)
 	}
 }
+
+// errorCode 解析错误响应体,断言统一 {"error","code"} 结构并返回 code。
+func errorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal error body %q: %v", rec.Body.String(), err)
+	}
+	if body.Error == "" {
+		t.Fatalf("error body missing error message: %s", rec.Body.String())
+	}
+	if body.Code == "" {
+		t.Fatalf("error body missing machine-readable code: %s", rec.Body.String())
+	}
+	return body.Code
+}
+
+// TestErrorBodyUniformCode 验证所有错误响应统一携带机器可读 code:
+// 默认按 HTTP 状态码映射(writeError),显式覆盖(writeErrorCode)如 unauthenticated /
+// password_change_required / forbidden 生效。
+func TestErrorBodyUniformCode(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
+	// 400:请求体非法 JSON → 默认 bad_request
+	rec := doRequest(t, handler, "POST", "/api/v1/connections", "{not-json")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad json: got %d", rec.Code)
+	}
+	if got := errorCode(t, rec); got != "bad_request" {
+		t.Fatalf("400 code: got %q want bad_request", got)
+	}
+
+	// 404:资源不存在 → 默认 not_found
+	rec = doRequest(t, handler, "GET", "/api/v1/devices/nope", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("not found: got %d", rec.Code)
+	}
+	if got := errorCode(t, rec); got != "not_found" {
+		t.Fatalf("404 code: got %q want not_found", got)
+	}
+
+	// 409:删除被设备引用的连接 → 默认 conflict
+	seedConnection(t, handler)
+	doRequest(t, handler, "POST", "/api/v1/devices", sampleDevice())
+	rec = doRequest(t, handler, "DELETE", "/api/v1/connections/conn-1", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("conflict: got %d", rec.Code)
+	}
+	if got := errorCode(t, rec); got != "conflict" {
+		t.Fatalf("409 code: got %q want conflict", got)
+	}
+
+	// 鉴权路径:显式覆盖的 code 生效
+	authAPI, authz := newAuthAPI(t)
+	authHandler := authAPI.Routes()
+
+	// 401:未带 token → 显式 unauthenticated
+	rec = doRequest(t, authHandler, "GET", "/api/v1/status", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: got %d", rec.Code)
+	}
+	if got := errorCode(t, rec); got != "unauthenticated" {
+		t.Fatalf("401 code: got %q want unauthenticated", got)
+	}
+
+	// 403:首次登录未改密 → 显式 password_change_required
+	token, mustChange := loginAs(t, authHandler, auth.DefaultAdminUser, auth.DefaultAdminPassword)
+	if token == "" || !mustChange {
+		t.Fatalf("login: token=%q mustChange=%v", token, mustChange)
+	}
+	rec = doRequestAuth(t, authHandler, "GET", "/api/v1/status", token, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("must change password: got %d", rec.Code)
+	}
+	if got := errorCode(t, rec); got != "password_change_required" {
+		t.Fatalf("403 code: got %q want password_change_required", got)
+	}
+
+	// 403:scope 不足(只读 client 调写接口)→ 显式 forbidden
+	c, key, err := authz.CreateClient("mes-ro", "只读", []string{"devices:read"})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	if c.ID == "" || key == "" {
+		t.Fatal("create client result empty")
+	}
+	rec = doRequestAuth(t, authHandler, "POST", "/api/v1/devices", key, sampleDevice())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("scope denied: got %d", rec.Code)
+	}
+	if got := errorCode(t, rec); got != "forbidden" {
+		t.Fatalf("403 code: got %q want forbidden", got)
+	}
+}

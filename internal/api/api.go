@@ -977,11 +977,38 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	json.NewEncoder(w).Encode(data)
 }
 
-func writeError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]string{"error": err.Error()})
+// statusCode 返回各 HTTP 状态码对应的默认机器可读错误码;
+// 业务有更精确语义时用 writeErrorCode 覆盖(如 password_change_required / forbidden)。
+func statusCode(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "bad_request"
+	case http.StatusUnauthorized:
+		return "unauthenticated"
+	case http.StatusForbidden:
+		return "forbidden"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusConflict:
+		return "conflict"
+	case http.StatusNotImplemented:
+		return "not_implemented"
+	case http.StatusBadGateway:
+		return "bad_gateway"
+	case http.StatusServiceUnavailable:
+		return "service_unavailable"
+	default:
+		return "internal_error"
+	}
 }
 
-// writeErrorCode 返回带机器可读 code 的错误(供前端按 code 分支,如跳转改密页)。
+// writeError 返回统一错误体 {"error": msg, "code": ...}:code 默认由 HTTP 状态码映射,
+// 保证所有错误响应都带机器可读 code,前端/三方可按 code 稳定分支。
+func writeError(w http.ResponseWriter, status int, err error) {
+	writeErrorCode(w, status, statusCode(status), err.Error())
+}
+
+// writeErrorCode 返回带显式机器可读 code 的错误(覆盖默认映射,如跳转改密页)。
 func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg, "code": code})
 }

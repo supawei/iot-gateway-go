@@ -549,18 +549,35 @@ curl -X POST http://localhost:8080/api/v1/outputs \
 
 ## 错误响应
 
-所有错误返回统一格式:
+所有错误返回统一格式,含人类可读 `error` 与机器可读 `code`(供前端/三方按错误类型分支,如跳转改密页):
 
 ```json
-{ "error": "错误描述" }
+{ "error": "错误描述", "code": "bad_request" }
 ```
+
+`code` 默认按 HTTP 状态码映射,业务有更精确语义时覆盖(如改密门禁返回 `code: "password_change_required"`):
+
+| HTTP 状态码 | 默认 `code` |
+|---|---|
+| `400` | `bad_request` |
+| `401` | `unauthenticated` |
+| `403` | `forbidden` |
+| `404` | `not_found` |
+| `409` | `conflict` |
+| `501` | `not_implemented` |
+| `502` | `bad_gateway` |
+| `503` | `service_unavailable` |
+| 其他 | `internal_error` |
 
 | 状态码 | 触发场景 |
 |---|---|
-| `400 Bad Request` | 请求体 JSON 解析失败;创建时未提供 `id` |
+| `400 Bad Request` | 请求体 JSON 解析失败;创建时未提供 `id`;非法密码密文 |
+| `401 Unauthorized` | 未认证或凭证无效 |
+| `403 Forbidden` | 无 scope 权限;首次登录须先改密(`password_change_required`) |
 | `404 Not Found` | 获取/更新/删除不存在的连接/设备/点位 |
-| `409 Conflict` | 删除仍被设备引用的连接 |
+| `409 Conflict` | 删除仍被设备引用的连接;端点已被其他连接占用 |
 | `500 Internal Server Error` | SQLite 读写失败 |
+| `502 Bad Gateway` | 输出热重载失败(配置已持久化,旧输出保持运行) |
 
 ---
 
