@@ -27,12 +27,12 @@ Go 实现的开源工业物联网边缘网关。插件化架构,南向接入工�
 ## 快速开始
 
 ```bash
-cp config.example.yaml config.yaml   # 编辑 MQTT broker 等
+cp config.example.yaml config.yaml   # 引导配置(监听地址/日志等);设备与输出经 Web UI 配置
 go build -o gateway ./cmd/gateway    # 或 make build(自动注入版本号)
 ./gateway
 ```
 
-启动后可通过 Web 管理界面操作设备/连接(默认 `http://localhost:8080` 提供 API,前端见 [web/](web/))。
+启动后访问 **Web 管理界面**(默认 `http://localhost:8080/`,前端已内嵌进二进制)操作设备/连接/输出,无需额外部署;也可直接调用 [REST API](docs/api.md)。默认管理员 `admin/admin123`,首次登录强制改密。
 
 ## 命令行参数与版本
 
@@ -48,50 +48,35 @@ go build -o gateway ./cmd/gateway    # 或 make build(自动注入版本号)
 
 ## 网关配置
 
-`config.yaml` 配置网关自身参数(设备/点位配置走 REST API + SQLite):
-
-> **注意**:`config.yaml` 只在启动时读取一次,修改后需重启进程;设备/点位/连接配置走 REST API + SQLite,**写入即自动热加载,无需重启**。两种配置的热加载行为不同。
+`config.yaml` 仅含**引导配置**(监听地址、鉴权、存储、日志),启动时读取一次,修改后需重启进程;
+**连接/设备/点位与北向输出**等运行时配置存 SQLite,经 **Web 管理界面**管理(亦可调 REST API),
+**写入即自动热加载,无需重启**——两种配置的热加载行为不同。
 
 | 字段 | 说明 | 默认 |
 |---|---|---|
-| `gateway.id` | 网关 ID,用于 MQTT topic | `iot-gateway` |
-| `http.addr` | REST API 监听地址 | `:8080` |
-| `mqtt.*` | MQTT broker 连接 | - |
-| `thingsboard.*` | ThingsBoard 平台对接(可选,见 [docs/thingsboard.md](docs/thingsboard.md)) | - |
-| `tdengine.*` | TDengine 时序库对接(可选,见 [docs/tdengine.md](docs/tdengine.md)) | - |
+| `http.addr` | HTTP 服务(Web UI + API)监听地址 | `:8080` |
+| `auth.enabled` | API 鉴权开关;`false` 显式关闭(逃生舱) | `true` |
+| `auth.sessionTtl` | 管理员会话有效期 | `24h` |
 | `storage.sqlitePath` | SQLite 路径 | `./gateway.db` |
+| `storage.backfillMax` | 断网补传队列上限(每条输出),超过淘汰最旧数据 | - |
 | `scheduler.poolSize` | 采集 worker 池大小(最大并发采集数) | `16` |
 | `log.level` | 日志级别(debug/info/warn/error) | `info` |
 | `log.format` | 日志格式(text/json) | `text` |
 | `log.file.*` | 文件轮转(path/maxSize/maxBackups/maxAge/compress),path 留空只输出 stdout | - |
 
+> 网关 ID、北向输出(MQTT / ThingsBoard / TDengine / smardaten / Sparkplug B)等已迁入 SQLite,经 Web UI 配置,不在 yaml 中。
+
 ## 配置设备
 
-通过 REST API 配置一个 Modbus TCP 设备:
+在 Web 管理界面按「连接 → 设备」两步配置一个 Modbus TCP 设备:
 
-```bash
-# 1. 先建连接(传输参数,可被多个从机设备共享)
-curl -X POST http://localhost:8080/api/v1/connections -H 'Content-Type: application/json' -d '{
-  "id": "conn-1",
-  "name": "车间 Modbus TCP",
-  "driver": "modbus",
-  "config": {"mode":"tcp","address":"192.168.1.5:502"}
-}'
-
-# 2. 再建设备,引用连接并配从机地址
-curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/json' -d '{
-  "id": "sensor-01",
-  "name": "温湿度传感器",
-  "connectionId": "conn-1",
-  "params": {"slaveId":1},
-  "intervalMs": 1000,
-  "enabled": true,
-  "points": [
-    {"name":"temperature","address":"holding:0","dataType":"int16","scale":0.1},
-    {"name":"humidity","address":"holding:1","dataType":"int16","scale":0.1}
-  ]
-}'
-```
+1. **连接**(传输参数,可被多个从机设备共享):「连接」页新建,驱动选 `modbus`(或 `opcua` / `modbus_listen`),
+   表单按驱动 schema 自动渲染(如模式 `tcp`、地址 `192.168.1.5:502`)。
+2. **设备**:「设备」页新建,引用上述连接,填设备参数(如从机地址 `slaveId`)与**点位**列表,
+   每个点位含 `name` / `address` / `dataType` / `scale`。地址格式随驱动而异:
+   - Modbus:`holding:0` / `input:1` / `coil:2` / `discrete:3`(`function:register`);
+   - OPC UA:`ns=2;s=Temperature`(可点「浏览」从节点树选);
+   - modbus_listen:寄存器偏移 `0`。
 
 数据即按周期采集并发布到 MQTT topic `gateway/{gatewayId}/device/sensor-01/data`。
 
@@ -99,6 +84,8 @@ MQTT 输出默认**即时单条发布**(payload 为单个 `DataPoint` 对象);�
 (如 `200ms`)可启用**批量模式**:同一设备在一个窗口内到达的点聚合为一条消息,
 payload 为 `DataPoint` 数组,`batchMax` 控制单条最大点数(超出拆分)。详见
 [docs/mqtt-batch-publish-design.md](docs/mqtt-batch-publish-design.md)。
+
+> 通过 REST API 以同样模型配置的完整示例见 [docs/api.md](docs/api.md)(含端到端 curl 流程)。
 
 ## 边缘计算(过滤 / 聚合)
 
@@ -123,8 +110,7 @@ payload 为 `DataPoint` 数组,`batchMax` 控制单条最大点数(超出拆分)
 | `emitName` | 派生点名,默认 `<point>.<type>`(如 `temperature.avg`) |
 
 派生点与原始点走同一输出链路(MQTT 批量 / 断网补传 / 各云输出均兼容);原始采集值仍记录在
-设备实时值中。过滤/聚合仅影响**北向输出流**。运行统计经 `GET /api/v1/processing/status` 与
-概览页查看。
+设备实时值中。过滤/聚合仅影响**北向输出流**。运行统计可在 Web UI 概览页查看。
 
 ## Modbus 驱动
 
@@ -173,7 +159,7 @@ payload 为 `DataPoint` 数组,`batchMax` 控制单条最大点数(超出拆分)
 
 > NodeID 裸字符串一律按 **string node** 解析:`1234`(不带 `i=`)是 ns=0 的 string 节点,数值节点须写 `i=1234`。
 
-**节点浏览选择**:设备点位编辑时对 OPC UA 连接点击「浏览」按钮,从服务器节点树懒加载选点,自动回填 NodeID(基于 `driver.Browser` 能力 + `POST /api/v1/connections/{id}/browse`)。
+**节点浏览选择**:设备点位编辑时对 OPC UA 连接点击「浏览」按钮,从服务器节点树懒加载选点,自动回填 NodeID(基于 `driver.Browser` 能力)。
 
 **数据类型**:`bool` `int16` `uint16` `int32` `uint32` `int64` `float32` `float64` `string`。`scale` 非零时数值类型按系数缩放为 float64。
 
@@ -221,35 +207,13 @@ payload 为 `DataPoint` 数组,`batchMax` 控制单条最大点数(超出拆分)
 
 采用 ThingsBoard **MQTT Gateway** 模式:网关作为一个"网关设备",单连接上报 N 个子设备的数据。每个设备映射为一个子设备(设备名 = `Device.ID` + 可选前缀),点位值为遥测、`Quality` 为客户端属性 `quality`。详见 [docs/thingsboard.md](docs/thingsboard.md)。
 
-```yaml
-# config.yaml
-thingsboard:
-  broker: "tcp://tb.example.com:1883"
-  accessToken: "gateway-access-token"
-  clientId: "iot-gateway-tb"
-  qos: 1
-  deviceNamePrefix: ""   # 可选
-  reportQuality: true    # 可选,默认 true
-```
-
-配置 `broker + accessToken` 后即启用(可与 mqtt 输出并存)。
+经 Web UI「北向输出」配置,类型选 **ThingsBoard**,填 `broker + accessToken` 即启用(可与 mqtt 等输出并存)。
 
 ## TDengine 输出
 
 通过 taosAdapter REST API 写入 TDengine 时序库:所有点位写入一张超级表,值按类型落到强类型列(DOUBLE/BIGINT/BOOL/NCHAR),设备与点位作为 TAGS,子表按 (设备, 点位) 自动建表。详见 [docs/tdengine.md](docs/tdengine.md)。
 
-```yaml
-# config.yaml
-tdengine:
-  url: "http://127.0.0.1:6041"  # taosAdapter REST 地址
-  username: "root"               # 默认 root
-  password: "taosdata"           # 默认 taosdata
-  database: "iot_gateway"        # 默认 iot_gateway
-  stable: "data_points"          # 默认 data_points
-  flushInterval: "1s"            # 默认 1s
-```
-
-配置 `url` 后即启用(可与 mqtt / thingsboard 输出并存)。
+经 Web UI「北向输出」配置,类型选 **TDengine**,填 `url`(taosAdapter REST 地址)即启用(可与 mqtt / thingsboard 输出并存)。
 
 ## Sparkplug B 输出
 
@@ -280,29 +244,16 @@ tdengine:
 
 ## REST API
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/api/v1/connections` | 创建连接 |
-| GET | `/api/v1/connections` | 列出连接 |
-| GET | `/api/v1/connections/{connectionId}` | 获取连接 |
-| POST | `/api/v1/connections/{connectionId}/browse` | 浏览服务器节点树(OPC UA 等) |
-| PUT | `/api/v1/connections/{connectionId}` | 更新连接 |
-| DELETE | `/api/v1/connections/{connectionId}` | 删除连接(被设备引用时 409) |
-| POST | `/api/v1/devices` | 创建设备(含点位) |
-| GET | `/api/v1/devices` | 列出设备 |
-| GET | `/api/v1/devices/{deviceId}` | 获取设备 |
-| PUT | `/api/v1/devices/{deviceId}` | 更新设备 |
-| DELETE | `/api/v1/devices/{deviceId}` | 删除设备 |
-| POST | `/api/v1/devices/{deviceId}/clone` | 复制设备(点表整体拷贝) |
-| POST | `/api/v1/devices/{deviceId}/points` | 添加点位 |
-| DELETE | `/api/v1/devices/{deviceId}/points/{name}` | 删除点位 |
-| GET | `/api/v1/processing/status` | 边缘处理运行统计(过滤/聚合计数) |
-
-配置写入后自动热加载,scheduler 全量重启采集,无需重启进程。
+连接/设备/点位/输出等全部配置能力均已由 **Web 管理界面**覆盖,日常使用无需直接调 API。
+如需脚本化/集成,网关也提供完整 REST API(`/api/v1/*`,含鉴权与权限 scope),**配置写入后自动热加载,无需重启**。
+完整接口文档(请求/响应示例、鉴权、端到端 curl 流程)见 [docs/api.md](docs/api.md)。
 
 ## Web 管理界面
 
-基于 Vue 3 + Element Plus 的前端(独立工程,位于 `web/`),提供概览、连接管理、设备管理(点位/克隆/写值)。**构建产物经 `go:embed` 打进网关二进制**,启动网关后访问 `http://<网关IP>:8080/` 即为管理界面,无需额外静态服务器或 nginx。
+基于 Vue 3 + Element Plus 的前端(独立工程,位于 `web/`),提供概览(设备/在线/连接统计)、
+连接管理、设备管理(点位/克隆/写值)、**北向输出配置**、设备/输出运行状态与边缘处理统计。
+**构建产物经 `go:embed` 打进网关二进制**,启动网关后访问 `http://<网关IP>:8080/` 即为管理界面,
+无需额外静态服务器或 nginx。默认启用鉴权,管理员 `admin` 首次登录强制改密。
 
 ```bash
 make build          # 先编译前端再编译二进制(前端已内嵌)
@@ -316,9 +267,18 @@ cd web && npm install && npm run dev   # http://localhost:5173, /api 代理到 :
 
 ## 扩展开发
 
-**新增南向驱动**:实现 `driver.Driver` 接口,在 `init()` 中 `driver.Register(name, drv)`,main 导入该包。按需叠加可选能力接口:`driver.Writer`(写)、`driver.Subscriber`(网关主动订阅)、`driver.Listener`(网关被动监听)。
+新增协议/平台均为**插件式**,无需改动核心;驱动与输出的配置表单、API、Web UI、状态面板自动适配。
 
-**新增北向输出**:实现 `output.Output` 接口,在 main 中构造并加入 outputs 列表。
+**新增南向驱动**:在 `internal/driver/<protocol>/` 子包实现 `driver.Driver` 接口,`init()` 中
+`driver.Register(name, drv)`,`cmd/gateway/main.go` 空导入该包。按需叠加可选能力接口:
+`driver.Writer`(写)、`driver.Subscriber`(订阅推送)、`driver.Listener`(被动监听)、
+`driver.Prober`(连通性探测)、`driver.Browser`(节点浏览)、`driver.EndpointResolver`(端点防冲突)。
+完整实现指引见 [docs/driver-development.md](docs/driver-development.md)。
+
+**新增北向输出**:在 `internal/output/<platform>/` 子包实现 `output.Output` 接口,`init()` 中
+`output.Register(...)` 声明类型与配置 schema,`cmd/gateway/main.go` 空导入该包。按需叠加:
+`output.DeviceNotifier`(设备上下线)、`output.StatusProvider`(运行态)、`output.BackfillHealthy`(断网补传)。
+完整实现指引见 [docs/output-development.md](docs/output-development.md)。
 
 ## 项目结构
 
@@ -330,7 +290,7 @@ internal/
     modbus/           Modbus 驱动(轮询)
     modbus_listen/    Modbus 监听驱动(设备主动连入上报)
     opcua/            OPC UA 驱动(轮询/订阅)
-  output/             Output 接口
+  output/             Output 接口 + registry
     mqtt/             MQTT 输出
     thingsboard/      ThingsBoard 输出
     tdengine/         TDengine 输出
@@ -339,9 +299,13 @@ internal/
   processing/         边缘处理层(过滤/聚合)
   core/               scheduler + pipeline
   store/              SQLite 持久化
-  api/                REST 配置 API
+  api/                REST API
+  auth/               管理员/三方客户端鉴权
   status/             设备运行时状态
-  config/             YAML 配置
+  values/             采集值实时注册表
+  backfill/           断网补传持久化队列
+  config/             YAML 引导配置
+docs/                  设计文档与开发指引(驱动/输出/协议/韧性等)
 web/                  管理界面(Vue 3 + Element Plus,dist 经 go:embed 内嵌)
 ```
 
