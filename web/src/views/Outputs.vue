@@ -159,6 +159,7 @@ onMounted(load)
                 <el-descriptions-item label="待发缓冲">{{ st(row).pending }}</el-descriptions-item>
                 <el-descriptions-item label="已接收">{{ st(row).received }}</el-descriptions-item>
                 <el-descriptions-item label="已丢弃">{{ st(row).dropped }}</el-descriptions-item>
+                <el-descriptions-item label="补传队列">{{ st(row).backfill }}</el-descriptions-item>
                 <el-descriptions-item label="成功发送">{{ st(row).sent }}</el-descriptions-item>
                 <el-descriptions-item label="最近发送">{{ fmtTime(st(row).lastSentAt) }}</el-descriptions-item>
                 <el-descriptions-item label="最近错误" :span="3">
