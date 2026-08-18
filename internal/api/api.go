@@ -19,6 +19,7 @@ import (
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 	"iot-gateway-go/internal/values"
+	"iot-gateway-go/internal/version"
 )
 
 // API 提供 REST 配置接口,操作 store 并通过 OnChange 触发 scheduler 热加载;
@@ -62,6 +63,8 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("PUT /api/v1/auth/password", a.requireAuth(a.changePassword))
 	// 密码加密传输:RSA 公钥(匿名可拉取,登录前就需要)
 	mux.HandleFunc("GET /api/v1/crypto/publicKey", a.publicKey)
+	// 版本信息(公开,非敏感,登录前后均可访问,供 Web UI 展示)
+	mux.HandleFunc("GET /api/v1/version", a.versionInfo)
 	// 三方 client 管理(仅 admin 持有 * 可访问)
 	mux.HandleFunc("GET /api/v1/clients", a.require(auth.ScopeClientsRead, a.listClients))
 	mux.HandleFunc("POST /api/v1/clients", a.require(auth.ScopeClientsWrite, a.createClient))
@@ -787,6 +790,11 @@ type loginResponse struct {
 // authStatus 返回鉴权是否启用(匿名可调,供前端决定是否走登录流程)。
 func (a *API) authStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"enabled": a.authEnabled})
+}
+
+// versionInfo 返回网关构建版本信息(匿名可调,非敏感)。
+func (a *API) versionInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, version.Get())
 }
 
 func (a *API) login(w http.ResponseWriter, r *http.Request) {

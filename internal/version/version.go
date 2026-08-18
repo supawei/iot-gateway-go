@@ -26,8 +26,29 @@ var (
 // GoVersion 编译所用 Go 版本,由 runtime 提供,无需注入。
 var GoVersion = runtime.Version()
 
+// Info 是版本信息的结构化表示,供 REST API / Web UI 展示。
+type Info struct {
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	BuildTime string `json:"buildTime"`
+	GoVersion string `json:"goVersion"`
+}
+
+// Get 返回当前构建的版本信息。
+func Get() Info {
+	return Info{
+		Name:      "iot-gateway-go",
+		Version:   Version,
+		Commit:    Commit,
+		BuildTime: BuildTime,
+		GoVersion: GoVersion,
+	}
+}
+
 // String 返回单行版本描述,供 -v/--version 与 -h 帮助输出使用。
 func String() string {
-	return fmt.Sprintf("iot-gateway-go %s (commit %s, built %s, %s)",
-		Version, Commit, BuildTime, GoVersion)
+	info := Get()
+	return fmt.Sprintf("%s %s (commit %s, built %s, %s)",
+		info.Name, info.Version, info.Commit, info.BuildTime, info.GoVersion)
 }

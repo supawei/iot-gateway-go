@@ -8,10 +8,19 @@ import auth from './stores/auth'
 const route = useRoute()
 const router = useRouter()
 const online = ref(false)
+const version = ref(null)
 let timer = null
 
 // 登录/改密等全屏页无侧边栏
 const isPublic = computed(() => route.meta.public === true || route.meta.bare === true)
+
+// 侧边栏版本行(悬停显示完整构建信息)
+const versionLine = computed(() => (version.value ? `v${version.value.version}` : '—'))
+const versionDetail = computed(() =>
+  version.value
+    ? `${version.value.name} ${version.value.version} · commit ${version.value.commit} · built ${version.value.buildTime} · ${version.value.goVersion}`
+    : '',
+)
 
 async function checkApi() {
   try {
@@ -22,12 +31,21 @@ async function checkApi() {
   }
 }
 
+async function loadVersion() {
+  try {
+    version.value = await api.getVersion()
+  } catch {
+    // 版本接口失败不阻塞界面(后端过旧等场景),侧边栏显示占位 —。
+  }
+}
+
 async function logout() {
   await auth.logout()
   router.replace('/login')
 }
 
 onMounted(() => {
+  loadVersion()
   if (!auth.state.enabled) return
   checkApi()
   timer = setInterval(checkApi, 10000)
@@ -66,10 +84,13 @@ onUnmounted(() => clearInterval(timer))
           </el-menu-item>
         </el-menu>
         <div class="side-foot">
-          <span class="dot" :class="{ ok: online }"></span>
-          <span>{{ online ? '后端已连接' : '后端未连接' }}</span>
-          <span class="side-user">{{ auth.state.me?.id || '' }}</span>
-          <el-icon class="side-logout" title="退出登录" @click="logout"><SwitchButton /></el-icon>
+          <div class="side-version" :title="versionDetail">{{ versionLine }}</div>
+          <div class="side-row">
+            <span class="dot" :class="{ ok: online }"></span>
+            <span>{{ online ? '后端已连接' : '后端未连接' }}</span>
+            <span class="side-user">{{ auth.state.me?.id || '' }}</span>
+            <el-icon class="side-logout" title="退出登录" @click="logout"><SwitchButton /></el-icon>
+          </div>
         </div>
       </div>
     </el-aside>

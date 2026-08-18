@@ -3,13 +3,21 @@ import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import auth from '../stores/auth'
+import api from '../api'
 
 const router = useRouter()
 const route = useRoute()
 const loading = ref(false)
 const form = ref({ username: '', password: '' })
+const version = ref(null)
 
 onMounted(async () => {
+  // 版本信息为公开接口,登录页亦展示。
+  try {
+    version.value = await api.getVersion()
+  } catch {
+    /* 版本接口失败不影响登录 */
+  }
   // 鉴权关闭则直接进入主界面。
   if (!auth.state.initialized) await auth.refresh()
   if (!auth.state.enabled || auth.state.me) {
@@ -63,6 +71,7 @@ async function submit() {
         </el-button>
       </el-form>
       <p class="login-hint">默认账号 admin / admin123,首次登录须修改密码</p>
+      <p v-if="version" class="login-version">{{ version.name }} {{ version.version }}</p>
     </div>
   </div>
 </template>
@@ -102,6 +111,12 @@ async function submit() {
   margin-top: 18px;
   color: #c1c7d0;
   font-size: 12px;
+  text-align: center;
+}
+.login-version {
+  margin-top: 10px;
+  color: #d5dae2;
+  font-size: 11px;
   text-align: center;
 }
 </style>

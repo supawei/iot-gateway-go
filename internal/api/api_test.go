@@ -922,6 +922,28 @@ func TestAuthStatusEndpoint(t *testing.T) {
 	}
 }
 
+// TestVersionEndpoint 验证版本端点为公开接口(开启鉴权时匿名亦可访问),
+// 且所有字段均非空。
+func TestVersionEndpoint(t *testing.T) {
+	enabled, _ := newAuthAPI(t)
+	rec := doRequest(t, enabled.Routes(), "GET", "/api/v1/version", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("version endpoint: got %d want 200", rec.Code)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode version: %v", err)
+	}
+	for _, k := range []string{"name", "version", "commit", "buildTime", "goVersion"} {
+		if body[k] == "" {
+			t.Errorf("version field %q should not be empty: %v", k, body)
+		}
+	}
+	if body["name"] != "iot-gateway-go" {
+		t.Errorf("version name = %q want iot-gateway-go", body["name"])
+	}
+}
+
 func TestAuthDisabledBypasses(t *testing.T) {
 	st, err := store.Open(":memory:")
 	if err != nil {

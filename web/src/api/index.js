@@ -51,6 +51,9 @@ export const api = {
   me: () => http.get('/auth/me'),
   changePassword: (data) => http.put('/auth/password', data),
 
+  // 版本信息(公开)
+  getVersion: () => http.get('/version'),
+
   // 三方 client
   listClients: () => http.get('/clients'),
   createClient: (data) => http.post('/clients', data),

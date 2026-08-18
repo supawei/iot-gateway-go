@@ -53,18 +53,32 @@ body,
 }
 .side-foot {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
-  padding: 14px 20px;
+  padding: 12px 20px 14px;
   font-size: 12px;
   color: #9aa1ac;
   border-top: 1px solid #f0f1f4;
+}
+.side-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.side-version {
+  font-size: 11px;
+  color: #c1c7d0;
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .side-foot .dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: #c1c7d0;
+  flex-shrink: 0;
 }
 .side-foot .dot.ok {
   background: #16a34a;
