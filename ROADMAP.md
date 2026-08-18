@@ -10,7 +10,7 @@
 |---|---|---|
 | **P1** | MVP:Modbus→MQTT 端到端链路 + REST 配置 + SQLite | ✅ 已完成 (2026-08-13) |
 | **P2** | 验证扩展性:第二协议 / 第二北向输出 / 能力接口 | ✅ 已完成 (2026-08-16) |
-| **P3** | 增强:边缘计算、断网补传、更多云平台、增量热加载、API 鉴权 | ⬜ 待开始 |
+| **P3** | 增强:边缘计算、断网补传、更多云平台、增量热加载、API 鉴权 | 🔶 进行中(鉴权/输出SQLite/断网补传已完成) |
 | **P4** | 产品化:更多协议、Sparkplug B、运维监控、物模型映射 | ⬜ 待开始 |
 
 ---
@@ -86,8 +86,8 @@
 
 - [x] **API 鉴权**:scope/RBAC + 三方 API Key + 强制改密(设计见 [docs/authz.md](docs/authz.md),2026-08-16)
 - [x] **北向输出迁移 SQLite + Web UI**:输出注册表 + OutputManager 热重载(见 [docs/northbound-output-config.md](docs/northbound-output-config.md),2026-08-17)
+- [x] **断网本地补传**:网络中断/上送失败/缓冲满时数据持久化到 SQLite,恢复后按序重放,保证数据不丢(ThingsBoard/TDengine/smardaten 全覆盖,设计见 [docs/offline-backfill-design.md](docs/offline-backfill-design.md),2026-08-18)
 - [ ] **边缘计算**:规则 / 过滤 / 聚合,插入 pipeline 处理层(目前直通)
-- [ ] **断网本地补传**:网络中断时缓存,恢复后补送,保证采集数据不丢(ThingsBoard/TDengine 均需)
 - [ ] **云 IoT 平台对接**:阿里云 / 华为云 / AWS IoT 输出插件(ThingsBoard 已作为 P2 验证完成)
 - [ ] **增量热加载**:scheduler 对设备/点位做 diff,增删改而非全量重启
 - [ ] **MQTT 批量发布**:减少高频场景的发布次数
@@ -109,7 +109,7 @@
 | 项 | 暂缓理由 | 触发条件 |
 |---|---|---|
 | `go plugin` / 进程外插件 | 起步无隔离需求,坑多/复杂度高 | 出现不稳定驱动需隔离或第三方插件 |
-| 规则引擎 / 断网补传 | 非 MVP 核心 | P3 |
+| 规则引擎 | 非 MVP 核心,复杂度高 | P3 或真实需求驱动(断网补传已 P3 完成) |
 | 工业以太网(Profinet/EtherCAT)/ 现场总线 | P1/P2 聚焦 Modbus、OPC UA | P4 或有真实设备需求 |
 | Sparkplug B | JSON 起步快,已留扩展点 | P4 或有互操作需求 |
 

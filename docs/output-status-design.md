@@ -61,6 +61,7 @@
 │ OutputStatus(由 Manager 聚合)                                     │
 │  ├─ 身份/存活: OutputID Name Type Enabled Active                  │  ← Manager slot
 │  ├─ 接入/丢弃: QueueUsed QueueCap Received Dropped                │  ← Manager slot(发布循环/扇出)
+│  ├─ 补传:      Backfill                                           │  ← Manager(backfill.Store)
 │  └─ 类型相关:  Connected ConnectionOpen Pending Sent LastSentAt   │  ← 各输出 StatusProvider
 │                LastError LastErrorAt                              │
 └──────────────────────────────────────────────────────────────────┘
@@ -73,7 +74,8 @@
 | `OutputID` `Name` `Type` `Enabled` `Active` | Manager slot(经 Instance 携带配置身份) | 身份与是否当前运行 |
 | `QueueUsed` `QueueCap` | Manager slot | 扇出队列占用/容量(默认 1024) |
 | `Received` | Manager slot 发布循环 | 成功投递给该输出发布循环的数据点数 |
-| `Dropped` | Manager 扇出 | 队列满被丢弃的数据点数 |
+| `Dropped` | Manager 扇出 | 队列满被丢弃的数据点数(未启用断网补传的输出) |
+| `Backfill` | Manager(backfill.Store) | 持久化补传队列深度(断网待补送条数,见 docs/offline-backfill-design.md) |
 | `Connected` `ConnectionOpen` | MQTT 类输出(paho client) | 逻辑连接 / 物理连接 |
 | `Pending` | 各输出 | 输出内部待发缓冲积压 |
 | `Sent` `LastSentAt` `LastError` `LastErrorAt` | 各输出(共享 SendStats) | 实际上送统计 |
