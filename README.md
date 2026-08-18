@@ -127,6 +127,8 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 
 **点位地址** (`address` 字段):OPC UA NodeID,如 `ns=2;s=Temperature`、`ns=0;i=2258`、`i=1234`。
 
+> NodeID 裸字符串一律按 **string node** 解析:`1234`(不带 `i=`)是 ns=0 的 string 节点,数值节点须写 `i=1234`。
+
 **数据类型**:`bool` `int16` `uint16` `int32` `uint32` `int64` `float32` `float64` `string`。`scale` 非零时数值类型按系数缩放为 float64。
 
 ### 轮询与订阅
@@ -140,6 +142,8 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 { "endpoint": "opc.tcp://192.168.1.5:4840", "mode": "subscribe",
   "publishInterval": "1s", "samplingInterval": 250, "queueSize": 10 }
 ```
+
+> **已知限制与缺口**:安全模式仅支持 `none`;无节点浏览(点位 NodeID 需手填);数据类型仅标量(不支持数组/DateTime/结构体等);无方法调用与历史读取。实现完整性分析见 [docs/opcua-driver-review.md](docs/opcua-driver-review.md)。
 
 ## 监听类驱动(modbus_listen)
 

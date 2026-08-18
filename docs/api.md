@@ -161,6 +161,8 @@ PollBlock:
 ```
 
 > OPC UA 设备级 `params` 默认空 `{}`(无从机地址概念);一个 endpoint 可挂多个 Device,共享 session。
+>
+> **已知限制与缺口**:安全模式仅支持 `none`;无节点浏览(点位 NodeID 需手填);数据类型仅标量(不支持数组/DateTime/结构体等);无方法调用与历史读取。实现完整性分析见 [docs/opcua-driver-review.md](docs/opcua-driver-review.md)。
 
 ## 连接容错与重连
 
@@ -194,7 +196,7 @@ PollBlock:
 
 > `int32`/`uint32`/`float32` 占 2 个寄存器,按大端(ABCD)解析。
 
-**OPC UA**:`address` 直接用 NodeID 字符串,如 `ns=2;s=Temperature`、`ns=0;i=2258`、`i=1234`、`s=Foo`(ns=0 的 string node 可省略 `s=`)。非法 NodeID 在运行时由 server 返回 bad quality。
+**OPC UA**:`address` 直接用 NodeID 字符串,如 `ns=2;s=Temperature`、`ns=0;i=2258`、`i=1234`、`s=Foo`(ns=0 的 string node 可省略 `s=`)。非法 NodeID 在运行时由 server 返回 bad quality。注意裸字符串一律按 string node 解析:`1234`(不带 `i=`)是 ns=0 的 string 节点,数值节点须写 `i=1234`。
 
 ---
 
