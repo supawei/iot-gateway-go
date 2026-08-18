@@ -74,6 +74,7 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/connections", a.require(auth.ScopeConnectionsWrite, a.createConnection))
 	mux.HandleFunc("GET /api/v1/connections", a.require(auth.ScopeConnectionsRead, a.listConnections))
 	mux.HandleFunc("GET /api/v1/connections/{connectionId}", a.require(auth.ScopeConnectionsRead, a.getConnection))
+	mux.HandleFunc("POST /api/v1/connections/{connectionId}/browse", a.require(auth.ScopeConnectionsRead, a.browseConnection))
 	mux.HandleFunc("PUT /api/v1/connections/{connectionId}", a.require(auth.ScopeConnectionsWrite, a.putConnection))
 	mux.HandleFunc("DELETE /api/v1/connections/{connectionId}", a.require(auth.ScopeConnectionsWrite, a.deleteConnection))
 	mux.HandleFunc("POST /api/v1/devices", a.require(auth.ScopeDevicesWrite, a.createDevice))
@@ -290,6 +291,47 @@ func (a *API) deleteConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// browseRequest 是节点浏览请求体:parent 为空串表示从根/Objects 开始。
+type browseRequest struct {
+	Parent string `json:"parent"`
+}
+
+// browseConnection 浏览连接指向的服务器节点树(仅实现 driver.Browser 的驱动,如 opcua)。
+// 供 Web UI 点位编辑时"浏览选择"节点,避免手填地址。
+func (a *API) browseConnection(w http.ResponseWriter, r *http.Request) {
+	connection, err := a.store.GetConnection(r.PathValue("connectionId"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	drv, err := driver.Get(connection.Driver)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	browser, ok := drv.(driver.Browser)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, errors.New("driver does not support node browsing"))
+		return
+	}
+	var req browseRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	infos, err := browser.Browse(r.Context(), connection.ID, connection.Config, req.Parent)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	if infos == nil {
+		infos = []driver.NodeInfo{}
+	}
+	writeJSON(w, http.StatusOK, infos)
 }
 
 func decodeConnection(w http.ResponseWriter, r *http.Request) (model.Connection, bool) {

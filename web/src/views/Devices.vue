@@ -80,6 +80,45 @@ function removePoint(i) {
   form.points.splice(i, 1)
 }
 
+// 节点浏览(OPC UA 等支持 Browse 的驱动):点位编辑时"浏览选择"NodeID。
+const browseVisible = ref(false)
+const browseTarget = ref(null) // 当前在编辑的点位对象,选中的 NodeID 回填到其 address
+const browseLoading = ref(false)
+
+// 仅当所选连接的驱动支持 Browse(目前 opcua)时显示浏览按钮。
+const canBrowse = computed(() => connectionDriver.value === 'opcua')
+
+function openBrowse(point) {
+  browseTarget.value = point
+  browseVisible.value = true
+}
+
+// el-tree 懒加载:根节点 level=0 传空 parent,展开子节点传 node.data.nodeId。
+async function browseLoad(node, resolve) {
+  const parent = node.level === 0 ? '' : node.data.nodeId
+  browseLoading.value = true
+  try {
+    const nodes = await api.browseConnection(form.connectionId, parent)
+    resolve(nodes.map((n) => ({ ...n, isLeaf: !n.hasChildren })))
+  } catch (e) {
+    ElMessage.error('浏览失败: ' + e.message)
+    resolve([])
+  } finally {
+    browseLoading.value = false
+  }
+}
+
+function pickNode(data) {
+  // OPC UA 只有 Variable 节点承载可读写 Value,Object/Method 仅用于展开导航
+  if (data.nodeClass !== 'Variable') {
+    return
+  }
+  if (browseTarget.value) {
+    browseTarget.value.address = data.nodeId
+  }
+  browseVisible.value = false
+}
+
 function resetParams() {
   paramsModel.value = defaultModel(paramSchema.value)
 }
@@ -363,7 +402,11 @@ onUnmounted(() => {
             </div>
             <div v-for="(p, i) in form.points" :key="i" class="point-row">
               <el-input v-model="p.name" placeholder="temperature" />
-              <el-input v-model="p.address" placeholder="holding:0" />
+              <el-input v-model="p.address" :placeholder="canBrowse ? 'ns=2;s=Temperature' : 'holding:0'">
+                <template v-if="canBrowse" #append>
+                  <el-button link type="primary" @click="openBrowse(p)">浏览</el-button>
+                </template>
+              </el-input>
               <el-select v-model="p.dataType">
                 <el-option v-for="t in DATA_TYPES" :key="t" :label="t" :value="t" />
               </el-select>
@@ -377,6 +420,30 @@ onUnmounted(() => {
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" @click="save">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 节点浏览对话框(OPC UA 等支持 Browse 的驱动):懒加载节点树,点击节点回填 address -->
+    <el-dialog v-model="browseVisible" title="浏览选择节点" width="520px" destroy-on-close>
+      <div class="browse-tip">点击叶子节点(Variable)把 NodeID 填入点位地址;Object 可继续展开。</div>
+      <el-tree
+        v-loading="browseLoading"
+        :props="{ label: 'displayName', isLeaf: 'isLeaf' }"
+        node-key="nodeId"
+        lazy
+        :load="browseLoad"
+        highlight-current
+        empty-text="无子节点"
+        style="max-height: 420px; overflow: auto"
+        @node-click="pickNode"
+      >
+        <template #default="{ data }">
+          <span class="mono">{{ data.displayName || data.browseName }}</span>
+          <span class="node-class">{{ data.nodeClass }}</span>
+        </template>
+      </el-tree>
+      <template #footer>
+        <el-button @click="browseVisible = false">取消</el-button>
       </template>
     </el-dialog>
 
@@ -454,3 +521,16 @@ onUnmounted(() => {
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.browse-tip {
+  font-size: 12px;
+  color: #9aa1ac;
+  margin-bottom: 8px;
+}
+.node-class {
+  font-size: 11px;
+  color: #909399;
+  margin-left: 6px;
+}
+</style>

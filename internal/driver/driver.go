@@ -68,6 +68,24 @@ type Listener interface {
 	Listen(ctx context.Context, points []model.Point, onData func(model.DataPoint)) error
 }
 
+// NodeInfo 描述服务器节点树中的一个节点,供 Web UI 节点选择器渲染。
+type NodeInfo struct {
+	NodeID      string `json:"nodeId"`      // 完整地址(如 OPC UA NodeID "ns=2;i=1001"),可直接写入 Point.Address
+	BrowseName  string `json:"browseName"`  // 浏览名
+	DisplayName string `json:"displayName"` // 展示名(优先于 BrowseName 显示)
+	NodeClass   string `json:"nodeClass"`   // 节点类型(Object/Variable/Method/...)
+	HasChildren bool   `json:"hasChildren"` // 是否可能有子节点(供前端懒加载提示)
+}
+
+// Browser 是南向驱动的可选浏览能力:按连接浏览服务器节点树,供点位编辑时
+// "浏览选择"节点,避免手填地址。协议差异(浏览方向、引用类型、NodeID 归一化)
+// 封死在实现内部。实现它的驱动(如 opcua)使 Web UI 能动态取节点。
+type Browser interface {
+	// Browse 返回 parentNodeID(空串表示根/Objects 文件夹)的直接子节点。
+	// connConfig 为该连接的配置(存储为明文,可直接用于建连),connectionID 用于连接池复用。
+	Browse(ctx context.Context, connectionID string, connConfig json.RawMessage, parentNodeID string) ([]NodeInfo, error)
+}
+
 // WriteResult 是单点写结果:Ok=false 表示该点写失败(地址错误/类型不匹配/协议拒绝),
 // 不阻断同批其他点,语义对齐 Read 的 Quality。
 type WriteResult struct {

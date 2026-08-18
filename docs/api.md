@@ -162,7 +162,9 @@ PollBlock:
 
 > OPC UA 设备级 `params` 默认空 `{}`(无从机地址概念);一个 endpoint 可挂多个 Device,共享 session。
 >
-> **已知限制与缺口**:安全模式仅支持 `none`;无节点浏览(点位 NodeID 需手填);数据类型仅标量(不支持数组/DateTime/结构体等);无方法调用与历史读取。实现完整性分析见 [docs/opcua-driver-review.md](docs/opcua-driver-review.md)。
+> **节点浏览**:点位编辑时可调用 `POST /api/v1/connections/{connectionId}/browse` 懒加载服务器节点树、选择 NodeID 自动回填地址(见「节点浏览」一节)。
+>
+> **已知限制与缺口**:安全模式仅支持 `none`;数据类型仅标量(不支持数组/DateTime/结构体等);无方法调用与历史读取。实现完整性分析见 [docs/opcua-driver-review.md](docs/opcua-driver-review.md)。
 
 ## 连接容错与重连
 
@@ -253,6 +255,35 @@ curl -X POST http://localhost:8080/api/v1/connections \
 若连接仍被设备引用,返回 `409 Conflict`;否则删除。
 
 **响应**:`204 No Content`(无响应体)
+
+#### 节点浏览(OPC UA 等支持 Browse 的驱动)
+
+`POST /api/v1/connections/{connectionId}/browse`
+
+浏览连接指向的服务器节点树,返回 `parent` 的直接子节点;供点位编辑时"浏览选择"NodeID(Web UI 对 OPC UA 连接的点位地址输入框提供「浏览」按钮)。权限 `connections:read`。
+
+**请求体**:
+
+```json
+{ "parent": "ns=2;i=1001" }   // parent 为空串表示从根/Objects 文件夹开始
+```
+
+**响应**:`200 OK` + 节点数组
+
+```json
+[
+  { "nodeId": "ns=2;i=1001", "browseName": "Temperature", "displayName": "Temperature", "nodeClass": "Variable", "hasChildren": false }
+]
+```
+
+| 字段 | 说明 |
+|---|---|
+| `nodeId` | 完整 NodeID 字符串,可直接写入 `Point.address` |
+| `browseName` / `displayName` | 浏览名 / 展示名(展示时优先用 displayName) |
+| `nodeClass` | `Object` / `Variable` / `Method` 等 |
+| `hasChildren` | 是否可能有子节点(前端据此懒加载展开) |
+
+**错误**:连接不存在 `404`;驱动不支持浏览 `501`;浏览失败(连接不可达等)`502`。
 
 ### 设备
 

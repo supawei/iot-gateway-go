@@ -1393,3 +1393,67 @@ func TestOutputStatusNoManager(t *testing.T) {
 		t.Fatalf("empty store should yield empty status, got %+v", list)
 	}
 }
+
+// browseDriverMock 实现 driver.Browser:按 parent 返回预设节点或报错,便于测浏览端点。
+type browseDriverMock struct{}
+
+func (browseDriverMock) Open(context.Context, driver.OpenRequest) (driver.Conn, error) {
+	return nil, errors.New("browse mock: Open 不应被调用")
+}
+func (browseDriverMock) Browse(_ context.Context, connectionID string, _ json.RawMessage, parent string) ([]driver.NodeInfo, error) {
+	if parent == "boom" {
+		return nil, errors.New("browse failed")
+	}
+	return []driver.NodeInfo{
+		{NodeID: "ns=2;i=1", BrowseName: "T", DisplayName: "Temperature", NodeClass: "Variable", HasChildren: false},
+		{NodeID: "ns=2;i=2", BrowseName: "Device", DisplayName: "Device", NodeClass: "Object", HasChildren: true},
+	}, nil
+}
+
+// nonBrowserDriverMock 只实现 Driver,验证"驱动不支持浏览"回退 501。
+type nonBrowserDriverMock struct{}
+
+func (nonBrowserDriverMock) Open(context.Context, driver.OpenRequest) (driver.Conn, error) {
+	return nil, errors.New("n/a")
+}
+
+func TestBrowseConnection(t *testing.T) {
+	driver.Register("browse-driver", browseDriverMock{})
+	driver.Register("browse-plain", nonBrowserDriverMock{})
+	a := newTestAPI(t)
+	handler := a.Routes()
+
+	// 连接不存在 -> 404
+	rec := doRequest(t, handler, "POST", "/api/v1/connections/nope/browse", map[string]string{"parent": ""})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("missing conn status = %d", rec.Code)
+	}
+
+	// 正常浏览 -> 200 + 节点列表
+	a.store.SaveConnection(model.Connection{ID: "bc1", Name: "bc1", Driver: "browse-driver", Config: []byte(`{"endpoint":"opc.tcp://x:4840"}`)})
+	rec = doRequest(t, handler, "POST", "/api/v1/connections/bc1/browse", map[string]string{"parent": ""})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("browse status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var infos []driver.NodeInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &infos); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(infos) != 2 || infos[0].NodeID != "ns=2;i=1" || infos[0].DisplayName != "Temperature" {
+		t.Fatalf("infos: %+v", infos)
+	}
+
+	// 驱动不支持浏览 -> 501
+	a.store.SaveConnection(model.Connection{ID: "bc2", Name: "bc2", Driver: "browse-plain", Config: []byte(`{}`)})
+	rec = doRequest(t, handler, "POST", "/api/v1/connections/bc2/browse", map[string]string{"parent": ""})
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("non-browser status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 浏览失败 -> 502
+	a.store.SaveConnection(model.Connection{ID: "bc3", Name: "bc3", Driver: "browse-driver", Config: []byte(`{}`)})
+	rec = doRequest(t, handler, "POST", "/api/v1/connections/bc3/browse", map[string]string{"parent": "boom"})
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("browse error status = %d", rec.Code)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gopcua/opcua"
+	"github.com/gopcua/opcua/id"
 	"github.com/gopcua/opcua/ua"
 
 	"iot-gateway-go/internal/driver"
@@ -66,6 +67,65 @@ func (*opcuaDriver) ConfigSchema() []driver.Field {
 // ParamSchema 声明 Device.params 结构;OPC UA 无设备级参数。
 func (*opcuaDriver) ParamSchema() []driver.Field {
 	return nil
+}
+
+// Browse 实现 driver.Browser:复用连接池共享 session,浏览 parentNodeID 的直接
+// 子节点(层次引用 Organizes/HasComponent/HasProperty 等,含子类型)。parentNodeID
+// 为空串时从 Objects 文件夹(i=85)开始,返回可写入 Point.Address 的 NodeID 字符串。
+func (d *opcuaDriver) Browse(ctx context.Context, connectionID string, connConfig json.RawMessage, parentNodeID string) ([]driver.NodeInfo, error) {
+	cfg, err := parseConnConfig(connConfig)
+	if err != nil {
+		return nil, err
+	}
+	shared, err := d.acquire(ctx, connectionID, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer d.release(shared)
+
+	parent := ua.NewNumericNodeID(0, id.ObjectsFolder)
+	if s := strings.TrimSpace(parentNodeID); s != "" {
+		parent, err = ua.ParseNodeID(s)
+		if err != nil {
+			return nil, fmt.Errorf("opcua browse: invalid parent node id %q: %w", s, err)
+		}
+	}
+	refs, err := shared.client.Node(parent).References(ctx, id.HierarchicalReferences, ua.BrowseDirectionForward, ua.NodeClassAll, true)
+	if err != nil {
+		return nil, fmt.Errorf("opcua browse %q: %w", parent, err)
+	}
+	infos := make([]driver.NodeInfo, 0, len(refs))
+	for _, r := range refs {
+		if !r.IsForward {
+			continue
+		}
+		nid := ua.NewNodeIDFromExpandedNodeID(r.NodeID)
+		if nid == nil {
+			continue
+		}
+		infos = append(infos, driver.NodeInfo{
+			NodeID:      nid.String(),
+			BrowseName:  qualifiedName(r.BrowseName),
+			DisplayName: localizedText(r.DisplayName),
+			NodeClass:   r.NodeClass.String(),
+			HasChildren: r.NodeClass == ua.NodeClassObject || r.NodeClass == ua.NodeClassVariable || r.NodeClass == ua.NodeClassMethod,
+		})
+	}
+	return infos, nil
+}
+
+func qualifiedName(n *ua.QualifiedName) string {
+	if n == nil {
+		return ""
+	}
+	return n.Name
+}
+
+func localizedText(n *ua.LocalizedText) string {
+	if n == nil {
+		return ""
+	}
+	return n.Text
 }
 
 // sharedSession 是按 ConnectionID 共享的 OPC UA client/session,引用计数管理生命周期。

@@ -56,6 +56,12 @@ func getE2EEnv(t *testing.T) *e2eEnv {
 			boolNode: ns.AddNewVariableNode("BoolVar", false),
 			strNode:  ns.AddNewVariableStringNode("StrVar", "x"),
 		}
+		// 把变量节点挂到本命名空间的 Objects 下,使浏览测试可从 ns=1;i=85 取到子节点
+		objects := ns.Objects()
+		objects.AddRef(e2eInst.intNode, server.RefTypeIDOrganizes, true)
+		objects.AddRef(e2eInst.dblNode, server.RefTypeIDOrganizes, true)
+		objects.AddRef(e2eInst.boolNode, server.RefTypeIDOrganizes, true)
+		objects.AddRef(e2eInst.strNode, server.RefTypeIDOrganizes, true)
 		time.Sleep(150 * time.Millisecond) // 等服务监听就绪
 	})
 	if e2eErr != nil {
@@ -255,6 +261,54 @@ func TestSubscribeE2E(t *testing.T) {
 			t.Logf("ignoring notification %+v (initial value)", dp)
 		case <-deadline:
 			t.Fatal("no subscription notification with target value received")
+		}
+	}
+}
+
+// TestBrowseE2E 端到端验证节点浏览:从本命名空间 Objects(ns=1;i=85)浏览取到
+// 已挂接的变量子节点,核对 NodeID/展示名/类型;空 parent(根)浏览不报错。
+func TestBrowseE2E(t *testing.T) {
+	env := getE2EEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	drv, err := driver.Get("opcua")
+	if err != nil {
+		t.Fatalf("get driver: %v", err)
+	}
+	browser, ok := drv.(driver.Browser)
+	if !ok {
+		t.Fatal("opcua driver should implement Browser")
+	}
+	cfg := []byte(`{"endpoint":"` + env.endpoint + `","timeout":"3s"}`)
+
+	// 根浏览不报错
+	if _, err := browser.Browse(ctx, "browse-conn", cfg, ""); err != nil {
+		t.Fatalf("browse root: %v", err)
+	}
+
+	// 从本命名空间 Objects 浏览,应取到 4 个变量子节点
+	infos, err := browser.Browse(ctx, "browse-conn", cfg, env.ns.Objects().ID().String())
+	if err != nil {
+		t.Fatalf("browse ns objects: %v", err)
+	}
+	byName := map[string]driver.NodeInfo{}
+	for _, n := range infos {
+		byName[n.DisplayName] = n
+	}
+	want := map[string]string{
+		"IntVar":    env.intNode.ID().String(),
+		"DoubleVar": env.dblNode.ID().String(),
+		"BoolVar":   env.boolNode.ID().String(),
+		"StrVar":    env.strNode.ID().String(),
+	}
+	for name, nid := range want {
+		n, ok := byName[name]
+		if !ok {
+			t.Fatalf("browse result missing %s (got %v)", name, infos)
+		}
+		if n.NodeID != nid {
+			t.Fatalf("%s node id = %q, want %q", name, n.NodeID, nid)
 		}
 	}
 }

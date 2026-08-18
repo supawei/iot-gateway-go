@@ -137,10 +137,11 @@ gopcua v0.9.1 的重连状态机在断线后:
 |---|---|
 | ~~P0~~(已完成) | ① `decodeValue` 未知类型 `ok=false` ✅;② Monitor 结果缺失补日志 ✅;③ README NodeID 裸字符串陷阱 ✅ |
 | ~~可观测性~~(已完成) | Read 整批失败透出真实错误原因 ✅;订阅 `StatusChangeNotification` 透出日志 ✅ |
-| P1(生产化前) | ① 安全模式 `Sign`/`SignAndEncrypt` + 证书配置;② 节点浏览/发现(Web UI 选择器) |
-| P2(按需) | 方法调用、历史数据、数组/扩展类型、订阅失效→设备离线联动、订阅背压、stateCh 健壮性、modbus 错误透出对齐 |
+| ~~节点浏览/发现~~(已完成) | `driver.Browser` 能力 + opcua Browse(层次引用,懒加载)+ `POST /api/v1/connections/{id}/browse` + Web UI 点位"浏览选择"节点树 ✅ |
+| P1(生产化前) | ① 安全模式 `Sign`/`SignAndEncrypt` + 证书配置 |
+| P2(按需) | 方法调用、历史数据、数组/扩展类型、订阅失效→设备离线联动、订阅背压、stateCh 健壮性、modbus 错误透出对齐、浏览返回变量 DataType 提示 |
 
-> 集成测试(原 P2)已补齐:基于 gopcua 进程内 server 的 `TestReadE2E`/`TestProbeE2E`/`TestSubscribeE2E` 均已通过。
+> 集成测试(原 P2)已补齐:基于 gopcua 进程内 server 的 `TestReadE2E`/`TestProbeE2E`/`TestSubscribeE2E`/`TestBrowseE2E` 均已通过。
 
 ---
 
@@ -161,3 +162,6 @@ gopcua v0.9.1 的重连状态机在断线后:
 - `TestReadE2E`(写已知值→批量读回,含无效地址点位保持 bad 不阻断同批)
 - `TestProbeE2E`(可达/无可解析点位/未监听端口不可达)
 - `TestSubscribeE2E`(订阅后从另一连接写值,onData 推送目标值;覆盖 release 顺序修复)
+- `TestBrowseE2E`(从命名空间 Objects 浏览取到挂接的变量子节点,核对 NodeID/名称;根浏览不报错)
+
+> 另含 `internal/api` 的 `TestBrowseConnection`(浏览端点:正常返回/驱动不支持 501/连接不存在 404/浏览失败 502)。

@@ -65,6 +65,8 @@ export const api = {
   createConnection: (data) => http.post('/connections', data),
   updateConnection: (id, data) => http.put(`/connections/${id}`, data),
   deleteConnection: (id) => http.delete(`/connections/${id}`),
+  // 节点浏览(OPC UA 等支持 Browse 的驱动,供点位编辑选择节点)
+  browseConnection: (id, parent) => http.post(`/connections/${id}/browse`, { parent }),
 
   // 北向输出
   listOutputs: () => http.get('/outputs'),

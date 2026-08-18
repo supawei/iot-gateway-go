@@ -129,6 +129,8 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 
 > NodeID 裸字符串一律按 **string node** 解析:`1234`(不带 `i=`)是 ns=0 的 string 节点,数值节点须写 `i=1234`。
 
+**节点浏览选择**:设备点位编辑时对 OPC UA 连接点击「浏览」按钮,从服务器节点树懒加载选点,自动回填 NodeID(基于 `driver.Browser` 能力 + `POST /api/v1/connections/{id}/browse`)。
+
 **数据类型**:`bool` `int16` `uint16` `int32` `uint32` `int64` `float32` `float64` `string`。`scale` 非零时数值类型按系数缩放为 float64。
 
 ### 轮询与订阅
@@ -143,7 +145,7 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
   "publishInterval": "1s", "samplingInterval": 250, "queueSize": 10 }
 ```
 
-> **已知限制与缺口**:安全模式仅支持 `none`;无节点浏览(点位 NodeID 需手填);数据类型仅标量(不支持数组/DateTime/结构体等);无方法调用与历史读取。实现完整性分析见 [docs/opcua-driver-review.md](docs/opcua-driver-review.md)。
+> **已知限制与缺口**:安全模式仅支持 `none`;数据类型仅标量(不支持数组/DateTime/结构体等);无方法调用与历史读取。实现完整性分析见 [docs/opcua-driver-review.md](docs/opcua-driver-review.md)。
 
 ## 监听类驱动(modbus_listen)
 
@@ -212,6 +214,7 @@ tdengine:
 | POST | `/api/v1/connections` | 创建连接 |
 | GET | `/api/v1/connections` | 列出连接 |
 | GET | `/api/v1/connections/{connectionId}` | 获取连接 |
+| POST | `/api/v1/connections/{connectionId}/browse` | 浏览服务器节点树(OPC UA 等) |
 | PUT | `/api/v1/connections/{connectionId}` | 更新连接 |
 | DELETE | `/api/v1/connections/{connectionId}` | 删除连接(被设备引用时 409) |
 | POST | `/api/v1/devices` | 创建设备(含点位) |
