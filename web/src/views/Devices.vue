@@ -108,9 +108,14 @@ async function browseLoad(node, resolve) {
   }
 }
 
+// 归一化节点类型短名:服务端返回 "Variable",双保险兼容 "NodeClassVariable" 等前缀形式。
+function shortNodeClass(nodeClass) {
+  return String(nodeClass || '').replace(/^NodeClass/, '')
+}
+
 function pickNode(data) {
   // OPC UA 只有 Variable 节点承载可读写 Value,Object/Method 仅用于展开导航
-  if (data.nodeClass !== 'Variable') {
+  if (shortNodeClass(data.nodeClass) !== 'Variable') {
     return
   }
   if (browseTarget.value) {

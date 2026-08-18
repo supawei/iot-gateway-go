@@ -310,5 +310,10 @@ func TestBrowseE2E(t *testing.T) {
 		if n.NodeID != nid {
 			t.Fatalf("%s node id = %q, want %q", name, n.NodeID, nid)
 		}
+		// 回归:nodeClass 必须归一化为短名 "Variable"(前端据此允许选中回填),
+		// 不能是 gopcua 的 "NodeClassVariable" 前缀形式。
+		if n.NodeClass != "Variable" {
+			t.Fatalf("%s nodeClass = %q, want Variable", name, n.NodeClass)
+		}
 	}
 }

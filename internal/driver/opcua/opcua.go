@@ -128,11 +128,18 @@ func (d *opcuaDriver) Browse(ctx context.Context, connectionID string, connConfi
 			NodeID:      nid.String(),
 			BrowseName:  qualifiedName(r.BrowseName),
 			DisplayName: localizedText(r.DisplayName),
-			NodeClass:   r.NodeClass.String(),
+			NodeClass:   normalizeNodeClass(r.NodeClass),
 			HasChildren: r.NodeClass == ua.NodeClassObject || r.NodeClass == ua.NodeClassVariable || r.NodeClass == ua.NodeClassMethod,
 		})
 	}
 	return infos, nil
+}
+
+// normalizeNodeClass 把 ua.NodeClass 枚举转成友好短名(Variable/Object/Method...)——
+// NodeClass.String() 返回带 "NodeClass" 前缀的字符串,前端用短名做类型判断(如
+// 只有 Variable 节点承载可读写 Value,允许选中回填)。
+func normalizeNodeClass(n ua.NodeClass) string {
+	return strings.TrimPrefix(n.String(), "NodeClass")
 }
 
 func qualifiedName(n *ua.QualifiedName) string {

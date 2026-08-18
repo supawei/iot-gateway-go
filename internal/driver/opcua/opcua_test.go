@@ -402,3 +402,21 @@ func TestEndpointKey(t *testing.T) {
 		t.Errorf("invalid url should yield empty key, got %q", got)
 	}
 }
+
+// TestNormalizeNodeClass 回归:NodeClass.String() 带 "NodeClass" 前缀,
+// normalizeNodeClass 必须转成短名,供前端判断 Variable 可选中回填。
+func TestNormalizeNodeClass(t *testing.T) {
+	cases := []struct {
+		in   ua.NodeClass
+		want string
+	}{
+		{ua.NodeClassObject, "Object"},
+		{ua.NodeClassVariable, "Variable"},
+		{ua.NodeClassMethod, "Method"},
+	}
+	for _, c := range cases {
+		if got := normalizeNodeClass(c.in); got != c.want {
+			t.Fatalf("normalizeNodeClass(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
