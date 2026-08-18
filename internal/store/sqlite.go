@@ -9,6 +9,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"iot-gateway-go/internal/backfill"
 	"iot-gateway-go/internal/model"
 )
 
@@ -116,6 +117,13 @@ func dsnWithPragmas(path string) string {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// NewBackfillStore 构造断网补传持久化队列,复用网关同一 SQLite 连接
+// (WAL/busy_timeout 已生效)。max<=0 时用 backfill.DefaultMax。
+// 见 docs/offline-backfill-design.md。
+func (s *Store) NewBackfillStore(max int) (*backfill.Store, error) {
+	return backfill.New(s.db, max)
 }
 
 // OnChange 返回配置变更信号 channel;写入后非阻塞通知,scheduler 据此热加载。

@@ -20,6 +20,8 @@ func BuildSet(bc BuildContext, configs []model.Output) ([]Instance, error) {
 			continue
 		}
 		enabled++
+		// 逐条注入当前实例的配置 ID:输出用它作为补传队列(output_id)的隔离键。
+		bc.OutputID = o.ID
 		out, err := Build(bc, o.Type, o.Config)
 		if err != nil {
 			slog.Error("build output failed, skipped", "id", o.ID, "type", o.Type, "err", err)

@@ -18,6 +18,7 @@ import (
 
 	"iot-gateway-go/internal/api"
 	"iot-gateway-go/internal/auth"
+	"iot-gateway-go/internal/backfill"
 	"iot-gateway-go/internal/config"
 	"iot-gateway-go/internal/core"
 	"iot-gateway-go/internal/model"
@@ -116,6 +117,13 @@ func main() {
 	}
 	defer st.Close()
 
+	// 断网补传持久化队列(复用同一 SQLite,WAL):数据无法即时送出时落库,恢复后重放。
+	// 见 docs/offline-backfill-design.md。
+	backfillStore, err := st.NewBackfillStore(cfg.Storage.BackfillMax)
+	if err != nil {
+		fatal("init backfill store failed", "err", err)
+	}
+
 	// 下行写回调:共享属性/RPC → core.WritePoint → 驱动 Writer。
 	write := func(ctx context.Context, deviceID, point string, value interface{}) error {
 		_, err := core.WritePoint(ctx, st, deviceID, point, value)
@@ -126,7 +134,8 @@ func main() {
 
 	// 输出管理器:从 SQLite 读配置动态构建,Web UI 变更后热重载(原子替换 + 关闭旧输出)。
 	// 网关 ID 亦存 SQLite(settings 表),每次重载时读取,故改 ID 后热重载即生效。
-	outputs := output.NewManager(buildOutputs(st, write, valuesReg))
+	outputs := output.NewManager(buildOutputs(st, write, valuesReg, backfillStore))
+	outputs.SetBackfill(backfillStore)
 	if err := outputs.Reload(); err != nil {
 		// 首次构建失败不退出:API 仍可修复配置并触发热重载。
 		slog.Warn("initial output reload failed", "err", err)
@@ -240,7 +249,7 @@ func fatal(msg string, args ...any) {
 // buildOutputs 返回输出管理器的构建函数:每次重载都从 SQLite 读最新网关 ID 与输出配置,
 // 经 output.BuildSet 逐个构建。单个输出失败仅跳过(失败隔离),全失败才返回错误,
 // 由 Manager 保留旧输出(原子替换语义)。
-func buildOutputs(st *store.Store, write output.WriteFunc, valuesReg *values.Registry) output.BuildFunc {
+func buildOutputs(st *store.Store, write output.WriteFunc, valuesReg *values.Registry, backfillStore *backfill.Store) output.BuildFunc {
 	return func() ([]output.Instance, error) {
 		gatewayID, err := st.GetGatewayID()
 		if err != nil {
@@ -250,6 +259,8 @@ func buildOutputs(st *store.Store, write output.WriteFunc, valuesReg *values.Reg
 			GatewayID: gatewayID,
 			Write:     write,
 			Store:     st,
+			// 断网补传:输出在失败路径上经它持久化待补送数据。
+			Backfill: backfillStore,
 			// 服务调用 get 等需要"设备当前属性值"的场景:从实时值注册表读取最新采集值。
 			LatestValues: func(deviceID string) map[string]interface{} {
 				dv := valuesReg.Get(deviceID)

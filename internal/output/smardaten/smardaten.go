@@ -103,7 +103,7 @@ func init() {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			return nil, fmt.Errorf("smardaten-iot config: %w", err)
 		}
-		return New(cfg, bc.GatewayID, bc.Write, bc.Store, bc.LatestValues, bc.Probe)
+		return New(cfg, bc.GatewayID, bc.Write, bc.Store, bc.LatestValues, bc.Probe, bc.OutputID, bc.Backfill)
 	})
 }
 
@@ -129,6 +129,11 @@ type platformOutput struct {
 	topics     *topicMapping
 	downloader *httpDownloader
 
+	// 断网补传(见 docs/offline-backfill-design.md):outputID 为补传队列隔离键,
+	// backfill 为持久化队列(未接线时 nil,退化为"丢弃 + 告警")。
+	outputID string
+	backfill output.BackfillSink
+
 	// 解析后的配置值
 	pubMode    int // 0=及时, 1=变化
 	maxPubTime int // 秒
@@ -138,9 +143,9 @@ type platformOutput struct {
 	pending      map[string][]model.DataPoint  // 待上报数据点
 	pendingCount int                           // 待上报数据点总数(上限 maxPendingPoints)
 	lastValues   map[string]map[string]float64 // deviceID -> pointID -> lastValue (变化上报用)
-	lastPubTime map[string]time.Time          // deviceID -> 上次上报时间
-	connects    map[string]bool               // 待发送 connect 的设备
-	disconnects map[string]bool               // 待发送 disconnect 的设备
+	lastPubTime  map[string]time.Time          // deviceID -> 上次上报时间
+	connects     map[string]bool               // 待发送 connect 的设备
+	disconnects  map[string]bool               // 待发送 disconnect 的设备
 
 	// 已连接设备
 	connected map[string]bool
@@ -155,7 +160,7 @@ type platformOutput struct {
 }
 
 // New 构造 smardaten-iot 平台输出。
-func New(cfg Config, gatewayID string, write output.WriteFunc, store output.StoreAccessor, latestValues output.LatestValuesFunc, probe output.ProbeFunc) (output.Output, error) {
+func New(cfg Config, gatewayID string, write output.WriteFunc, store output.StoreAccessor, latestValues output.LatestValuesFunc, probe output.ProbeFunc, outputID string, backfill output.BackfillSink) (output.Output, error) {
 	if cfg.Broker == "" {
 		return nil, fmt.Errorf("smardaten-iot broker is required")
 	}
@@ -191,6 +196,8 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 		store:         store,
 		latestValues:  latestValues,
 		probe:         probe,
+		outputID:      outputID,
+		backfill:      backfill,
 		qos:           defaultQoS,
 		cfg:           cfg,
 		topics:        newTopicMapping(),
@@ -221,29 +228,35 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 }
 
 // Publish 缓冲 DataPoint，由 flusher 定时聚合上报。
-// 缓冲达到上限时丢弃新点并告警，避免断连期间内存无界增长。
+// 缓冲达到上限时不再丢弃:启用补传时经持久化队列保存(断网续传),否则告警丢弃。
 func (o *platformOutput) Publish(dp model.DataPoint) error {
 	o.mu.Lock()
-	defer o.mu.Unlock()
 
 	deviceID := dp.DeviceID
 	if !o.topics.hasDevice(deviceID) {
 		// 设备不在 application.json 中，跳过
+		o.mu.Unlock()
 		return nil
 	}
 
 	// STRING 类型不上报
 	if dp.Value == nil {
+		o.mu.Unlock()
 		return nil
 	}
 
+	var toSave []model.DataPoint
 	if o.pendingCount >= maxPendingPoints {
-		slog.Warn("smardaten pending buffer full, drop datapoint", "device", deviceID, "point", dp.Point)
-		return nil
+		toSave = append(toSave, dp)
+	} else {
+		o.pending[deviceID] = append(o.pending[deviceID], dp)
+		o.pendingCount++
 	}
+	o.mu.Unlock()
 
-	o.pending[deviceID] = append(o.pending[deviceID], dp)
-	o.pendingCount++
+	if len(toSave) > 0 {
+		o.saveBackfill(toSave)
+	}
 	return nil
 }
 
@@ -298,6 +311,22 @@ func (o *platformOutput) RuntimeStatus() output.RuntimeStatus {
 		LastError:      lastErr,
 		LastErrorAt:    lastErrAt,
 	}
+}
+
+// saveBackfill 把无法即时送出的数据点持久化到补传队列(断网续传)。
+// 未接线补传(backfill==nil,如直接构造的旧测试)或落库失败时仅告警,不阻塞调用方。
+func (o *platformOutput) saveBackfill(dps []model.DataPoint) {
+	if len(dps) == 0 || o.backfill == nil {
+		return
+	}
+	if err := o.backfill.Save(o.outputID, dps); err != nil {
+		slog.Error("smardaten-iot backfill save failed", "err", err)
+	}
+}
+
+// BackfillHealthy 实现 output.BackfillHealthy:仅在 MQTT 已连接时允许重放补传队列。
+func (o *platformOutput) BackfillHealthy() bool {
+	return o.client != nil && o.client.IsConnected()
 }
 
 // ---------- MQTT 连接 ----------
@@ -732,6 +761,7 @@ func (o *platformOutput) flush() {
 		if err := mqttutil.WaitToken(o.client.Publish(eventTopic, defaultQoS, false, data), mqttutil.PublishTimeout); err != nil {
 			o.SendStats.Failure(err)
 			slog.Error("publish property report", "device", deviceID, "topic", eventTopic, "err", err)
+			o.saveBackfill(points) // 上送失败,该批属性落库待续传
 			continue
 		}
 		o.SendStats.Success(time.Now())

@@ -2,6 +2,7 @@ package thingsboard
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -161,7 +162,7 @@ func TestPendingBufferCap(t *testing.T) {
 func TestNewWithReachableBroker(t *testing.T) {
 	b := mqtttest.StartSilent(t)
 	start := time.Now()
-	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "tb-test", AccessToken: "tok", QoS: 1}, nil)
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "tb-test", AccessToken: "tok", QoS: 1}, nil, "", nil)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -191,4 +192,67 @@ func TestRuntimeStatusPending(t *testing.T) {
 	if st.Connected || st.ConnectionOpen {
 		t.Fatal("nil client should report not connected")
 	}
+}
+
+// fakeBackfillSink 记录被保存到补传队列的点(断网补传测试用)。
+type fakeBackfillSink struct {
+	mu  sync.Mutex
+	dps []model.DataPoint
+}
+
+func (f *fakeBackfillSink) Save(_ string, dps []model.DataPoint) error {
+	f.mu.Lock()
+	f.dps = append(f.dps, dps...)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeBackfillSink) saved() []model.DataPoint {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]model.DataPoint(nil), f.dps...)
+}
+
+// TestFlushFailSavesToBackfill 上送失败(broker 半死,QoS1 无 PUBACK)时,
+// 该批遥测点应落库补传而非丢弃。
+func TestFlushFailSavesToBackfill(t *testing.T) {
+	b := mqtttest.StartSilent(t)
+	sink := &fakeBackfillSink{}
+	reportQuality := false
+	out, err := New(Config{
+		Broker:        "tcp://" + b.Addr,
+		ClientID:      "tb-bf",
+		AccessToken:   "tok",
+		QoS:           1,
+		ReportQuality: &reportQuality,
+		FlushInterval: "100ms",
+	}, nil, "out-1", sink)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer out.Close()
+
+	dp := model.DataPoint{DeviceID: "sensor-01", Point: "temperature", Value: 25.5, Timestamp: time.Now(), Quality: model.QualityGood}
+	if err := out.Publish(dp); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	// publish 有界等待 PublishTimeout(5s)后失败 → saveBackfill。给足余量。
+	waitForSaved(t, sink, 8*time.Second)
+	got := sink.saved()
+	if len(got) != 1 || got[0].DeviceID != "sensor-01" || got[0].Point != "temperature" {
+		t.Fatalf("saved points = %+v, want [sensor-01/temperature]", got)
+	}
+}
+
+func waitForSaved(t *testing.T, sink *fakeBackfillSink, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if len(sink.saved()) > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("points not saved to backfill within %v", timeout)
 }

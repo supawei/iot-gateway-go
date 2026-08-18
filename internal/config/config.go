@@ -27,6 +27,9 @@ type Config struct {
 	} `yaml:"auth"`
 	Storage struct {
 		SqlitePath string `yaml:"sqlitePath"`
+		// BackfillMax 是每个输出断网补传队列的最大条数;超过后淘汰最旧数据,
+		// 保证磁盘有界。<=0 用默认(backfill.DefaultMax)。
+		BackfillMax int `yaml:"backfillMax"`
 	} `yaml:"storage"`
 	Scheduler struct {
 		PoolSize int `yaml:"poolSize"`

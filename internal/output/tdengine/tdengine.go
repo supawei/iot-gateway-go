@@ -33,8 +33,11 @@ const (
 	// REST 执行 SQL 的路径;taosAdapter 默认监听 6041。
 	restSQLPath = "/rest/sql"
 
-	// httpTimeout 是单次 REST 请求超时;采集数据写入属可重试操作,失败由 flush 记录并丢弃。
+	// httpTimeout 是单次 REST 请求超时;采集数据写入属可重试操作,失败由 flush 落库补传。
 	httpTimeout = 10 * time.Second
+
+	// backfillBackoff 是失败后暂停重放补传队列的时长(最近一次上送错误距今超过该值才可重放)。
+	backfillBackoff = 30 * time.Second
 )
 
 // Config 是 TDengine 输出的配置(存 SQLite,经 Web UI 配置)。
@@ -65,7 +68,7 @@ func init() {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			return nil, fmt.Errorf("tdengine config: %w", err)
 		}
-		return New(cfg)
+		return New(cfg, bc.OutputID, bc.Backfill)
 	})
 }
 
@@ -75,6 +78,11 @@ type tdengineOutput struct {
 	user, pass    string
 	db, stable    string
 	flushInterval time.Duration
+
+	// 断网补传(见 docs/offline-backfill-design.md):outputID 为补传队列隔离键,
+	// backfill 为持久化队列(未接线时 nil,退化为"失败丢弃 + 告警")。
+	outputID string
+	backfill output.BackfillSink
 
 	// pending 缓冲待写入点位;flush 单 goroutine 串行消费,created 亦仅由其访问。
 	mu      sync.Mutex
@@ -91,7 +99,7 @@ type tdengineOutput struct {
 
 // New 构造 TDengine 输出:校验配置、建库建表(幂等)、启动 flusher goroutine。
 // 建库建表失败即返回错误(与 mqtt/thingsboard 在 New 时校验连接一致)。
-func New(cfg Config) (output.Output, error) {
+func New(cfg Config, outputID string, backfill output.BackfillSink) (output.Output, error) {
 	if cfg.URL == "" {
 		return nil, fmt.Errorf("tdengine url is required")
 	}
@@ -124,6 +132,8 @@ func New(cfg Config) (output.Output, error) {
 		db:            cfg.Database,
 		stable:        cfg.Stable,
 		flushInterval: flushInterval,
+		outputID:      outputID,
+		backfill:      backfill,
 		created:       make(map[string]bool),
 		done:          make(chan struct{}),
 	}
@@ -175,7 +185,7 @@ func (o *tdengineOutput) runFlusher() {
 }
 
 // flush 取走当前缓冲,按子表分组,每组先确保子表存在(幂等),再执行一条多行 INSERT。
-// 失败仅记录日志并丢弃该组(不重试、不阻塞采集侧),保持与其他输出的背压隔离语义一致。
+// 失败的数据经补传队列落库(断网续传),不再静默丢弃;未接线补传时保持旧行为(仅记日志)。
 func (o *tdengineOutput) flush() {
 	o.mu.Lock()
 	pending := o.pending
@@ -202,6 +212,7 @@ func (o *tdengineOutput) flush() {
 		if !o.created[child] {
 			if err := o.exec(createChildSQL(o.db, o.stable, child, k.deviceID, k.point)); err != nil {
 				slog.Error("tdengine create child table failed", "device", k.deviceID, "point", k.point, "err", err)
+				o.saveBackfill(groups[k]) // 建子表失败,该组落库待续传
 				continue
 			}
 			o.created[child] = true
@@ -209,10 +220,37 @@ func (o *tdengineOutput) flush() {
 		if err := o.exec(buildInsertSQL(o.db, child, groups[k])); err != nil {
 			o.SendStats.Failure(err)
 			slog.Error("tdengine insert failed", "device", k.deviceID, "point", k.point, "err", err)
+			o.saveBackfill(groups[k]) // INSERT 失败,该组落库待续传
 			continue
 		}
 		o.SendStats.Success(time.Now())
 	}
+}
+
+// saveBackfill 把无法写入的数据点持久化到补传队列(断网续传)。
+// 未接线补传(backfill==nil)或落库失败时仅告警,不阻塞 flush。
+func (o *tdengineOutput) saveBackfill(dps []model.DataPoint) {
+	if len(dps) == 0 || o.backfill == nil {
+		return
+	}
+	if err := o.backfill.Save(o.outputID, dps); err != nil {
+		slog.Error("tdengine backfill save failed", "err", err)
+	}
+}
+
+// BackfillHealthy 实现 output.BackfillHealthy:TDengine 为 HTTP 无长连接,
+// 以"最近上送是否恢复/持续错误"判定——从未失败、或失败后有成功上送、或距上次
+// 错误超过 backfillBackoff 时视为可重放(失败后自然退避,恢复后立即续传)。
+func (o *tdengineOutput) BackfillHealthy() bool {
+	_, lastSentAt, lastErr, lastErrAt := o.SendStats.Snapshot()
+	if lastErr == "" {
+		return true
+	}
+	if lastSentAt.After(lastErrAt) {
+		// 上次错误之后已有成功上送:连接已恢复,可立即重放。
+		return true
+	}
+	return time.Since(lastErrAt) > backfillBackoff
 }
 
 // RuntimeStatus 实现 output.StatusProvider:TDengine 为 HTTP 无长连接,Connected 恒 false,

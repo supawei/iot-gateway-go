@@ -167,7 +167,7 @@ func TestFlushResetsPendingCount(t *testing.T) {
 // 返回且不报错(非阻塞构造),这是「启动不卡」在 smardaten 的回归测试。
 func TestNewNonBlockingUnreachable(t *testing.T) {
 	start := time.Now()
-	out, err := New(Config{Broker: "tcp://192.0.2.1:1883", ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil, nil, nil)
+	out, err := New(Config{Broker: "tcp://192.0.2.1:1883", ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil, nil, nil, "", nil)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("New should not fail on unreachable broker, got %v", err)
@@ -186,7 +186,7 @@ func TestNewNonBlockingUnreachable(t *testing.T) {
 func TestNewWithReachableBroker(t *testing.T) {
 	b := mqtttest.StartSilent(t)
 	start := time.Now()
-	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil, nil, nil)
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil, nil, nil, "", nil)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("New failed: %v", err)

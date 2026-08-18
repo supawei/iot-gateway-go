@@ -3,10 +3,12 @@ package tdengine
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -157,7 +159,7 @@ func TestNewCreatesSchemaAndAuth(t *testing.T) {
 	srv := httptest.NewServer(m.handler())
 	defer srv.Close()
 
-	out, err := New(Config{URL: srv.URL, Username: "root", Password: "taosdata"})
+	out, err := New(Config{URL: srv.URL, Username: "root", Password: "taosdata"}, "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -181,7 +183,7 @@ func TestFlushInsertsGrouped(t *testing.T) {
 	srv := httptest.NewServer(m.handler())
 	defer srv.Close()
 
-	out, err := New(Config{URL: srv.URL})
+	out, err := New(Config{URL: srv.URL}, "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -218,7 +220,7 @@ func TestNewRejectsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := New(Config{URL: srv.URL}); err == nil {
+	if _, err := New(Config{URL: srv.URL}, "", nil); err == nil {
 		t.Fatal("New should return error when TDengine returns code != 0")
 	}
 }
@@ -235,5 +237,86 @@ func TestRuntimeStatusPending(t *testing.T) {
 	}
 	if st.Connected || st.ConnectionOpen {
 		t.Fatal("tdengine has no connection state")
+	}
+}
+
+// fakeBackfillSink 记录被保存到补传队列的点(断网补传测试用)。
+type fakeBackfillSink struct {
+	mu  sync.Mutex
+	dps []model.DataPoint
+}
+
+func (f *fakeBackfillSink) Save(_ string, dps []model.DataPoint) error {
+	f.mu.Lock()
+	f.dps = append(f.dps, dps...)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeBackfillSink) saved() []model.DataPoint {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]model.DataPoint(nil), f.dps...)
+}
+
+func waitFor(t *testing.T, cond func() bool, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("condition not met within %v", timeout)
+}
+
+// TestFlushInsertFailSavesToBackfill INSERT 失败时,该组数据点应落库补传而非丢弃。
+func TestFlushInsertFailSavesToBackfill(t *testing.T) {
+	// CREATE 语句成功,INSERT 语句返回错误。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.HasPrefix(string(body), "INSERT") {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"code": -1, "desc": "boom"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"code": 0, "rows": 0})
+	}))
+	defer srv.Close()
+
+	sink := &fakeBackfillSink{}
+	out, err := New(Config{URL: srv.URL, FlushInterval: "50ms"}, "out-1", sink)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer out.Close()
+
+	dp := model.DataPoint{DeviceID: "d1", Point: "p1", Value: 1.5, Timestamp: time.Now(), Quality: model.QualityGood}
+	if err := out.Publish(dp); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	waitFor(t, func() bool { return len(sink.saved()) >= 1 }, 3*time.Second)
+	got := sink.saved()
+	if len(got) != 1 || got[0].DeviceID != "d1" || got[0].Point != "p1" {
+		t.Fatalf("saved points = %+v, want [d1/p1]", got)
+	}
+}
+
+// TestBackfillHealthy 验证 TDengine 的健康门控:失败后退避,失败后有成功上送即恢复。
+func TestBackfillHealthy(t *testing.T) {
+	o := &tdengineOutput{}
+	if !o.BackfillHealthy() {
+		t.Fatal("BackfillHealthy should be true when no error yet")
+	}
+	o.SendStats.Failure(errors.New("boom"))
+	if o.BackfillHealthy() {
+		t.Fatal("BackfillHealthy should be false right after a send failure")
+	}
+	o.SendStats.Success(time.Now())
+	if !o.BackfillHealthy() {
+		t.Fatal("BackfillHealthy should be true after recovery (success after error)")
 	}
 }

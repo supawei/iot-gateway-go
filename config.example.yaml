@@ -12,6 +12,7 @@ http:
 
 storage:
   sqlitePath: "./gateway.db"
+  # backfillMax: 100000   # 断网补传队列上限(每条输出),超过淘汰最旧数据,防磁盘无限增长
 
 scheduler:
   poolSize: 16

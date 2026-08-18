@@ -14,11 +14,20 @@ import (
 // BuildContext 是构造输出所需的网关上下文:与输出自身配置无关的部分。
 // 由 main 注入(gatewayID 用于 topic/标识,Write 用于下行写回设备,Store 用于插件自动同步配置,
 // LatestValues 用于查询设备点位最新采集值,服务调用 get 等需要"设备当前属性值"的场景使用;
-// Probe 用于设备连通性诊断(DC1003),经 core.ProbeDevice 做真实协议往返)。
+// Probe 用于设备连通性诊断(DC1003),经 core.ProbeDevice 做真实协议往返;
+// OutputID 为当前构建实例的配置 ID(BuildSet 逐个注入),Backfill 为断网补传持久化)。
 type BuildContext struct {
 	GatewayID string
 	Write     WriteFunc
 	Store     StoreAccessor
+
+	// OutputID 是当前输出实例的配置 ID(BuildSet 在构建时逐条注入)。
+	// 输出用它作为补传队列的隔离键。
+	OutputID string
+
+	// Backfill 是断网补传持久化队列(见 docs/offline-backfill-design.md)。
+	// 未接线时为 nil,输出退化为"丢弃 + 告警"(与旧行为一致)。
+	Backfill BackfillSink
 
 	// LatestValues 查询设备全部点位的最新采集值快照(pointID -> value)。
 	// 由 main 基于 values.Registry 注入;实现可返回空 map(设备从未采集到有效值)。

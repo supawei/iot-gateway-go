@@ -77,7 +77,7 @@ func init() {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			return nil, fmt.Errorf("thingsboard config: %w", err)
 		}
-		return New(cfg, WriteFunc(bc.Write))
+		return New(cfg, WriteFunc(bc.Write), bc.OutputID, bc.Backfill)
 	})
 }
 
@@ -92,6 +92,11 @@ type thingsboardOutput struct {
 	flushInterval time.Duration
 
 	write WriteFunc // 下行写回调
+
+	// 断网补传(见 docs/offline-backfill-design.md):outputID 为补传队列隔离键,
+	// backfill 为持久化队列(未接线时 nil,退化为"丢弃 + 告警")。
+	outputID string
+	backfill output.BackfillSink
 
 	// 以下由 Publish / DeviceOnline / DeviceOffline / 下行 handler 与 flush 并发访问。
 	mu           sync.Mutex
@@ -119,7 +124,7 @@ type writeRequest struct {
 	rpcID    int64 // 非 0 时写完后发 RPC 应答(共享属性下行为 0)
 }
 
-func New(cfg Config, write WriteFunc) (output.Output, error) {
+func New(cfg Config, write WriteFunc, outputID string, backfill output.BackfillSink) (output.Output, error) {
 	if cfg.QoS == 0 {
 		cfg.QoS = defaultQoS
 	}
@@ -142,6 +147,8 @@ func New(cfg Config, write WriteFunc) (output.Output, error) {
 		reportQuality: reportQuality,
 		flushInterval: flushInterval,
 		write:         write,
+		outputID:      outputID,
+		backfill:      backfill,
 		pending:       make(map[string][]model.DataPoint),
 		qualities:     make(map[string]model.Quality),
 		connects:      make(map[string]bool),
@@ -202,14 +209,14 @@ func (o *thingsboardOutput) deviceID(name string) string {
 
 // Publish 把 DataPoint 缓冲进对应设备的待发队列,由 flusher 定时聚合上报。
 // 有值才入遥测队列;Quality 作为状态属性记录(同一设备取最近值)。
-// 缓冲达到上限时丢弃新点并告警,避免断连期间内存无界增长。
+// 缓冲达到上限时不再丢弃:启用补传时经持久化队列保存(断网续传),否则告警丢弃。
 func (o *thingsboardOutput) Publish(dp model.DataPoint) error {
+	var toSave []model.DataPoint
 	o.mu.Lock()
-	defer o.mu.Unlock()
 	name := o.deviceName(dp.DeviceID)
 	if dp.Value != nil {
 		if o.pendingCount >= maxPendingPoints {
-			slog.Warn("thingsboard pending buffer full, drop datapoint", "device", dp.DeviceID, "point", dp.Point)
+			toSave = append(toSave, dp)
 		} else {
 			o.pending[name] = append(o.pending[name], dp)
 			o.pendingCount++
@@ -217,6 +224,10 @@ func (o *thingsboardOutput) Publish(dp model.DataPoint) error {
 	}
 	if o.reportQuality {
 		o.qualities[name] = dp.Quality
+	}
+	o.mu.Unlock()
+	if len(toSave) > 0 {
+		o.saveBackfill(toSave)
 	}
 	return nil
 }
@@ -392,10 +403,12 @@ func (o *thingsboardOutput) flush() {
 		}
 		if err := o.ensureConnected(name); err != nil {
 			slog.Error("thingsboard connect failed", "device", name, "err", err)
+			o.saveBackfill(points) // 设备未上线,该批遥测落库待续传
 			continue
 		}
 		if err := o.publish(topicTelemetry, telemetryBatchPayload(name, points)); err != nil {
 			slog.Error("thingsboard publish telemetry failed", "device", name, "err", err)
+			o.saveBackfill(points) // 上送失败,该批遥测落库待续传
 		}
 	}
 	for name, q := range qualities {
@@ -430,6 +443,22 @@ func (o *thingsboardOutput) publish(topic string, payload interface{}) error {
 	}
 	o.SendStats.Success(time.Now())
 	return nil
+}
+
+// saveBackfill 把无法即时送出的数据点持久化到补传队列(断网续传)。
+// 未接线补传(backfill==nil,如直接构造的旧测试)或落库失败时仅告警,不阻塞调用方。
+func (o *thingsboardOutput) saveBackfill(dps []model.DataPoint) {
+	if len(dps) == 0 || o.backfill == nil {
+		return
+	}
+	if err := o.backfill.Save(o.outputID, dps); err != nil {
+		slog.Error("thingsboard backfill save failed", "err", err)
+	}
+}
+
+// BackfillHealthy 实现 output.BackfillHealthy:仅在 MQTT 已连接时允许重放补传队列。
+func (o *thingsboardOutput) BackfillHealthy() bool {
+	return o.client != nil && o.client.IsConnected()
 }
 
 // RuntimeStatus 实现 output.StatusProvider:报告 MQTT 连接态、内部待发缓冲与上送统计。
