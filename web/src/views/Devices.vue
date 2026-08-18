@@ -12,6 +12,28 @@ const DATA_TYPES = [
   'float32', 'float64', 'string',
 ]
 
+// 阈值过滤操作符
+const THRESHOLD_OPS = [
+  { value: 'gt', label: '>' },
+  { value: 'ge', label: '≥' },
+  { value: 'lt', label: '<' },
+  { value: 'le', label: '≤' },
+  { value: 'eq', label: '=' },
+  { value: 'ne', label: '≠' },
+  { value: 'between', label: '范围内' },
+  { value: 'outside', label: '范围外' },
+]
+
+// 聚合类型
+const AGG_TYPES = [
+  { value: 'avg', label: '均值 avg' },
+  { value: 'min', label: '最小 min' },
+  { value: 'max', label: '最大 max' },
+  { value: 'sum', label: '求和 sum' },
+  { value: 'count', label: '计数 count' },
+  { value: 'last', label: '末值 last' },
+]
+
 const list = ref([])
 const connections = ref([])
 const drivers = ref([])
@@ -78,6 +100,68 @@ function addPoint() {
 
 function removePoint(i) {
   form.points.splice(i, 1)
+}
+
+// ---- 点位边缘处理(过滤/聚合)----
+const procVisible = ref(false)
+const procTarget = ref(null) // 正在编辑的点位对象(form.points 里的元素,保存直接写回)
+const procForm = reactive({
+  filters: [],
+  aggregate: { enabled: false, type: 'avg', window: '10s', emitName: '' },
+})
+
+function openProc(p) {
+  procTarget.value = p
+  const pp = p.processing || {}
+  procForm.filters = (pp.filters || []).map((f) => ({ ...f }))
+  procForm.aggregate = {
+    enabled: !!pp.aggregate,
+    type: pp.aggregate?.type || 'avg',
+    window: pp.aggregate?.window || '10s',
+    emitName: pp.aggregate?.emitName || '',
+  }
+  procVisible.value = true
+}
+
+function addFilter() {
+  procForm.filters.push({ type: 'deadband', delta: 0 })
+}
+
+function removeFilter(i) {
+  procForm.filters.splice(i, 1)
+}
+
+// saveProc 把对话框内容写回点位对象(保存设备时才随 payload 提交)。
+function saveProc() {
+  const filters = procForm.filters
+    .filter((f) => f.type)
+    .map((f) => {
+      if (f.type === 'deadband') return { type: 'deadband', delta: Number(f.delta) || 0 }
+      if (f.type === 'quality') return { type: 'quality', dropBad: !!f.dropBad }
+      // threshold
+      const out = { type: 'threshold', op: f.op }
+      if (['gt', 'ge', 'lt', 'le', 'eq', 'ne'].includes(f.op)) {
+        out.value = Number(f.value) || 0
+      } else {
+        out.min = Number(f.min) || 0
+        out.max = Number(f.max) || 0
+      }
+      return out
+    })
+  const agg = procForm.aggregate
+  const aggregate = agg.enabled
+    ? { type: agg.type, window: agg.window || '10s', ...(agg.emitName ? { emitName: agg.emitName } : {}) }
+    : null
+  if (filters.length === 0 && !aggregate) {
+    procTarget.value.processing = undefined
+  } else {
+    procTarget.value.processing = {
+      ...(filters.length ? { filters } : {}),
+      ...(aggregate ? { aggregate } : {}),
+    }
+  }
+  procVisible.value = false
+  ElMessage.success('已保存,保存设备后生效')
 }
 
 // 节点浏览(OPC UA 等支持 Browse 的驱动):点位编辑时"浏览选择"NodeID。
@@ -150,6 +234,7 @@ function openEdit(row) {
   form.enabled = row.enabled
   form.points = (row.points ?? []).map((p) => ({
     name: p.name, address: p.address, dataType: p.dataType, scale: p.scale,
+    ...(p.processing ? { processing: JSON.parse(JSON.stringify(p.processing)) } : {}),
   }))
   paramsModel.value = modelFromValue(paramSchema.value, row.params)
   dialogVisible.value = true
@@ -172,6 +257,7 @@ async function save() {
     params,
     points: form.points.map((p) => ({
       name: p.name, address: p.address, dataType: p.dataType, scale: Number(p.scale) || 0,
+      ...(p.processing ? { processing: p.processing } : {}),
     })),
   }
   try {
@@ -420,6 +506,9 @@ onUnmounted(() => {
                 <el-option v-for="t in DATA_TYPES" :key="t" :label="t" :value="t" />
               </el-select>
               <el-input-number v-model="p.scale" :step="0.1" :controls="false" />
+              <el-button link :type="p.processing ? 'primary' : 'default'" @click="openProc(p)">
+                处理{{ p.processing ? '●' : '' }}
+              </el-button>
               <el-button link type="danger" @click="removePoint(i)">✕</el-button>
             </div>
             <el-button text type="primary" :icon="Plus" @click="addPoint">添加点位</el-button>
@@ -429,6 +518,64 @@ onUnmounted(() => {
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" @click="save">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 点位处理对话框(边缘计算:过滤/聚合) -->
+    <el-dialog v-model="procVisible" :title="`点位处理: ${procTarget?.name || ''}`" width="600px" destroy-on-close>
+      <div class="proc-tip">处理在边缘层生效:不满足过滤规则的点不北向上送;开启聚合后原始点进时间窗口,周期产出派生点。</div>
+      <el-form label-width="70px">
+        <el-form-item label="过滤规则">
+          <div style="width: 100%">
+            <div v-for="(f, fi) in procForm.filters" :key="fi" class="proc-filter-row">
+              <el-select v-model="f.type" style="width: 100px">
+                <el-option label="死区" value="deadband" />
+                <el-option label="阈值" value="threshold" />
+                <el-option label="质量" value="quality" />
+              </el-select>
+              <template v-if="f.type === 'deadband'">
+                <el-input-number v-model="f.delta" :step="0.1" :controls="false" style="width: 130px" placeholder="死区" />
+                <span class="proc-hint">变化 ≥ 死区才放行</span>
+              </template>
+              <template v-else-if="f.type === 'threshold'">
+                <el-select v-model="f.op" style="width: 110px">
+                  <el-option v-for="o in THRESHOLD_OPS" :key="o.value" :label="o.label" :value="o.value" />
+                </el-select>
+                <template v-if="['gt','ge','lt','le','eq','ne'].includes(f.op)">
+                  <el-input-number v-model="f.value" :step="0.1" :controls="false" style="width: 130px" placeholder="阈值" />
+                </template>
+                <template v-else>
+                  <el-input-number v-model="f.min" :step="0.1" :controls="false" style="width: 110px" placeholder="min" />
+                  <span>~</span>
+                  <el-input-number v-model="f.max" :step="0.1" :controls="false" style="width: 110px" placeholder="max" />
+                </template>
+              </template>
+              <template v-else>
+                <el-switch v-model="f.dropBad" />
+                <span class="proc-hint">丢弃 bad/uncertain 质量点</span>
+              </template>
+              <el-button link type="danger" @click="removeFilter(fi)">✕</el-button>
+            </div>
+            <el-button text type="primary" size="small" :icon="Plus" @click="addFilter">添加过滤</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="聚合">
+          <div style="width: 100%">
+            <el-switch v-model="procForm.aggregate.enabled" />
+            <span class="proc-hint">开启后原始点进窗口,按周期产出派生点</span>
+            <div v-if="procForm.aggregate.enabled" class="proc-agg-row">
+              <el-select v-model="procForm.aggregate.type" style="width: 130px">
+                <el-option v-for="t in AGG_TYPES" :key="t.value" :label="t.label" :value="t.value" />
+              </el-select>
+              <el-input v-model="procForm.aggregate.window" style="width: 110px" placeholder="10s/1m" />
+              <el-input v-model="procForm.aggregate.emitName" style="width: 170px" placeholder="派生点名(默认 p.avg)" />
+            </div>
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="procVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveProc">保存</el-button>
       </template>
     </el-dialog>
 
@@ -541,5 +688,28 @@ onUnmounted(() => {
   font-size: 11px;
   color: #909399;
   margin-left: 6px;
+}
+.proc-tip {
+  font-size: 12px;
+  color: #9aa1ac;
+  margin-bottom: 10px;
+}
+.proc-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.proc-agg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.proc-hint {
+  font-size: 12px;
+  color: #909399;
 }
 </style>

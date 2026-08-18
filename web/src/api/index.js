@@ -87,6 +87,8 @@ export const api = {
   // 状态
   listStatus: () => http.get('/status'),
   getDeviceValues: (id) => http.get(`/devices/${id}/values`),
+  // 边缘处理运行统计
+  getProcessingStatus: () => http.get('/processing/status'),
 
   // 网关设置
   getGateway: () => http.get('/gateway'),

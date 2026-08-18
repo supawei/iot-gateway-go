@@ -85,6 +85,8 @@ func NewScheduler(st *store.Store, dataPoints chan<- model.DataPoint, poolSize i
 
 func (s *Scheduler) Run(ctx context.Context) error {
 	s.baseCtx = ctx
+	changeCh, cancel := s.store.OnChange()
+	defer cancel()
 	if err := s.reload(); err != nil {
 		// 首次 reload 失败不退出调度器:等下一次 OnChange 重试(API 仍可修复配置)。
 		slog.Error("initial reload failed", "err", err)
@@ -94,7 +96,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			s.stopCollectors()
 			return ctx.Err()
-		case <-s.store.OnChange():
+		case <-changeCh:
 			if err := s.reload(); err != nil {
 				slog.Error("scheduler reload failed", "err", err)
 			}

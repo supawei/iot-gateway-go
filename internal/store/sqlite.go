@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	_ "modernc.org/sqlite"
 
@@ -35,6 +36,8 @@ CREATE TABLE IF NOT EXISTS point (
     address     TEXT NOT NULL,
     data_type   TEXT NOT NULL,
     scale       REAL NOT NULL DEFAULT 0,
+    processing  TEXT,
+    seq         INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (device_id, name),
     FOREIGN KEY (device_id) REFERENCES device(id) ON DELETE CASCADE
 );
@@ -76,10 +79,18 @@ const (
 // DefaultGatewayID 是首次启动预置的默认网关 ID(与旧 config.yaml 默认值一致)。
 const DefaultGatewayID = "iot-gateway"
 
+// isDuplicateColumn 判断 SQLite 报错是否为"重复添加已存在列"(幂等 ALTER 忽略)。
+func isDuplicateColumn(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate column name")
+}
+
 // Store 负责连接/设备/点位配置的持久化与变更通知。
 type Store struct {
-	db       *sql.DB
-	changeCh chan struct{}
+	db *sql.DB
+
+	mu   sync.Mutex
+	subs map[int]chan struct{} // 配置变更信号订阅者(多消费者:调度器/处理引擎)
+	next int
 }
 
 func Open(path string) (*Store, error) {
@@ -92,6 +103,16 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	// 开发期结构演进:为历史 point 表补 processing / seq 列(幂等;新库已含该列时报错忽略)。
+	// 见 docs/development-conventions.md(未发布不做版本化迁移)。
+	if _, err := db.Exec(`ALTER TABLE point ADD COLUMN processing TEXT`); err != nil && !isDuplicateColumn(err) {
+		db.Close()
+		return nil, fmt.Errorf("evolve point schema: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE point ADD COLUMN seq INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumn(err) {
+		db.Close()
+		return nil, fmt.Errorf("evolve point schema: %w", err)
+	}
 	// 预置默认网关设置(幂等):数据库为空时内置默认网关 ID。
 	if _, err := db.Exec(
 		`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`,
@@ -100,7 +121,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("bootstrap gateway settings: %w", err)
 	}
-	return &Store{db: db, changeCh: make(chan struct{}, 1)}, nil
+	return &Store{db: db, subs: make(map[int]chan struct{})}, nil
 }
 
 // dsnWithPragmas 为连接串附加并发相关的 PRAGMA：
@@ -126,15 +147,36 @@ func (s *Store) NewBackfillStore(max int) (*backfill.Store, error) {
 	return backfill.New(s.db, max)
 }
 
-// OnChange 返回配置变更信号 channel;写入后非阻塞通知,scheduler 据此热加载。
-func (s *Store) OnChange() <-chan struct{} {
-	return s.changeCh
+// OnChange 订阅配置变更信号:每次调用注册一个新的 buffered channel,
+// 写入后非阻塞通知(缓冲满即丢,语义同前);调用方退出时应调用返回的 cancel 退订。
+// 支持多消费者(调度器、处理引擎等各自订阅),见 docs/edge-computing-design.md §3.1。
+func (s *Store) OnChange() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	s.mu.Lock()
+	id := s.next
+	s.next++
+	s.subs[id] = ch
+	s.mu.Unlock()
+	cancel := func() {
+		s.mu.Lock()
+		delete(s.subs, id)
+		s.mu.Unlock()
+	}
+	return ch, cancel
 }
 
 func (s *Store) notify() {
-	select {
-	case s.changeCh <- struct{}{}:
-	default: // 已有待处理信号则丢弃,避免堆积
+	s.mu.Lock()
+	subs := make([]chan struct{}, 0, len(s.subs))
+	for _, ch := range s.subs {
+		subs = append(subs, ch)
+	}
+	s.mu.Unlock()
+	for _, ch := range subs {
+		select {
+		case ch <- struct{}{}:
+		default: // 已有待处理信号则丢弃,避免堆积
+		}
 	}
 }
 
@@ -224,7 +266,7 @@ func (s *Store) GetDevice(id string) (model.Device, error) {
 		return model.Device{}, fmt.Errorf("device %q not found", id)
 	}
 	device := devices[0]
-	device.Points, err = s.queryPoints("SELECT name, address, data_type, scale FROM point WHERE device_id = ?", id)
+	device.Points, err = s.queryPoints("SELECT name, address, data_type, scale, processing FROM point WHERE device_id = ? ORDER BY seq", id)
 	if err != nil {
 		return model.Device{}, err
 	}
@@ -268,9 +310,14 @@ func (s *Store) DeleteDevice(id string) error {
 }
 
 func (s *Store) AddPoint(deviceID string, point model.Point) error {
+	// 追加到末尾:seq 取该设备当前最大序号 +1,保持用户定义的点位顺序。
+	var maxSeq int
+	if err := s.db.QueryRow("SELECT COALESCE(MAX(seq), 0) FROM point WHERE device_id = ?", deviceID).Scan(&maxSeq); err != nil {
+		return fmt.Errorf("query point seq: %w", err)
+	}
 	_, err := s.db.Exec(
-		"INSERT INTO point (device_id, name, address, data_type, scale) VALUES (?, ?, ?, ?, ?)",
-		deviceID, point.Name, point.Address, string(point.DataType), point.Scale,
+		"INSERT INTO point (device_id, name, address, data_type, scale, processing, seq) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		deviceID, point.Name, point.Address, string(point.DataType), point.Scale, marshalProcessing(point.Processing), maxSeq+1,
 	)
 	if err != nil {
 		return fmt.Errorf("insert point: %w", err)
@@ -561,7 +608,7 @@ func (s *Store) queryPoints(query string, args ...any) ([]model.Point, error) {
 }
 
 func (s *Store) queryAllPoints() (map[string][]model.Point, error) {
-	rows, err := s.db.Query("SELECT device_id, name, address, data_type, scale FROM point")
+	rows, err := s.db.Query("SELECT device_id, name, address, data_type, scale, processing FROM point ORDER BY device_id, seq")
 	if err != nil {
 		return nil, fmt.Errorf("query all points: %w", err)
 	}
@@ -570,10 +617,12 @@ func (s *Store) queryAllPoints() (map[string][]model.Point, error) {
 	for rows.Next() {
 		var deviceID, dataType string
 		var point model.Point
-		if err := rows.Scan(&deviceID, &point.Name, &point.Address, &dataType, &point.Scale); err != nil {
+		var processing sql.NullString
+		if err := rows.Scan(&deviceID, &point.Name, &point.Address, &dataType, &point.Scale, &processing); err != nil {
 			return nil, fmt.Errorf("scan point: %w", err)
 		}
 		point.DataType = model.DataType(dataType)
+		point.Processing = unmarshalProcessing(processing.String)
 		result[deviceID] = append(result[deviceID], point)
 	}
 	return result, rows.Err()
@@ -609,11 +658,37 @@ func scanDevice(row rowScanner) (model.Device, error) {
 func scanPoint(row rowScanner) (model.Point, error) {
 	var point model.Point
 	var dataType string
-	if err := row.Scan(&point.Name, &point.Address, &dataType, &point.Scale); err != nil {
+	var processing sql.NullString
+	if err := row.Scan(&point.Name, &point.Address, &dataType, &point.Scale, &processing); err != nil {
 		return model.Point{}, fmt.Errorf("scan point: %w", err)
 	}
 	point.DataType = model.DataType(dataType)
+	point.Processing = unmarshalProcessing(processing.String)
 	return point, nil
+}
+
+// marshalProcessing 把点位处理配置序列化为 JSON 字符串;nil 返回空串(存 NULL)。
+func marshalProcessing(p *model.PointProcessing) string {
+	if p == nil {
+		return ""
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// unmarshalProcessing 反序列化点位处理配置;空串返回 nil。
+func unmarshalProcessing(s string) *model.PointProcessing {
+	if s == "" {
+		return nil
+	}
+	var p model.PointProcessing
+	if err := json.Unmarshal([]byte(s), &p); err != nil {
+		return nil
+	}
+	return &p
 }
 
 func saveDeviceTx(tx *sql.Tx, device model.Device) error {
@@ -636,13 +711,15 @@ func saveDeviceTx(tx *sql.Tx, device model.Device) error {
 	if _, err := tx.Exec("DELETE FROM point WHERE device_id = ?", device.ID); err != nil {
 		return fmt.Errorf("clear points: %w", err)
 	}
+	i := 0
 	for _, point := range device.Points {
 		if _, err := tx.Exec(
-			"INSERT INTO point (device_id, name, address, data_type, scale) VALUES (?, ?, ?, ?, ?)",
-			device.ID, point.Name, point.Address, string(point.DataType), point.Scale,
+			"INSERT INTO point (device_id, name, address, data_type, scale, processing, seq) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			device.ID, point.Name, point.Address, string(point.DataType), point.Scale, marshalProcessing(point.Processing), i,
 		); err != nil {
 			return fmt.Errorf("insert point %q: %w", point.Name, err)
 		}
+		i++
 	}
 	return nil
 }

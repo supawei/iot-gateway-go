@@ -7,6 +7,8 @@ import (
 
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output"
+	"iot-gateway-go/internal/processing"
+	"iot-gateway-go/internal/store"
 )
 
 // mockOutput 用 channel 收集发布的数据点,适配 pipeline 的异步分片发布。
@@ -38,14 +40,26 @@ func newTestManager(t *testing.T, outs ...output.Output) *output.Manager {
 	return mgr
 }
 
+// newTestEngine 构造直通处理引擎(内存 store,无任何点位处理规则,全部直通)。
+func newTestEngine(t *testing.T, out func(model.DataPoint)) *processing.Engine {
+	t.Helper()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return processing.NewEngine(st, out)
+}
+
 func TestRunPipeline(t *testing.T) {
 	dataPoints := make(chan model.DataPoint, 2)
 	mock := &mockOutput{ch: make(chan model.DataPoint, 4)}
 	mgr := newTestManager(t, mock)
+	proc := newTestEngine(t, mgr.Publish)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go RunPipeline(ctx, dataPoints, mgr)
+	go RunPipeline(ctx, dataPoints, proc, mgr)
 
 	dataPoints <- model.DataPoint{DeviceID: "d1", Point: "p1", Value: 1, Quality: model.QualityGood}
 	dataPoints <- model.DataPoint{DeviceID: "d1", Point: "p2", Value: 2, Quality: model.QualityGood}
@@ -66,10 +80,11 @@ func TestRunPipelineFanout(t *testing.T) {
 	out1 := &mockOutput{ch: make(chan model.DataPoint, 4)}
 	out2 := &mockOutput{ch: make(chan model.DataPoint, 4)}
 	mgr := newTestManager(t, out1, out2)
+	proc := newTestEngine(t, mgr.Publish)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go RunPipeline(ctx, dataPoints, mgr)
+	go RunPipeline(ctx, dataPoints, proc, mgr)
 
 	dataPoints <- model.DataPoint{DeviceID: "d1", Point: "p1", Value: 1, Quality: model.QualityGood}
 	for _, ch := range []chan model.DataPoint{out1.ch, out2.ch} {

@@ -8,6 +8,7 @@ const devices = ref([])
 const connections = ref([])
 const statuses = ref([])
 const gatewayId = ref('')
+const procStats = ref(null)
 const loading = ref(false)
 
 const statusMap = computed(() => {
@@ -21,16 +22,18 @@ const onlineCount = computed(() => statuses.value.filter((s) => s.online).length
 async function load() {
   loading.value = true
   try {
-    const [d, c, s, g] = await Promise.all([
+    const [d, c, s, g, p] = await Promise.all([
       api.listDevices(),
       api.listConnections(),
       api.listStatus(),
       api.getGateway(),
+      api.getProcessingStatus(),
     ])
     devices.value = d
     connections.value = c
     statuses.value = s
     gatewayId.value = g.id
+    procStats.value = p
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -97,6 +100,15 @@ onMounted(load)
           <el-button link type="primary" :icon="Edit" style="margin-left: 4px" @click="openEdit">改</el-button>
         </div>
         <div class="v mono" style="font-size: 22px">{{ gatewayId || '—' }}</div>
+      </div>
+      <div class="stat">
+        <div class="k">边缘处理</div>
+        <div class="v" style="font-size: 16px">
+          {{ procStats ? `${procStats.activeRules} 规则 / ${procStats.activeAggregators} 聚合` : '—' }}
+        </div>
+        <div class="d" style="font-size: 12px; color: #9aa1ac">
+          过滤 {{ procStats?.pointsFiltered ?? 0 }} · 聚合产出 {{ procStats?.pointsAggregated ?? 0 }}
+        </div>
       </div>
     </div>
 

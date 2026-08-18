@@ -1,8 +1,12 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
+
+	_ "modernc.org/sqlite"
 
 	"iot-gateway-go/internal/model"
 )
@@ -283,14 +287,140 @@ func TestGatewaySettings(t *testing.T) {
 func TestOnChange(t *testing.T) {
 	st := newTestStore(t)
 	saveSampleConnection(t, st)
+	ch, cancel := st.OnChange()
+	defer cancel()
 	select {
-	case <-st.OnChange():
+	case <-ch:
 	default:
 	}
 	st.SaveDevice(sampleDevice("d1"))
 	select {
-	case <-st.OnChange():
+	case <-ch:
 	default:
 		t.Fatal("expected change signal after save")
+	}
+}
+
+// TestOnChangeFanout 验证多订阅者各自都能收到同一变更信号(调度器/处理引擎并发消费)。
+func TestOnChangeFanout(t *testing.T) {
+	st := newTestStore(t)
+	saveSampleConnection(t, st)
+	ch1, cancel1 := st.OnChange()
+	defer cancel1()
+	ch2, cancel2 := st.OnChange()
+	defer cancel2()
+	st.SaveDevice(sampleDevice("d1"))
+	for _, ch := range []<-chan struct{}{ch1, ch2} {
+		select {
+		case <-ch:
+		default:
+			t.Fatal("expected change signal on all subscribers")
+		}
+	}
+	// 退订后不再收到。
+	cancel1()
+	st.DeleteDevice("d1")
+	select {
+	case <-ch1:
+		t.Fatal("canceled subscriber should not receive signal")
+	default:
+	}
+	select {
+	case <-ch2:
+	default:
+		t.Fatal("remaining subscriber should receive signal")
+	}
+}
+
+// TestPointProcessingRoundtrip 验证点位处理配置的持久化与读取往返。
+func TestPointProcessingRoundtrip(t *testing.T) {
+	st := newTestStore(t)
+	saveSampleConnection(t, st)
+
+	proc := &model.PointProcessing{
+		Filters: []model.Filter{
+			{Type: "deadband", Delta: 0.5},
+			{Type: "quality", DropBad: true},
+		},
+		Aggregate: &model.Aggregate{Type: "avg", Window: "10s", EmitName: "temp.avg"},
+	}
+	dev := sampleDevice("d1")
+	dev.Points[0].Processing = proc
+	if err := st.SaveDevice(dev); err != nil {
+		t.Fatalf("save device: %v", err)
+	}
+
+	got, err := st.GetDevice("d1")
+	if err != nil {
+		t.Fatalf("get device: %v", err)
+	}
+	if got.Points[0].Processing == nil {
+		t.Fatal("expected processing to roundtrip")
+	}
+	if len(got.Points[0].Processing.Filters) != 2 || got.Points[0].Processing.Filters[0].Delta != 0.5 {
+		t.Fatalf("filters roundtrip mismatch: %+v", got.Points[0].Processing)
+	}
+	if got.Points[0].Processing.Aggregate == nil || got.Points[0].Processing.Aggregate.EmitName != "temp.avg" {
+		t.Fatalf("aggregate roundtrip mismatch: %+v", got.Points[0].Processing)
+	}
+
+	// 无处理配置点位读出为 nil(兼容直通)。
+	dev2 := sampleDevice("d1")
+	dev2.Points[0].Processing = nil
+	if err := st.SaveDevice(dev2); err != nil {
+		t.Fatalf("save device without processing: %v", err)
+	}
+	got2, err := st.GetDevice("d1")
+	if err != nil {
+		t.Fatalf("get device: %v", err)
+	}
+	if got2.Points[0].Processing != nil {
+		t.Fatalf("expected nil processing, got %+v", got2.Points[0].Processing)
+	}
+}
+
+// TestLegacyDBSchemaEvolve 验证旧版(无 processing/seq 列)point 表经 Open 自动补列,
+// 旧数据可正常读取、新列可写(开发期结构演进,见 docs/development-conventions.md)。
+func TestLegacyDBSchemaEvolve(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	legacy := `
+CREATE TABLE connection (id TEXT PRIMARY KEY, name TEXT NOT NULL, driver TEXT NOT NULL, config TEXT NOT NULL);
+CREATE TABLE device (id TEXT PRIMARY KEY, name TEXT NOT NULL, connection_id TEXT NOT NULL, params TEXT NOT NULL DEFAULT '{}', interval_ms INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE point (device_id TEXT NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL, data_type TEXT NOT NULL, scale REAL NOT NULL DEFAULT 0, PRIMARY KEY (device_id, name));
+INSERT INTO connection (id,name,driver,config) VALUES ('c','c','modbus','{}');
+INSERT INTO device (id,name,connection_id,params,interval_ms,enabled) VALUES ('d','d','c','{}',1000,1);
+INSERT INTO point (device_id,name,address,data_type,scale) VALUES ('d','p','a','float32',0.1);
+`
+	if _, err := db.Exec(legacy); err != nil {
+		t.Fatalf("seed legacy db: %v", err)
+	}
+	db.Close()
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer st.Close()
+	dev, err := st.GetDevice("d")
+	if err != nil {
+		t.Fatalf("get device after evolve: %v", err)
+	}
+	if len(dev.Points) != 1 || dev.Points[0].Name != "p" {
+		t.Fatalf("points after evolve: %+v", dev.Points)
+	}
+	dev.Points[0].Processing = &model.PointProcessing{Aggregate: &model.Aggregate{Type: "avg", Window: "10s"}}
+	if err := st.SaveDevice(dev); err != nil {
+		t.Fatalf("save with processing after evolve: %v", err)
+	}
+	got, err := st.GetDevice("d")
+	if err != nil {
+		t.Fatalf("get after save processing: %v", err)
+	}
+	if got.Points[0].Processing == nil {
+		t.Fatalf("processing not persisted after evolve")
 	}
 }

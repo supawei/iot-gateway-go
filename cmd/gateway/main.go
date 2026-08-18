@@ -23,6 +23,7 @@ import (
 	"iot-gateway-go/internal/core"
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output"
+	"iot-gateway-go/internal/processing"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 	"iot-gateway-go/internal/values"
@@ -163,8 +164,12 @@ func main() {
 	defer stop()
 
 	// pipelineDone := make(chan struct{})
+	// 边缘处理层:过滤/聚合采集数据,配置挂在设备点位上,随 store.OnChange 热重载;
+	// 放行/派生点经 outputs.Publish 走与原始点相同的下游链路。见 docs/edge-computing-design.md。
+	proc := processing.NewEngine(st, outputs.Publish)
+	go proc.Run(ctx)
 	go func() {
-		core.RunPipeline(ctx, dataPoints, outputs)
+		core.RunPipeline(ctx, dataPoints, proc, outputs)
 		// close(pipelineDone)
 	}()
 
@@ -183,7 +188,9 @@ func main() {
 	if cfg.Auth.Enabled != nil {
 		authEnabled = *cfg.Auth.Enabled
 	}
-	mux.Handle("/api/", api.New(st, statusReg, valuesReg, authz, authEnabled, outputs).Routes())
+	apiSrv := api.New(st, statusReg, valuesReg, authz, authEnabled, outputs)
+	apiSrv.SetProcessing(proc)
+	mux.Handle("/api/", apiSrv.Routes())
 
 	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: mux}
 	go func() {

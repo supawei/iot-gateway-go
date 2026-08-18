@@ -16,6 +16,7 @@ import (
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output"
+	"iot-gateway-go/internal/processing"
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 	"iot-gateway-go/internal/values"
@@ -32,6 +33,7 @@ type API struct {
 	auth        *auth.Manager
 	authEnabled bool
 	outputs     *output.Manager // 输出配置变更后触发热重载;可为 nil(测试或未接线时跳过)
+	proc        *processing.Engine // 边缘处理层运行统计来源;可为 nil
 
 	// 会话级密码加密盒(懒初始化)
 	cryptoOnce sync.Once
@@ -41,6 +43,11 @@ type API struct {
 
 func New(st *store.Store, statusReg *status.Registry, valuesReg *values.Registry, authz *auth.Manager, authEnabled bool, outputs *output.Manager) *API {
 	return &API{store: st, status: statusReg, values: valuesReg, auth: authz, authEnabled: authEnabled, outputs: outputs}
+}
+
+// SetProcessing 接线边缘处理引擎(运行统计来源),由 main 装配。
+func (a *API) SetProcessing(proc *processing.Engine) {
+	a.proc = proc
 }
 
 // cryptoBox 懒初始化 RSA 密钥对;失败一次即永久记住。
@@ -101,6 +108,7 @@ func (a *API) Routes() *http.ServeMux {
 	// 网关设置(网关 ID,默认预置,管理员可改)
 	mux.HandleFunc("GET /api/v1/gateway", a.require(auth.ScopeGatewayRead, a.getGateway))
 	mux.HandleFunc("PUT /api/v1/gateway", a.require(auth.ScopeGatewayWrite, a.putGateway))
+	mux.HandleFunc("GET /api/v1/processing/status", a.require(auth.ScopeStatusRead, a.getProcessingStatus))
 	return mux
 }
 
@@ -556,6 +564,16 @@ func (a *API) getDeviceStatus(w http.ResponseWriter, r *http.Request) {
 // getDeviceValues 返回设备各点位的最新采集值(内存态快照);设备从未上报则返回空列表。
 func (a *API) getDeviceValues(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a.values.Get(r.PathValue("deviceId")))
+}
+
+// getProcessingStatus 返回边缘处理层运行统计(入站/放行/过滤/聚合计数、生效规则数)。
+// 未接线处理引擎(测试或旧构建)时返回零值。
+func (a *API) getProcessingStatus(w http.ResponseWriter, r *http.Request) {
+	if a.proc == nil {
+		writeJSON(w, http.StatusOK, processing.Stats{})
+		return
+	}
+	writeJSON(w, http.StatusOK, a.proc.Stats())
 }
 
 // listDrivers 返回已注册驱动及其配置 schema,供前端动态渲染表单。
