@@ -56,7 +56,7 @@ func TestConfigUnmarshalMixedTypes(t *testing.T) {
 
 // TestConfigUnmarshalMissingOptional 验证缺省字段能正常解析（空值）。
 func TestConfigUnmarshalMissingOptional(t *testing.T) {
-	raw := `{"broker":"tcp://x:1883","iotAppId":"abc","iotRsaKeyPath":"key.pem"}`
+	raw := `{"broker":"tcp://x:1883"}`
 	var cfg Config
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
@@ -91,5 +91,19 @@ func TestFlexIntInvalid(t *testing.T) {
 	}
 	if f != 0 {
 		t.Errorf("null should set value to 0, got %d", f)
+	}
+}
+
+// TestDefaultCredentials 验证内置的平台固定凭据（应用 ID + RSA 公钥）合法可用。
+func TestDefaultCredentials(t *testing.T) {
+	if defaultIotAppID == "" {
+		t.Fatal("defaultIotAppID must not be empty")
+	}
+	enc, err := encryptAppID(defaultIotAppID, []byte(defaultIotPublicKey))
+	if err != nil {
+		t.Fatalf("encryptAppID with default credentials failed: %v", err)
+	}
+	if enc == "" {
+		t.Fatal("encrypted appId must not be empty")
 	}
 }

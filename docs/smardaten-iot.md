@@ -91,8 +91,6 @@ smardaten-iot 与其他输出插件一样，配置存储在 SQLite 的 `output` 
   "username":    "admin",
   "password":    "admin",
   "clientId":    "gw-dev-manage",
-  "iotAppId":    "531b9a9d-95da-4263-9acf-5b6b99d91197",
-  "iotRsaKeyPath": "config/test_pub.key",
   "iotConfigPath": "config/application.json",
   "pubMode":      0,
   "maxPubTime":   60,
@@ -106,12 +104,12 @@ smardaten-iot 与其他输出插件一样，配置存储在 SQLite 的 `output` 
 | `username` | string | 否 | — | MQTT 用户名 |
 | `password` | string | 否 | — | MQTT 密码 |
 | `clientId` | string | 否 | — | MQTT Client ID |
-| `iotAppId` | string | 是 | — | 应用 ID，RSA 加密后作 HTTP `appId` header |
-| `iotRsaKeyPath` | string | 是 | — | RSA 公钥文件路径（PEM SPKI 格式） |
 | `iotConfigPath` | string | 否 | `config/application.json` | 平台下发的 application.json 落盘路径 |
 | `pubMode` | int | 否 | 0 | 上报模式：0=全属性刷新后上报, 1=变化死区上报 |
 | `maxPubTime` | int | 否 | 60 | 变化上报模式的最大周期间隔（秒） |
 | `flushInterval` | string | 否 | `"200ms"` | 数据聚合 flush 间隔 |
+
+> 平台固定凭据：应用 ID `531b9a9d-95da-4263-9acf-5b6b99d91197` 与 RSA 公钥（PEM SPKI）为 smardaten-iot 平台固定值，已内置在代码中（`internal/output/smardaten/http.go` 的 `defaultIotAppID` / `defaultIotPublicKey` 常量），不开放给用户配置。应用 ID 经 RSA 加密后作 HTTP `appId` header。
 
 ### 3.2 gatewayID 来源
 

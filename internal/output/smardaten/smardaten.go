@@ -39,8 +39,6 @@ type Config struct {
 	Password string `json:"password"` // MQTT 密码
 	ClientID string `json:"clientId"` // MQTT Client ID
 
-	IotAppID      string `json:"iotAppId"`      // 应用 ID（RSA 加密后作 HTTP appId header）
-	IotRsaKeyPath string `json:"iotRsaKeyPath"` // RSA 公钥路径（PEM SPKI）
 	IotConfigPath string `json:"iotConfigPath"` // application.json 落盘路径
 
 	PubMode       flexInt `json:"pubMode"`       // 0=及时上报, 1=变化上报
@@ -87,8 +85,6 @@ func init() {
 			{Name: "username", Label: "用户名", Type: output.FieldString},
 			{Name: "password", Label: "密码", Type: output.FieldPassword},
 			{Name: "clientId", Label: "Client ID", Type: output.FieldString, Placeholder: "gw-dev-manage"},
-			{Name: "iotAppId", Label: "应用 ID", Type: output.FieldString, Required: true, Hint: "RSA 加密后作 HTTP appId header"},
-			{Name: "iotRsaKeyPath", Label: "RSA 公钥路径", Type: output.FieldString, Required: true, Placeholder: "config/test_pub.key", Hint: "PEM SPKI 格式"},
 			{Name: "iotConfigPath", Label: "配置文件路径", Type: output.FieldString, Default: "config/application.json", Hint: "平台下发的 application.json 落盘路径"},
 			{Name: "pubMode", Label: "上报模式", Type: output.FieldEnum, Options: []string{"0", "1"}, Default: 0, Hint: "0=及时上报, 1=变化上报"},
 			{Name: "maxPubTime", Label: "最大上报间隔(秒)", Type: output.FieldInt, Default: 60, Hint: "变化上报模式用"},
@@ -143,12 +139,6 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 	if cfg.Broker == "" {
 		return nil, fmt.Errorf("smardaten-iot broker is required")
 	}
-	if cfg.IotAppID == "" {
-		return nil, fmt.Errorf("smardaten-iot iotAppId is required")
-	}
-	if cfg.IotRsaKeyPath == "" {
-		return nil, fmt.Errorf("smardaten-iot iotRsaKeyPath is required")
-	}
 	if cfg.IotConfigPath == "" {
 		cfg.IotConfigPath = "config/application.json"
 	}
@@ -169,8 +159,8 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 		flushInterval = d
 	}
 
-	// 构建 HTTP 下载器
-	downloader, err := newHTTPDownloader(cfg.IotAppID, cfg.IotRsaKeyPath)
+	// 构建 HTTP 下载器（应用 ID 与 RSA 公钥为平台固定值，内置常量）
+	downloader, err := newHTTPDownloader()
 	if err != nil {
 		return nil, fmt.Errorf("init http downloader: %w", err)
 	}

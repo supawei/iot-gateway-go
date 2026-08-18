@@ -19,6 +19,15 @@ import (
 const (
 	httpTimeout  = 30 * time.Second
 	maxRedirects = 10
+
+	// 平台固定凭据：应用 ID 与 RSA 公钥由 smardaten-iot 平台固定提供，直接内置，不开放配置。
+	defaultIotAppID = "531b9a9d-95da-4263-9acf-5b6b99d91197"
+	defaultIotPublicKey = `-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCynbPzQFTFCSQFQLv5EpyFKlfm
+bzSeBpsLCGW32DIfBQ3iU9/1fr9G9Ecf2mvGsI09J0aib36zcgNOx/7pO6CYNaF0
+GF/rngvLvMV13zukYYrP7FvpJnvvWA8gTRO+oUyrWyTr/A61bJA1w1oFiIx6UpmP
+YtQGOK2b8oC6aFL9IQIDAQAB
+-----END PUBLIC KEY-----`
 )
 
 // httpDownloader 负责 HTTP 下载，支持 RSA 鉴权。
@@ -28,11 +37,9 @@ type httpDownloader struct {
 }
 
 // newHTTPDownloader 构造 HTTP 下载器。
-// iotAppID: 明文应用 ID
-// rsaKeyPath: PEM SPKI 公钥路径
-// 启动时计算一次 appId 缓存，后续所有鉴权下载复用。
-func newHTTPDownloader(iotAppID, rsaKeyPath string) (*httpDownloader, error) {
-	encrypted, err := encryptAppID(iotAppID, rsaKeyPath)
+// 应用 ID 与 RSA 公钥为平台固定值（内置常量），启动时计算一次 appId 缓存，后续所有鉴权下载复用。
+func newHTTPDownloader() (*httpDownloader, error) {
+	encrypted, err := encryptAppID(defaultIotAppID, []byte(defaultIotPublicKey))
 	if err != nil {
 		return nil, fmt.Errorf("encrypt appId: %w", err)
 	}
@@ -154,13 +161,8 @@ func (d *httpDownloader) download(url string) ([]byte, error) {
 
 // encryptAppID 用 RSA 公钥加密 iotAppID，返回 base64 编码的密文。
 // 算法: RSA_PKCS1v15, 公钥格式: PEM SPKI
-func encryptAppID(iotAppID, rsaKeyPath string) (string, error) {
-	keyData, err := os.ReadFile(rsaKeyPath)
-	if err != nil {
-		return "", fmt.Errorf("read rsa key: %w", err)
-	}
-
-	block, _ := pem.Decode(keyData)
+func encryptAppID(iotAppID string, pubPEM []byte) (string, error) {
+	block, _ := pem.Decode(pubPEM)
 	if block == nil {
 		return "", fmt.Errorf("failed to decode PEM block")
 	}
