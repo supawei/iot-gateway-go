@@ -2,6 +2,7 @@ package smardaten
 
 import (
 	"encoding/json"
+	"strconv"
 	"testing"
 
 	"iot-gateway-go/internal/model"
@@ -31,8 +32,8 @@ const sampleApplicationJSON = `{
       "configuration": {"moduleType": "23", "functionCode": 3, "slaveId": 1, "port": 5020, "ip": "10.15.70.1", "timeOut": 1000}
     },
     "sensorList": [
-      {"pointId": "p-temp", "itemName": "2", "dataType": 1, "exDesc": {"caliMultiple": 1.0}},
-      {"pointId": "p-sw", "itemName": "1", "dataType": 1, "exDesc": {"caliMultiple": 1.0}}
+      {"pointId": "p-temp", "itemName": "2", "dataType": 1, "exDesc": {"caliMultiple": 1.0, "regExInterByte": 0, "regExOuterOrder": 0}},
+      {"pointId": "p-sw", "itemName": "1", "dataType": 1, "exDesc": {"caliMultiple": 1.0, "regExInterByte": 0, "regExOuterOrder": 0}}
     ]
   }]
 }`
@@ -90,6 +91,11 @@ func TestConvertDeviceAddressPrefix(t *testing.T) {
 	}
 	if params["slaveId"] != float64(1) {
 		t.Errorf("params.slaveId = %v, want 1", params["slaveId"])
+	}
+
+	// byteOrder 从传感器 exDesc 的 regExInterByte/regExOuterOrder 推导（0,0 → ABCD）
+	if params["byteOrder"] != "ABCD" {
+		t.Errorf("params.byteOrder = %v, want ABCD", params["byteOrder"])
 	}
 
 	// pollBlocks 应存在且 function=holding
@@ -195,4 +201,123 @@ func TestConvertDeviceNonModbus(t *testing.T) {
 	if device.Points[0].DataType != model.DataTypeDouble {
 		t.Errorf("dataType = %q, want float64", device.Points[0].DataType)
 	}
+}
+
+// TestConvertDeviceByteOrder 验证平台传感器 exDesc 的字节序开关
+// （regExInterByte/regExOuterOrder）映射为网关 Device.Params.byteOrder。
+func TestConvertDeviceByteOrder(t *testing.T) {
+	tests := []struct {
+		name       string
+		interByte  int
+		outerOrder int
+		want       string
+	}{
+		{"big endian", 0, 0, "ABCD"},
+		{"byte swap", 1, 0, "BADC"},
+		{"word swap", 0, 1, "CDAB"},
+		{"byte+word swap", 1, 1, "DCBA"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := PlatformController{
+				ControllerID: "c1",
+				Type:         "2", // modbus-tcp
+				Specs: PlatformControllerSpecs{
+					Enable:        1,
+					Period:        10,
+					Configuration: json.RawMessage(`{"moduleType":"2","functionCode":3,"slaveId":1}`),
+				},
+				SensorList: []PlatformSensor{
+					{PointID: "p1", ItemName: "0", DataType: 4, // float32 占 2 寄存器
+						ExDesc: json.RawMessage(`{"caliMultiple":1.0,"regExInterByte":` + itoa(tc.interByte) + `,"regExOuterOrder":` + itoa(tc.outerOrder) + `}`)},
+				},
+			}
+			dev := PlatformDevice{
+				DeviceID:     "d1",
+				ControllerID: "c1",
+				Properties:   []PlatformProperty{{Identifier: "v", PointID: "p1", DataType: 4}},
+			}
+			device, err := convertDevice(dev, ctrl)
+			if err != nil {
+				t.Fatalf("convertDevice: %v", err)
+			}
+			var params map[string]interface{}
+			if err := json.Unmarshal(device.Params, &params); err != nil {
+				t.Fatalf("unmarshal params: %v", err)
+			}
+			if params["byteOrder"] != tc.want {
+				t.Errorf("byteOrder = %v, want %s", params["byteOrder"], tc.want)
+			}
+		})
+	}
+}
+
+// TestConvertDeviceByteOrderMixed 验证同一控制器内传感器字节序不一致时取首个并告警。
+func TestConvertDeviceByteOrderMixed(t *testing.T) {
+	ctrl := PlatformController{
+		ControllerID: "c1",
+		Type:         "2",
+		Specs: PlatformControllerSpecs{
+			Enable:        1,
+			Configuration: json.RawMessage(`{"moduleType":"2","functionCode":3,"slaveId":1}`),
+		},
+		SensorList: []PlatformSensor{
+			{PointID: "p1", ItemName: "0", DataType: 4, ExDesc: json.RawMessage(`{"regExInterByte":1,"regExOuterOrder":0}`)}, // BADC
+			{PointID: "p2", ItemName: "2", DataType: 4, ExDesc: json.RawMessage(`{"regExInterByte":0,"regExOuterOrder":1}`)}, // CDAB
+		},
+	}
+	dev := PlatformDevice{
+		DeviceID:     "d1",
+		ControllerID: "c1",
+		Properties: []PlatformProperty{
+			{Identifier: "v1", PointID: "p1", DataType: 4},
+			{Identifier: "v2", PointID: "p2", DataType: 4},
+		},
+	}
+	device, err := convertDevice(dev, ctrl)
+	if err != nil {
+		t.Fatalf("convertDevice: %v", err)
+	}
+	var params map[string]interface{}
+	if err := json.Unmarshal(device.Params, &params); err != nil {
+		t.Fatalf("unmarshal params: %v", err)
+	}
+	if params["byteOrder"] != "BADC" {
+		t.Errorf("byteOrder = %v, want BADC (first sensor)", params["byteOrder"])
+	}
+}
+
+// TestConvertDeviceByteOrderMissing 验证传感器无字节序配置时不写 byteOrder（网关默认 ABCD）。
+func TestConvertDeviceByteOrderMissing(t *testing.T) {
+	ctrl := PlatformController{
+		ControllerID: "c1",
+		Type:         "2",
+		Specs: PlatformControllerSpecs{
+			Enable:        1,
+			Configuration: json.RawMessage(`{"moduleType":"2","functionCode":3,"slaveId":1}`),
+		},
+		SensorList: []PlatformSensor{
+			{PointID: "p1", ItemName: "0", DataType: 1, ExDesc: json.RawMessage(`{"caliMultiple":1.0}`)},
+		},
+	}
+	dev := PlatformDevice{
+		DeviceID:     "d1",
+		ControllerID: "c1",
+		Properties:   []PlatformProperty{{Identifier: "v", PointID: "p1", DataType: 1}},
+	}
+	device, err := convertDevice(dev, ctrl)
+	if err != nil {
+		t.Fatalf("convertDevice: %v", err)
+	}
+	var params map[string]interface{}
+	if err := json.Unmarshal(device.Params, &params); err != nil {
+		t.Fatalf("unmarshal params: %v", err)
+	}
+	if _, ok := params["byteOrder"]; ok {
+		t.Errorf("byteOrder should be absent when sensors have no byte order config, got %v", params["byteOrder"])
+	}
+}
+
+func itoa(n int) string {
+	return strconv.Itoa(n)
 }

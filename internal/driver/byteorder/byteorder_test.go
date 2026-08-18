@@ -91,3 +91,25 @@ func TestRegistersUint32ConsistentWithBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestFromSwaps(t *testing.T) {
+	tests := []struct {
+		interByte  int
+		outerOrder int
+		want       Order
+	}{
+		{0, 0, ABCD},
+		{1, 0, BADC},
+		{0, 1, CDAB},
+		{1, 1, DCBA},
+		// 非 0/1 输入按 1 处理
+		{2, 0, BADC},
+		{0, 9, CDAB},
+		{-1, -1, DCBA},
+	}
+	for _, tc := range tests {
+		if got := FromSwaps(tc.interByte, tc.outerOrder); got != tc.want {
+			t.Fatalf("FromSwaps(%d,%d)=%q want %q", tc.interByte, tc.outerOrder, got, tc.want)
+		}
+	}
+}

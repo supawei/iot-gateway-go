@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"iot-gateway-go/internal/driver/byteorder"
 	"iot-gateway-go/internal/model"
 )
 
@@ -440,6 +441,56 @@ func scaleOf(sensor PlatformSensor) float64 {
 	return ex.CaliMultiple
 }
 
+// byteOrderOfSensors 从控制器传感器列表推导设备级字节序。
+// 平台按传感器（sensorList[].exDesc.regExInterByte/regExOuterOrder）配置字节序，
+// 网关按设备级 Device.Params.byteOrder 承载。多个传感器配置一致时取该值；
+// 不一致时取首个并告警（设备级承载无法表达同一设备内多种字节序，典型场景各传感器一致）。
+func byteOrderOfSensors(ctrl PlatformController) (string, bool) {
+	distinct := make(map[byteorder.Order]bool)
+	var first byteorder.Order
+	found := false
+	for _, sensor := range ctrl.SensorList {
+		if len(sensor.ExDesc) == 0 {
+			continue
+		}
+		var ex struct {
+			RegExInterByte  *int `json:"regExInterByte"`
+			RegExOuterOrder *int `json:"regExOuterOrder"`
+		}
+		if err := json.Unmarshal(sensor.ExDesc, &ex); err != nil {
+			continue
+		}
+		// 两个开关都未配置 → 该传感器无字节序配置,跳过
+		if ex.RegExInterByte == nil && ex.RegExOuterOrder == nil {
+			continue
+		}
+		interByte, outerOrder := 0, 0
+		if ex.RegExInterByte != nil {
+			interByte = *ex.RegExInterByte
+		}
+		if ex.RegExOuterOrder != nil {
+			outerOrder = *ex.RegExOuterOrder
+		}
+		order := byteorder.FromSwaps(interByte, outerOrder)
+		if !found {
+			first = order
+			found = true
+		}
+		distinct[order] = true
+	}
+	if !found {
+		return "", false
+	}
+	if len(distinct) > 1 {
+		orders := make([]string, 0, len(distinct))
+		for o := range distinct {
+			orders = append(orders, string(o))
+		}
+		slog.Warn("sensors have mixed byte orders, device byteOrder uses first sensor", "controllerId", ctrl.ControllerID, "orders", orders)
+	}
+	return string(first), true
+}
+
 // convertDeviceParams 从 controller configuration 提取设备级参数。
 func convertDeviceParams(ctrl PlatformController, points []model.Point) map[string]interface{} {
 	params := make(map[string]interface{})
@@ -452,6 +503,11 @@ func convertDeviceParams(ctrl PlatformController, points []model.Point) map[stri
 	// slaveId：从 controller 级移到 device 级
 	if slaveID, ok := getInt(raw, "slaveId"); ok {
 		params["slaveId"] = slaveID
+	}
+
+	// byteOrder：从传感器 exDesc 的字节序开关推导设备级字节序（modbus 专用）
+	if order, ok := byteOrderOfSensors(ctrl); ok {
+		params["byteOrder"] = order
 	}
 
 	// pollBlocks：从 functionCode + sensorList 计算

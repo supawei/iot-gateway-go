@@ -361,6 +361,7 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
     └─ devices[].properties + controllers[].sensorList
             ▼ 按 deviceId 匹配控制器 → 构建 Device
             ▼ slaveId 从 controller config 移到 Device.Params
+            ▼ exDesc.regExInterByte/regExOuterOrder → Device.Params.byteOrder
             ▼ functionCode → pollBlocks（合并连续地址）
             ▼ Device{ID, Name, ConnectionID, Params, Points} → store.SaveDevice()
 ```
@@ -375,6 +376,7 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
 | `specs.configuration.timeOut` | `Connection.Config.timeout` | 毫秒→duration 字符串 |
 | `specs.configuration.ip+port` | `Connection.Config.address/endpoint` | 拼接 |
 | `specs.configuration.slaveId` | `Device.Params.slaveId` | 跨层移动（一控制器多从站） |
+| `sensorList[].exDesc.regExInterByte` / `regExOuterOrder` | `Device.Params.byteOrder` | 两开关组合→ABCD/BADC/CDAB/DCBA（字内字节交换 / 字序交换） |
 | `specs.configuration.functionCode` | `Device.Params.pollBlocks[].function` | 1→coil, 2→discrete, 3→holding, 4→input |
 | `sensorList[].pointId` | `Point.Name` | 直接（与平台上报 key 一致） |
 | `sensorList[].itemName` | `Point.Address` | 直接 |

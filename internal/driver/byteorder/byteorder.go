@@ -37,6 +37,29 @@ func Parse(s string) (Order, error) {
 	}
 }
 
+// FromSwaps 从"字内字节交换"(interByte)与"字序交换"(outerOrder)两个布尔推导
+// Modbus 字节序:(0,0)=ABCD,(1,0)=BADC,(0,1)=CDAB,(1,1)=DCBA。
+// 平台/参考实现常用这两个开关表达寄存器数据的字节序,非 0 输入按 1 处理。
+func FromSwaps(interByte, outerOrder int) Order {
+	ib, oo := 0, 0
+	if interByte != 0 {
+		ib = 1
+	}
+	if outerOrder != 0 {
+		oo = 1
+	}
+	switch {
+	case ib == 1 && oo == 0:
+		return BADC
+	case ib == 0 && oo == 1:
+		return CDAB
+	case ib == 1 && oo == 1:
+		return DCBA
+	default:
+		return ABCD
+	}
+}
+
 // Perm 返回将 wire 4 字节 [b0 b1 b2 b3](寄存器 N=[b0 b1],N+1=[b2 b3])按 order
 // 重排为逻辑大端序列的置换。该置换自逆(应用两次复原),故解码与编码共用。
 func Perm(order Order) [4]int {
