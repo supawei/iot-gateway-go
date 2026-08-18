@@ -3,6 +3,11 @@ package smardaten
 import (
 	"encoding/json"
 	"testing"
+	"time"
+
+	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/output/mqtttest"
+	"iot-gateway-go/internal/output/mqttutil"
 )
 
 // TestConfigUnmarshalMixedTypes 验证 Config 能同时接受数字和字符串形式的配置值。
@@ -106,4 +111,85 @@ func TestDefaultCredentials(t *testing.T) {
 	if enc == "" {
 		t.Fatal("encrypted appId must not be empty")
 	}
+}
+
+// TestPendingBufferCap 待上报缓冲达到全局上限后丢弃新点,内存有界(断连场景兜底)。
+func TestPendingBufferCap(t *testing.T) {
+	o := &platformOutput{
+		topics:  newTopicMapping(),
+		pending: make(map[string][]model.DataPoint),
+	}
+	o.topics.buildFrom(&ApplicationConfig{Devices: []PlatformDevice{{DeviceID: "d1"}}})
+
+	dp := model.DataPoint{DeviceID: "d1", Point: "p", Value: 1.0, Timestamp: time.Now()}
+	for i := 0; i < maxPendingPoints+10; i++ {
+		o.Publish(dp)
+	}
+	if o.pendingCount != maxPendingPoints {
+		t.Fatalf("pendingCount = %d, want %d", o.pendingCount, maxPendingPoints)
+	}
+	if len(o.pending["d1"]) != maxPendingPoints {
+		t.Fatalf("pending[d1] = %d, want %d", len(o.pending["d1"]), maxPendingPoints)
+	}
+}
+
+// TestFlushResetsPendingCount flush 换出缓冲后计数归零,后续 Publish 可继续入队。
+func TestFlushResetsPendingCount(t *testing.T) {
+	o := &platformOutput{
+		topics:      newTopicMapping(),
+		pending:     make(map[string][]model.DataPoint),
+		connects:    make(map[string]bool),
+		disconnects: make(map[string]bool),
+		connected:   make(map[string]bool),
+	}
+	// d1 无 post 事件→eventTopic 为空→flush 跳过发布,不会触碰 nil client。
+	o.topics.buildFrom(&ApplicationConfig{Devices: []PlatformDevice{{DeviceID: "d1"}}})
+
+	dp := model.DataPoint{DeviceID: "d1", Point: "p", Value: 1.0, Timestamp: time.Now()}
+	o.Publish(dp)
+	o.flush()
+	if o.pendingCount != 0 {
+		t.Fatalf("pendingCount after flush = %d, want 0", o.pendingCount)
+	}
+	o.Publish(dp)
+	if o.pendingCount != 1 {
+		t.Fatalf("pendingCount after re-publish = %d, want 1", o.pendingCount)
+	}
+}
+
+// TestNewNonBlockingUnreachable broker 不可达(黑洞地址)时,New 必须在 ConnectProbe 附近
+// 返回且不报错(非阻塞构造),这是「启动不卡」在 smardaten 的回归测试。
+func TestNewNonBlockingUnreachable(t *testing.T) {
+	start := time.Now()
+	out, err := New(Config{Broker: "tcp://192.0.2.1:1883", ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("New should not fail on unreachable broker, got %v", err)
+	}
+	if out == nil {
+		t.Fatal("New returned nil output")
+	}
+	if elapsed > mqttutil.ConnectProbe+time.Second {
+		t.Fatalf("New blocked for %v, want ≤ %v+1s", elapsed, mqttutil.ConnectProbe)
+	}
+	out.Close()
+}
+
+// TestNewWithReachableBroker broker 可达(静默 broker 正常回 CONNACK)时,OnConnect 会在
+// Connect 内同步触发;若 client 尚未赋值会 nil 解引用 panic。此测试守护该时序回归。
+func TestNewWithReachableBroker(t *testing.T) {
+	b := mqtttest.StartSilent(t)
+	start := time.Now()
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	if out == nil {
+		t.Fatal("New returned nil output")
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("New took %v, want fast (subscribe runs in background)", elapsed)
+	}
+	out.Close()
 }

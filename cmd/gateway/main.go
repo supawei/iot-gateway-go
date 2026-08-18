@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -178,7 +177,7 @@ func fatal(msg string, args ...any) {
 }
 
 // buildOutputs 返回输出管理器的构建函数:每次重载都从 SQLite 读最新网关 ID 与输出配置,
-// 逐个经 registry 构造为 Output 实例。任一输出构建失败即整体失败并关闭已构建部分,
+// 经 output.BuildSet 逐个构建。单个输出失败仅跳过(失败隔离),全失败才返回错误,
 // 由 Manager 保留旧输出(原子替换语义)。
 func buildOutputs(st *store.Store, write output.WriteFunc) output.BuildFunc {
 	return func() ([]output.Output, error) {
@@ -191,20 +190,6 @@ func buildOutputs(st *store.Store, write output.WriteFunc) output.BuildFunc {
 		if err != nil {
 			return nil, err
 		}
-		result := make([]output.Output, 0, len(configs))
-		for _, o := range configs {
-			if !o.Enabled {
-				continue
-			}
-			out, err := output.Build(bc, o.Type, o.Config)
-			if err != nil {
-				for _, built := range result {
-					built.Close()
-				}
-				return nil, fmt.Errorf("build output %q: %w", o.ID, err)
-			}
-			result = append(result, out)
-		}
-		return result, nil
+		return output.BuildSet(bc, configs)
 	}
 }

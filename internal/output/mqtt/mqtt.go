@@ -9,6 +9,7 @@ import (
 
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output"
+	"iot-gateway-go/internal/output/mqttutil"
 )
 
 const (
@@ -59,15 +60,14 @@ func New(cfg Config, gatewayID string) (output.Output, error) {
 	opts := pahomqtt.NewClientOptions()
 	opts.AddBroker(cfg.Broker)
 	opts.SetClientID(cfg.ClientID)
-	opts.SetAutoReconnect(true)
 	if cfg.Username != "" {
 		opts.SetUsername(cfg.Username)
 		opts.SetPassword(cfg.Password)
 	}
+	mqttutil.ApplyResilience(opts)
 	client := pahomqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		return nil, fmt.Errorf("mqtt connect: %w", token.Error())
-	}
+	// 非阻塞连接:broker 不可达时不再阻塞构建,由 ConnectRetry 后台自动重连兜底。
+	mqttutil.ConnectNonBlocking(client, "mqtt")
 	return &mqttOutput{client: client, gatewayID: gatewayID, qos: cfg.QoS}, nil
 }
 
@@ -77,9 +77,8 @@ func (m *mqttOutput) Publish(dp model.DataPoint) error {
 	if err != nil {
 		return fmt.Errorf("marshal datapoint: %w", err)
 	}
-	token := m.client.Publish(topic, m.qos, false, payload)
-	token.Wait()
-	return token.Error()
+	// 有界等待:半死 broker 时最多阻塞 PublishTimeout 后返回错误,绝不永久卡死发布 goroutine。
+	return mqttutil.WaitToken(m.client.Publish(topic, m.qos, false, payload), mqttutil.PublishTimeout)
 }
 
 func (m *mqttOutput) Close() error {

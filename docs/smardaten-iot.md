@@ -453,7 +453,7 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
 | 问题 | 原因 | 修复 |
 |---|---|---|
 | `cannot unmarshal string into Config.pubMode of type int` | Web UI FieldEnum 发字符串，Config 字段是 int | 引入 `flexInt` 类型（数字/字符串/null 均可解析） |
-| 新增输出后网关不响应（HTTP 挂起） | MQTT `Connect()` 无超时，broker 不可达时阻塞 | `SetConnectTimeout(5s)` |
+| 新增输出后网关不响应（HTTP 挂起） | MQTT `Connect()` 无超时，broker 不可达时阻塞 | 完整方案见 [mqtt-resilience-design.md](mqtt-resilience-design.md)：非阻塞连接 + 后台自动重连 + 有界发布等待（早期的 `SetConnectTimeout(5s)` 仅限制单次拨号，未解决 `ConnectRetry(true)` 下 `token.Wait()` 的无限阻塞，已由该改造彻底修复） |
 | 更新网关 ID 报 `connection lost before Subscribe completed` | 重载时新旧连接 clientID 相同，broker 踢旧连接 | clientID 改用 gatewayID 生成，重载时新旧唯一 |
 
 ### 11.4 简化实现说明

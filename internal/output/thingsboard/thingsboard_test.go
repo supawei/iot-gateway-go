@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/output/mqtttest"
 )
 
 func TestDeviceName(t *testing.T) {
@@ -135,4 +136,41 @@ func TestHandleRPCDownlinkIgnoresReply(t *testing.T) {
 		t.Fatalf("rpc reply should be ignored, got %+v", req)
 	default:
 	}
+}
+
+// TestPendingBufferCap 待上报缓冲达到全局上限后丢弃新点,内存有界(断连场景兜底)。
+func TestPendingBufferCap(t *testing.T) {
+	o := &thingsboardOutput{
+		pending: make(map[string][]model.DataPoint),
+	}
+	dp := model.DataPoint{DeviceID: "sensor-01", Point: "temperature", Value: 25.5, Timestamp: time.Now()}
+	for i := 0; i < maxPendingPoints+10; i++ {
+		o.Publish(dp)
+	}
+	if o.pendingCount != maxPendingPoints {
+		t.Fatalf("pendingCount = %d, want %d", o.pendingCount, maxPendingPoints)
+	}
+	if len(o.pending["sensor-01"]) != maxPendingPoints {
+		t.Fatalf("pending[sensor-01] = %d, want %d", len(o.pending["sensor-01"]), maxPendingPoints)
+	}
+}
+
+// TestNewWithReachableBroker broker 可达(静默 broker 正常回 CONNACK)时,OnConnect 会在
+// Connect 内同步触发并调用 onConnectSubscribe;若 client 尚未赋值会 nil 解引用 panic。
+// 此测试守护该时序回归:New 应快速返回且不 panic。
+func TestNewWithReachableBroker(t *testing.T) {
+	b := mqtttest.StartSilent(t)
+	start := time.Now()
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "tb-test", AccessToken: "tok", QoS: 1}, nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	if out == nil {
+		t.Fatal("New returned nil output")
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("New took %v, want fast (subscribe runs in background)", elapsed)
+	}
+	out.Close()
 }

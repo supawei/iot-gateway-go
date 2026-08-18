@@ -14,6 +14,7 @@ import (
 
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output"
+	"iot-gateway-go/internal/output/mqttutil"
 )
 
 const (
@@ -25,6 +26,10 @@ const (
 	defaultFlushInterval = 200 * time.Millisecond
 	defaultMaxPubTime    = 60
 	writeTimeout         = 5 * time.Second
+
+	// maxPendingPoints 待上报缓冲的全局上限:断连期间 flush 仍持续灌入时,
+	// 超过上限丢弃新点并告警,避免内存无界增长(正常时 flush 每 200ms 清空)。
+	maxPendingPoints = 8192
 
 	// pubMode
 	pubModeTimely = 0 // 全属性刷新后上报
@@ -118,9 +123,10 @@ type platformOutput struct {
 	maxPubTime int // 秒
 
 	// 数据缓冲
-	mu          sync.Mutex
-	pending     map[string][]model.DataPoint  // 待上报数据点
-	lastValues  map[string]map[string]float64 // deviceID -> pointID -> lastValue (变化上报用)
+	mu           sync.Mutex
+	pending      map[string][]model.DataPoint  // 待上报数据点
+	pendingCount int                           // 待上报数据点总数(上限 maxPendingPoints)
+	lastValues   map[string]map[string]float64 // deviceID -> pointID -> lastValue (变化上报用)
 	lastPubTime map[string]time.Time          // deviceID -> 上次上报时间
 	connects    map[string]bool               // 待发送 connect 的设备
 	disconnects map[string]bool               // 待发送 disconnect 的设备
@@ -165,17 +171,10 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 		return nil, fmt.Errorf("init http downloader: %w", err)
 	}
 
-	// 构建 MQTT 连接
-	client, err := connectMQTT(cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, gatewayID)
-	if err != nil {
-		return nil, fmt.Errorf("mqtt connect: %w", err)
-	}
-
 	o := &platformOutput{
 		gatewayID:     gatewayID,
 		write:         write,
 		store:         store,
-		client:        client,
 		qos:           defaultQoS,
 		cfg:           cfg,
 		topics:        newTopicMapping(),
@@ -192,14 +191,12 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 		done:          make(chan struct{}),
 	}
 
-	// 尝试加载本地 application.json
-	o.loadConfig()
+	// 构建 MQTT 连接（非阻塞）：broker 不可达时不阻塞 New，由 ConnectRetry 后台自动重连兜底。
+	// 订阅迁入 OnConnect：连接（含重连）建立后重新订阅全部 topic。
+	connectMQTT(o, cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, gatewayID)
 
-	// 订阅平台 topic
-	if err := o.subscribeAll(); err != nil {
-		client.Disconnect(uint(disconnectQuiesce / time.Millisecond))
-		return nil, fmt.Errorf("subscribe platform topics: %w", err)
-	}
+	// 尝试加载本地 application.json（内部会重订阅动态服务 topic；未连接时仅记日志）
+	o.loadConfig()
 
 	o.wg.Add(1)
 	go o.runFlusher()
@@ -208,6 +205,7 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 }
 
 // Publish 缓冲 DataPoint，由 flusher 定时聚合上报。
+// 缓冲达到上限时丢弃新点并告警，避免断连期间内存无界增长。
 func (o *platformOutput) Publish(dp model.DataPoint) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -223,7 +221,13 @@ func (o *platformOutput) Publish(dp model.DataPoint) error {
 		return nil
 	}
 
+	if o.pendingCount >= maxPendingPoints {
+		slog.Warn("smardaten pending buffer full, drop datapoint", "device", deviceID, "point", dp.Point)
+		return nil
+	}
+
 	o.pending[deviceID] = append(o.pending[deviceID], dp)
+	o.pendingCount++
 	return nil
 }
 
@@ -260,9 +264,12 @@ func (o *platformOutput) Close() error {
 
 // ---------- MQTT 连接 ----------
 
-// connectMQTT 建立到平台的 MQTT 连接，broker 为完整地址（含协议与端口）。
+// connectMQTT 建立到平台的 MQTT 连接并赋给 o.client，broker 为完整地址（含协议与端口）。
 // 当前仅支持 MQTT 3.1.1 协议。
-func connectMQTT(broker, clientID, username, password, gatewayID string) (pahomqtt.Client, error) {
+// 非阻塞：连接失败/未就绪由 ConnectRetry 后台无限重试兜底，不会阻塞调用方；
+// 订阅迁入 OnConnect：每次连接（含重连）建立后重新订阅全部 topic。
+// 注意必须先赋值 o.client 再连接——paho 可能在 Connect 内同步触发 OnConnect。
+func connectMQTT(o *platformOutput, broker, clientID, username, password, gatewayID string) {
 	opts := pahomqtt.NewClientOptions()
 	opts.AddBroker(broker)
 
@@ -273,44 +280,45 @@ func connectMQTT(broker, clientID, username, password, gatewayID string) (pahomq
 	opts.SetClientID(clientID)
 
 	opts.SetKeepAlive(keepAlive * time.Second)
-	opts.SetConnectTimeout(5 * time.Second) // 初始连接超时，避免阻塞 New() 导致 HTTP 挂起
-	opts.SetAutoReconnect(true)
-	opts.SetConnectRetry(true)
-	opts.SetConnectRetryInterval(2 * time.Second)
-	opts.SetMaxReconnectInterval(30 * time.Second)
+
+	// 协议版本：固定 MQTT 3.1.1（paho 用 4 表示）
+	opts.SetProtocolVersion(4)
 
 	if username != "" {
 		opts.SetUsername(username)
 		opts.SetPassword(password)
 	}
 
-	// 协议版本：固定 MQTT 3.1.1（paho 用 4 表示）
-	opts.SetProtocolVersion(4)
+	opts.SetOnConnectHandler(func(pahomqtt.Client) {
+		go func() {
+			if err := o.subscribeAll(); err != nil {
+				slog.Error("smardaten-iot resubscribe after connect failed", "err", err)
+			}
+		}()
+	})
+
+	mqttutil.ApplyResilience(opts)
 
 	client := pahomqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		return nil, fmt.Errorf("mqtt connect: %w", token.Error())
-	}
-
-	slog.Info("smardaten-iot mqtt connected", "broker", broker, "clientId", clientID)
-	return client, nil
+	o.client = client // 先赋值再连接,避免 OnConnect 触发时 client 尚为 nil
+	mqttutil.ConnectNonBlocking(client, "smardaten-iot")
 }
 
 // ---------- 订阅管理 ----------
 
-// subscribeAll 订阅所有平台 topic。
+// subscribeAll 订阅所有平台 topic。在 OnConnect 中调用：每次连接（含重连）建立后重建订阅。
 func (o *platformOutput) subscribeAll() error {
 	// 通道 1: 配置下发
 	topic := fmt.Sprintf("/sys/%s/thing/config/set", o.gatewayID)
-	if token := o.client.Subscribe(topic, defaultQoS2, o.handleConfigSet); token.Wait() && token.Error() != nil {
-		return fmt.Errorf("subscribe config/set: %w", token.Error())
+	if err := mqttutil.WaitToken(o.client.Subscribe(topic, defaultQoS2, o.handleConfigSet), mqttutil.PublishTimeout); err != nil {
+		return fmt.Errorf("subscribe config/set: %w", err)
 	}
 	slog.Info("subscribed", "topic", topic)
 
 	// 通道 6: 设备诊断
 	topic = fmt.Sprintf("/sys/%s/thing/event/diagnose/set", o.gatewayID)
-	if token := o.client.Subscribe(topic, defaultQoS, o.handleDiagnose); token.Wait() && token.Error() != nil {
-		return fmt.Errorf("subscribe diagnose/set: %w", token.Error())
+	if err := mqttutil.WaitToken(o.client.Subscribe(topic, defaultQoS, o.handleDiagnose), mqttutil.PublishTimeout); err != nil {
+		return fmt.Errorf("subscribe diagnose/set: %w", err)
 	}
 	slog.Info("subscribed", "topic", topic)
 
@@ -321,10 +329,11 @@ func (o *platformOutput) subscribeAll() error {
 }
 
 // resubscribeServices 重新订阅所有服务调用 topic。
+// SUBSCRIBE 幂等（同 topic 重复订阅仅覆盖 handler），可与 OnConnect 的 subscribeAll 并发安全。
 func (o *platformOutput) resubscribeServices() {
 	for _, method := range o.topics.serviceMethods() {
-		if token := o.client.Subscribe(method, defaultQoS2, o.handleServiceCall); token.Wait() && token.Error() != nil {
-			slog.Error("subscribe service method failed", "topic", method, "err", token.Error())
+		if err := mqttutil.WaitToken(o.client.Subscribe(method, defaultQoS2, o.handleServiceCall), mqttutil.PublishTimeout); err != nil {
+			slog.Error("subscribe service method failed", "topic", method, "err", err)
 		} else {
 			slog.Info("subscribed service", "topic", method)
 		}
@@ -557,6 +566,7 @@ func (o *platformOutput) flush() {
 	o.mu.Lock()
 	pending := o.pending
 	o.pending = make(map[string][]model.DataPoint)
+	o.pendingCount = 0
 	connects := o.connects
 	o.connects = make(map[string]bool)
 	disconnects := o.disconnects
@@ -596,8 +606,9 @@ func (o *platformOutput) flush() {
 			continue
 		}
 
-		if token := o.client.Publish(eventTopic, defaultQoS, false, data); token.Wait() && token.Error() != nil {
-			slog.Error("publish property report", "device", deviceID, "topic", eventTopic, "err", token.Error())
+		// 有界等待:半死 broker 时最多阻塞 PublishTimeout 后报错,不卡死 flusher。
+		if err := mqttutil.WaitToken(o.client.Publish(eventTopic, defaultQoS, false, data), mqttutil.PublishTimeout); err != nil {
+			slog.Error("publish property report", "device", deviceID, "topic", eventTopic, "err", err)
 			continue
 		}
 

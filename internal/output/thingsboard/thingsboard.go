@@ -18,6 +18,7 @@ import (
 
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output"
+	"iot-gateway-go/internal/output/mqttutil"
 )
 
 const (
@@ -27,6 +28,10 @@ const (
 	defaultFlushInterval = 200 * time.Millisecond
 	writeTimeout         = 5 * time.Second
 	writeQueueSize       = 64
+
+	// maxPendingPoints 待上报遥测缓冲的全局上限:断连期间 flush 仍持续灌入时,
+	// 超过上限丢弃新点并告警,避免内存无界增长(与 smardaten 输出同策略)。
+	maxPendingPoints = 8192
 )
 
 // ThingsBoard MQTT Gateway 的 topic。
@@ -89,11 +94,12 @@ type thingsboardOutput struct {
 	write WriteFunc // 下行写回调
 
 	// 以下由 Publish / DeviceOnline / DeviceOffline / 下行 handler 与 flush 并发访问。
-	mu          sync.Mutex
-	pending     map[string][]model.DataPoint // 设备名 -> 待上报遥测点
-	qualities   map[string]model.Quality     // 设备名 -> 最近质量
-	connects    map[string]bool              // 待发送 connect 的设备名
-	disconnects map[string]bool              // 待发送 disconnect 的设备名
+	mu           sync.Mutex
+	pending      map[string][]model.DataPoint // 设备名 -> 待上报遥测点
+	pendingCount int                          // 待上报遥测点总数(上限 maxPendingPoints)
+	qualities    map[string]model.Quality     // 设备名 -> 最近质量
+	connects     map[string]bool              // 待发送 connect 的设备名
+	disconnects  map[string]bool              // 待发送 disconnect 的设备名
 
 	// connected 仅在 flush 中访问(flusher goroutine 串行,Close 等待其退出后再 flush)。
 	connected map[string]bool
@@ -127,24 +133,7 @@ func New(cfg Config, write WriteFunc) (output.Output, error) {
 		flushInterval = d
 	}
 
-	opts := pahomqtt.NewClientOptions()
-	opts.AddBroker(cfg.Broker)
-	opts.SetClientID(cfg.ClientID)
-	opts.SetAutoReconnect(true)
-	username := cfg.Username
-	if username == "" {
-		username = cfg.AccessToken // ThingsBoard 以 Access Token 作为 MQTT 用户名
-	}
-	opts.SetUsername(username)
-	opts.SetPassword(cfg.Password)
-
-	client := pahomqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		return nil, fmt.Errorf("thingsboard mqtt connect: %w", token.Error())
-	}
-
 	o := &thingsboardOutput{
-		client:        client,
 		prefix:        cfg.DeviceNamePrefix,
 		qos:           cfg.QoS,
 		reportQuality: reportQuality,
@@ -159,19 +148,44 @@ func New(cfg Config, write WriteFunc) (output.Output, error) {
 		done:          make(chan struct{}),
 	}
 
-	// 订阅下行共享属性(与上行客户端属性同 topic,但下行带 device/data 包装,可区分)。
-	if token := client.Subscribe(topicAttributes, o.qos, o.handleAttributes); token.Wait() && token.Error() != nil {
-		return nil, fmt.Errorf("thingsboard subscribe attributes: %w", token.Error())
+	opts := pahomqtt.NewClientOptions()
+	opts.AddBroker(cfg.Broker)
+	opts.SetClientID(cfg.ClientID)
+	username := cfg.Username
+	if username == "" {
+		username = cfg.AccessToken // ThingsBoard 以 Access Token 作为 MQTT 用户名
 	}
-	// 订阅 RPC 命令(与 RPC 应答同 topic,请求带 data.method 可区分)。
-	if token := client.Subscribe(topicRPC, o.qos, o.handleRPC); token.Wait() && token.Error() != nil {
-		return nil, fmt.Errorf("thingsboard subscribe rpc: %w", token.Error())
-	}
+	opts.SetUsername(username)
+	opts.SetPassword(cfg.Password)
+	// 下行订阅迁入 OnConnect:连接(含重连)建立后重新订阅,非阻塞构造下 New 里订阅必失败。
+	opts.SetOnConnectHandler(func(pahomqtt.Client) {
+		go func() {
+			if err := o.onConnectSubscribe(); err != nil {
+				slog.Error("thingsboard resubscribe after connect failed", "err", err)
+			}
+		}()
+	})
+	mqttutil.ApplyResilience(opts)
+
+	// 先赋值 client 再连接:paho 可能在 Connect 内同步触发 OnConnect,避免 nil 解引用。
+	o.client = pahomqtt.NewClient(opts)
+	mqttutil.ConnectNonBlocking(o.client, "thingsboard")
 
 	o.wg.Add(2)
 	go o.runFlusher()
 	go o.runWriter()
 	return o, nil
+}
+
+// onConnectSubscribe 订阅下行共享属性与 RPC 命令 topic(连接/重连后调用)。
+func (o *thingsboardOutput) onConnectSubscribe() error {
+	if err := mqttutil.WaitToken(o.client.Subscribe(topicAttributes, o.qos, o.handleAttributes), mqttutil.PublishTimeout); err != nil {
+		return fmt.Errorf("subscribe attributes: %w", err)
+	}
+	if err := mqttutil.WaitToken(o.client.Subscribe(topicRPC, o.qos, o.handleRPC), mqttutil.PublishTimeout); err != nil {
+		return fmt.Errorf("subscribe rpc: %w", err)
+	}
+	return nil
 }
 
 func (o *thingsboardOutput) deviceName(deviceID string) string {
@@ -185,12 +199,18 @@ func (o *thingsboardOutput) deviceID(name string) string {
 
 // Publish 把 DataPoint 缓冲进对应设备的待发队列,由 flusher 定时聚合上报。
 // 有值才入遥测队列;Quality 作为状态属性记录(同一设备取最近值)。
+// 缓冲达到上限时丢弃新点并告警,避免断连期间内存无界增长。
 func (o *thingsboardOutput) Publish(dp model.DataPoint) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	name := o.deviceName(dp.DeviceID)
 	if dp.Value != nil {
-		o.pending[name] = append(o.pending[name], dp)
+		if o.pendingCount >= maxPendingPoints {
+			slog.Warn("thingsboard pending buffer full, drop datapoint", "device", dp.DeviceID, "point", dp.Point)
+		} else {
+			o.pending[name] = append(o.pending[name], dp)
+			o.pendingCount++
+		}
 	}
 	if o.reportQuality {
 		o.qualities[name] = dp.Quality
@@ -343,6 +363,7 @@ func (o *thingsboardOutput) flush() {
 	o.mu.Lock()
 	pending := o.pending
 	o.pending = make(map[string][]model.DataPoint)
+	o.pendingCount = 0
 	qualities := o.qualities
 	o.qualities = make(map[string]model.Quality)
 	connects := o.connects
@@ -398,9 +419,8 @@ func (o *thingsboardOutput) publish(topic string, payload interface{}) error {
 	if err != nil {
 		return fmt.Errorf("thingsboard marshal: %w", err)
 	}
-	token := o.client.Publish(topic, o.qos, false, data)
-	token.Wait()
-	return token.Error()
+	// 有界等待:半死 broker 时最多阻塞 PublishTimeout 后报错,不卡死 flusher。
+	return mqttutil.WaitToken(o.client.Publish(topic, o.qos, false, data), mqttutil.PublishTimeout)
 }
 
 func (o *thingsboardOutput) Close() error {
