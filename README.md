@@ -7,9 +7,9 @@ Go 实现的开源工业物联网边缘网关。插件化架构,南向接入工�
 ```
 ┌──────────────────────────────────────────────────┐
 │  Northbound 北向输出层（输出插件）                  │
-│  已实现: MQTT / ThingsBoard / TDengine  预留: 云平台 │
+│  已实现: MQTT / ThingsBoard / TDengine / smardaten │
 ├──────────────────────────────────────────────────┤
-│  Processing 处理层（预留,目前直通）                 │
+│  Processing 处理层（边缘计算: 过滤/聚合）           │
 ├──────────────────────────────────────────────────┤
 │  Core 核心: 调度器 + 管道 + 设备/点表管理            │
 │           + REST配置API + SQLite                  │
@@ -19,7 +19,7 @@ Go 实现的开源工业物联网边缘网关。插件化架构,南向接入工�
 └──────────────────────────────────────────────────┘
 ```
 
-数据流:`scheduler 采集 ──DataPoint──▶ channel ──▶ pipeline ──▶ Output`
+数据流:`scheduler 采集 ──DataPoint──▶ channel ──▶ 处理层(过滤/聚合) ──▶ Output`
 
 协议差异封死在南向驱动内部,Core 与北向只面对统一的 `DataPoint`。加新协议 = 加一个实现 `Driver` 接口的子包。
 
@@ -98,6 +98,32 @@ MQTT 输出默认**即时单条发布**(payload 为单个 `DataPoint` 对象);�
 (如 `200ms`)可启用**批量模式**:同一设备在一个窗口内到达的点聚合为一条消息,
 payload 为 `DataPoint` 数组,`batchMax` 控制单条最大点数(超出拆分)。详见
 [docs/mqtt-batch-publish-design.md](docs/mqtt-batch-publish-design.md)。
+
+## 边缘计算(过滤 / 聚合)
+
+处理层位于 pipeline,对采集数据做**过滤**与**时间窗口聚合**后再上送北向,减少数据量与
+边缘就地清洗。配置挂在**点位**上(`Point.processing`),经 Web UI 点位编辑的「处理」
+按钮配置,随设备保存热重载,**无需重启**。设计见 [docs/edge-computing-design.md](docs/edge-computing-design.md)。
+
+**过滤规则**(按序应用,全部通过才放行):
+
+| 类型 | 字段 | 语义 |
+|---|---|---|
+| `deadband` 死区 | `delta` | 数值变化量 ≥ delta 才放行并更新基线,否则丢弃;`delta=0` 表示值变化才上送 |
+| `threshold` 阈值 | `op` + `value` 或 `min`/`max` | `gt/ge/lt/le/eq/ne` 或 `between/outside` 命中才放行 |
+| `quality` 质量 | `dropBad` | 丢弃 `bad` / `uncertain` 质量的点 |
+
+**聚合**(配置后原始点进时间窗口,不再逐条上送,窗口关闭产出**派生点**):
+
+| 字段 | 说明 |
+|---|---|
+| `type` | `avg` / `min` / `max` / `sum` / `count` / `last` |
+| `window` | 窗口时长,如 `10s`、`1m`、`30s` |
+| `emitName` | 派生点名,默认 `<point>.<type>`(如 `temperature.avg`) |
+
+派生点与原始点走同一输出链路(MQTT 批量 / 断网补传 / 各云输出均兼容);原始采集值仍记录在
+设备实时值中。过滤/聚合仅影响**北向输出流**。运行统计经 `GET /api/v1/processing/status` 与
+概览页查看。
 
 ## Modbus 驱动
 
@@ -242,6 +268,7 @@ tdengine:
 | POST | `/api/v1/devices/{deviceId}/clone` | 复制设备(点表整体拷贝) |
 | POST | `/api/v1/devices/{deviceId}/points` | 添加点位 |
 | DELETE | `/api/v1/devices/{deviceId}/points/{name}` | 删除点位 |
+| GET | `/api/v1/processing/status` | 边缘处理运行统计(过滤/聚合计数) |
 
 配置写入后自动热加载,scheduler 全量重启采集,无需重启进程。
 
@@ -279,6 +306,8 @@ internal/
     mqtt/             MQTT 输出
     thingsboard/      ThingsBoard 输出
     tdengine/         TDengine 输出
+    smardaten/        smardaten-iot 输出
+  processing/         边缘处理层(过滤/聚合)
   core/               scheduler + pipeline
   store/              SQLite 持久化
   api/                REST 配置 API

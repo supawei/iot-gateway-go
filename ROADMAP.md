@@ -10,7 +10,7 @@
 |---|---|---|
 | **P1** | MVP:Modbus→MQTT 端到端链路 + REST 配置 + SQLite | ✅ 已完成 (2026-08-13) |
 | **P2** | 验证扩展性:第二协议 / 第二北向输出 / 能力接口 | ✅ 已完成 (2026-08-16) |
-| **P3** | 增强:边缘计算、断网补传、更多云平台、增量热加载、API 鉴权 | 🔶 进行中(鉴权/输出SQLite/断网补传/增量热加载/MQTT批量已完) |
+| **P3** | 增强:边缘计算、断网补传、更多云平台、增量热加载、API 鉴权 | 🔶 进行中(仅剩云平台对接;边缘计算/输出重试退避已完成) |
 | **P4** | 产品化:更多协议、Sparkplug B、运维监控、物模型映射 | ⬜ 待开始 |
 
 ---
@@ -89,9 +89,9 @@
 - [x] **断网本地补传**:网络中断/上送失败/缓冲满时数据持久化到 SQLite,恢复后按序重放,保证数据不丢(ThingsBoard/TDengine/smardaten/MQTT 全覆盖,设计见 [docs/offline-backfill-design.md](docs/offline-backfill-design.md),2026-08-18)
 - [x] **增量热加载**:配置变更时 scheduler 对设备/点位 diff,只增删改受影响部分;未变设备连接与采集零打扰,轮询点位/间隔原地更新,订阅监听组增删整组重开(设计见 [docs/incremental-hot-reload-design.md](docs/incremental-hot-reload-design.md),2026-08-18)
 - [x] **MQTT 批量发布**:默认即时单条(向后兼容);配置 `flushInterval` 启用批量——同设备窗口内多点聚合为一条(数组 payload),`batchMax` 拆条,减少高频发布次数;并已接入断网补传(失败落库恢复重放),数据完整性闭环(设计见 [docs/mqtt-batch-publish-design.md](docs/mqtt-batch-publish-design.md),2026-08-18)
-- [ ] **边缘计算**:规则 / 过滤 / 聚合,插入 pipeline 处理层(目前直通)
-- [ ] **云 IoT 平台对接**:阿里云 / 华为云 / AWS IoT 输出插件(ThingsBoard 已作为 P2 验证完成)
-- [ ] 输出侧连接级重试与退避策略
+- [x] **边缘计算**:过滤(死区/阈值/质量)+ 时间窗口聚合,插入 pipeline 处理层;配置随设备点位存 SQLite + Web UI 编辑 + 增量热重载;派生点走完整输出链路(设计见 [docs/edge-computing-design.md](docs/edge-computing-design.md),2026-08-18)
+- [ ] **云 IoT 平台对接**:阿里云 / 华为云 / AWS IoT 输出插件(ThingsBoard 已作为 P2 验证完成;smardaten 已接入,见 [docs/smardaten-iot.md](docs/smardaten-iot.md))
+- [x] **输出侧连接级重试与退避**:MQTT 类输出(mqtt/thingsboard/smardaten)非阻塞建连 + ConnectRetry 指数退避 + 发布有界等待 + 构建失败隔离(设计见 [docs/mqtt-resilience-design.md](docs/mqtt-resilience-design.md),2026-08-18)
 
 ---
 
@@ -141,3 +141,4 @@
 | 北向输出配置 | 迁移到 SQLite + Web UI(原"保留 yaml"结论反转) | 完成 API 鉴权与 OutputManager 后,产品化诉求(UI 免重启配置)成为主导;见分析文档 |
 | 配置/数据库变更 | 开发期不做迁移,直接改结构 | 未发布无存量部署;发布后再引入版本化迁移,见 [docs/development-conventions.md](docs/development-conventions.md) |
 | 网关 ID | 从 config.yaml 迁到 SQLite(默认预置,Web UI 可改) | 属运行时配置而非引导配置,与输出配置一致走数据库 + 热重载;yaml 只留引导项 |
+| 边缘处理 | 插入 pipeline 处理层(`processing.Engine`),配置挂在设备点位 | 单点位过滤 + 聚合,避免通用规则引擎;派生点走完整输出链路;原始值仍进 values 实时值 |
