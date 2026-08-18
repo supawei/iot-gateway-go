@@ -88,7 +88,6 @@ smardaten-iot 与其他输出插件一样，配置存储在 SQLite 的 `output` 
 ```json
 {
   "broker":      "tcp://平台MQTT地址:1883",
-  "protoVer":    311,
   "username":    "admin",
   "password":    "admin",
   "clientId":    "gw-dev-manage",
@@ -103,8 +102,7 @@ smardaten-iot 与其他输出插件一样，配置存储在 SQLite 的 `output` 
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |---|---|---|---|---|
-| `broker` | string | 是 | — | 平台 MQTT broker 完整地址（含协议与端口），如 `tcp://10.0.0.1:1883` |
-| `protoVer` | int | 否 | 311 | MQTT 协议版本：311=3.1.1, 5=5.0 |
+| `broker` | string | 是 | — | 平台 MQTT broker 完整地址（含协议与端口），如 `tcp://10.0.0.1:1883`；协议固定为 MQTT 3.1.1，不支持配置 |
 | `username` | string | 否 | — | MQTT 用户名 |
 | `password` | string | 否 | — | MQTT 密码 |
 | `clientId` | string | 否 | — | MQTT Client ID |

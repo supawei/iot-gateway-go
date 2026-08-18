@@ -34,15 +34,14 @@ const (
 // Config 是 smardaten-iot 平台输出的配置（存 SQLite，经 Web UI 配置）。
 // 所有数值字段使用 flexInt 类型，兼容 Web UI 发送的数字或字符串。
 type Config struct {
-	Broker   string  `json:"broker"`   // MQTT broker 完整地址，如 tcp://10.0.0.1:1883
-	ProtoVer flexInt `json:"protoVer"` // 311(3.1.1) 或 5
-	Username string  `json:"username"` // MQTT 用户名
-	Password string  `json:"password"` // MQTT 密码
-	ClientID string  `json:"clientId"` // MQTT Client ID
+	Broker   string `json:"broker"`   // MQTT broker 完整地址，如 tcp://10.0.0.1:1883
+	Username string `json:"username"` // MQTT 用户名
+	Password string `json:"password"` // MQTT 密码
+	ClientID string `json:"clientId"` // MQTT Client ID
 
-	IotAppID      string  `json:"iotAppId"`      // 应用 ID（RSA 加密后作 HTTP appId header）
-	IotRsaKeyPath string  `json:"iotRsaKeyPath"` // RSA 公钥路径（PEM SPKI）
-	IotConfigPath string  `json:"iotConfigPath"` // application.json 落盘路径
+	IotAppID      string `json:"iotAppId"`      // 应用 ID（RSA 加密后作 HTTP appId header）
+	IotRsaKeyPath string `json:"iotRsaKeyPath"` // RSA 公钥路径（PEM SPKI）
+	IotConfigPath string `json:"iotConfigPath"` // application.json 落盘路径
 
 	PubMode       flexInt `json:"pubMode"`       // 0=及时上报, 1=变化上报
 	MaxPubTime    flexInt `json:"maxPubTime"`    // 变化上报模式最大周期间隔（秒）
@@ -85,7 +84,6 @@ func init() {
 		Label: "smardaten-iot",
 		Schema: []output.Field{
 			{Name: "broker", Label: "Broker 地址", Type: output.FieldString, Required: true, Placeholder: "tcp://平台IP:1883", Hint: "完整地址，含协议与端口"},
-			{Name: "protoVer", Label: "MQTT 协议版本", Type: output.FieldEnum, Options: []string{"311", "5"}, Default: 311},
 			{Name: "username", Label: "用户名", Type: output.FieldString},
 			{Name: "password", Label: "密码", Type: output.FieldPassword},
 			{Name: "clientId", Label: "Client ID", Type: output.FieldString, Placeholder: "gw-dev-manage"},
@@ -108,7 +106,7 @@ func init() {
 // platformOutput 实现 output.Output + output.DeviceNotifier。
 type platformOutput struct {
 	gatewayID string
-	write     output.WriteFunc    // 下行写回调
+	write     output.WriteFunc     // 下行写回调
 	store     output.StoreAccessor // 配置同步（application.json → 网关配置）
 
 	client pahomqtt.Client
@@ -122,11 +120,10 @@ type platformOutput struct {
 	// 解析后的配置值
 	pubMode    int // 0=及时, 1=变化
 	maxPubTime int // 秒
-	protoVer   int // 311 或 5
 
 	// 数据缓冲
 	mu          sync.Mutex
-	pending     map[string][]model.DataPoint // 待上报数据点
+	pending     map[string][]model.DataPoint  // 待上报数据点
 	lastValues  map[string]map[string]float64 // deviceID -> pointID -> lastValue (变化上报用)
 	lastPubTime map[string]time.Time          // deviceID -> 上次上报时间
 	connects    map[string]bool               // 待发送 connect 的设备
@@ -157,7 +154,6 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 	}
 
 	// 解析配置值
-	protoVer := int(cfg.ProtoVer)
 	pubMode := int(cfg.PubMode)
 	maxPubTime := int(cfg.MaxPubTime)
 	if maxPubTime <= 0 {
@@ -180,7 +176,7 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 	}
 
 	// 构建 MQTT 连接
-	client, err := connectMQTT(cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, gatewayID, protoVer)
+	client, err := connectMQTT(cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, gatewayID)
 	if err != nil {
 		return nil, fmt.Errorf("mqtt connect: %w", err)
 	}
@@ -196,7 +192,6 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 		downloader:    downloader,
 		pubMode:       pubMode,
 		maxPubTime:    maxPubTime,
-		protoVer:      protoVer,
 		pending:       make(map[string][]model.DataPoint),
 		lastValues:    make(map[string]map[string]float64),
 		lastPubTime:   make(map[string]time.Time),
@@ -276,7 +271,8 @@ func (o *platformOutput) Close() error {
 // ---------- MQTT 连接 ----------
 
 // connectMQTT 建立到平台的 MQTT 连接，broker 为完整地址（含协议与端口）。
-func connectMQTT(broker, clientID, username, password, gatewayID string, protoVer int) (pahomqtt.Client, error) {
+// 当前仅支持 MQTT 3.1.1 协议。
+func connectMQTT(broker, clientID, username, password, gatewayID string) (pahomqtt.Client, error) {
 	opts := pahomqtt.NewClientOptions()
 	opts.AddBroker(broker)
 
@@ -298,12 +294,8 @@ func connectMQTT(broker, clientID, username, password, gatewayID string, protoVe
 		opts.SetPassword(password)
 	}
 
-	// 协议版本
-	pv := uint(3) // 默认 3.1.1
-	if protoVer == 5 {
-		pv = 4 // paho 用 4 表示 MQTT 5.0
-	}
-	opts.SetProtocolVersion(pv)
+	// 协议版本：固定 MQTT 3.1.1（paho 用 3 表示）
+	opts.SetProtocolVersion(4)
 
 	client := pahomqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {

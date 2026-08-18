@@ -6,34 +6,30 @@ import (
 )
 
 // TestConfigUnmarshalMixedTypes 验证 Config 能同时接受数字和字符串形式的配置值。
-// Web UI 的 FieldEnum 控件发送字符串（如 "311"），FieldInt 发送数字（如 1883），
-// 甚至 FieldEnum 的默认值可能以数字形式（如 311）发送。Config 必须全部兼容。
+// Web UI 的 FieldEnum 控件发送字符串（如 "0"），FieldInt 发送数字（如 60），
+// 甚至 FieldEnum 的默认值可能以数字形式（如 0）发送。Config 必须全部兼容。
 func TestConfigUnmarshalMixedTypes(t *testing.T) {
 	cases := []struct {
 		name       string
 		raw        string
-		wantProto  int
 		wantPub    int
 		wantMaxPub int
 	}{
 		{
 			name:       "all strings (user-selected enum values)",
-			raw:        `{"broker":"tcp://x:1883","protoVer":"311","pubMode":"0","maxPubTime":"60"}`,
-			wantProto:  311,
+			raw:        `{"broker":"tcp://x:1883","pubMode":"0","maxPubTime":"60"}`,
 			wantPub:    0,
 			wantMaxPub: 60,
 		},
 		{
 			name:       "all numbers (enum defaults sent as numbers)",
-			raw:        `{"broker":"tcp://x:1883","protoVer":311,"pubMode":0,"maxPubTime":60}`,
-			wantProto:  311,
+			raw:        `{"broker":"tcp://x:1883","pubMode":0,"maxPubTime":60}`,
 			wantPub:    0,
 			wantMaxPub: 60,
 		},
 		{
 			name:       "mixed types",
-			raw:        `{"broker":"tcp://x:1883","protoVer":"5","pubMode":1,"maxPubTime":"30"}`,
-			wantProto:  5,
+			raw:        `{"broker":"tcp://x:1883","pubMode":1,"maxPubTime":"30"}`,
 			wantPub:    1,
 			wantMaxPub: 30,
 		},
@@ -47,9 +43,6 @@ func TestConfigUnmarshalMixedTypes(t *testing.T) {
 			}
 			if cfg.Broker != "tcp://x:1883" {
 				t.Errorf("broker = %q, want %q", cfg.Broker, "tcp://x:1883")
-			}
-			if int(cfg.ProtoVer) != tc.wantProto {
-				t.Errorf("protoVer = %d, want %d", cfg.ProtoVer, tc.wantProto)
 			}
 			if int(cfg.PubMode) != tc.wantPub {
 				t.Errorf("pubMode = %d, want %d", cfg.PubMode, tc.wantPub)
@@ -71,8 +64,8 @@ func TestConfigUnmarshalMissingOptional(t *testing.T) {
 	if cfg.Broker != "tcp://x:1883" {
 		t.Errorf("broker = %q, want %q", cfg.Broker, "tcp://x:1883")
 	}
-	if cfg.ProtoVer != 0 {
-		t.Errorf("protoVer should default to 0, got %d", cfg.ProtoVer)
+	if cfg.PubMode != 0 {
+		t.Errorf("pubMode should default to 0, got %d", cfg.PubMode)
 	}
 }
 
