@@ -7,6 +7,7 @@ import (
 
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/store"
 )
 
@@ -60,4 +61,39 @@ func findPointByName(points []model.Point, name string) (model.Point, bool) {
 		}
 	}
 	return model.Point{}, false
+}
+
+// ProbeDevice 探测设备是否可达(设备诊断 DC1003):查设备/连接 → 打开驱动连接 →
+// 调 Prober.Probe 做一次真实协议往返。驱动不支持探测时返回 output.ErrNotProbeable。
+// 供 smardaten-iot 通道 6 诊断注入。
+func ProbeDevice(ctx context.Context, st *store.Store, deviceID string) error {
+	device, err := st.GetDevice(deviceID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrDeviceNotFound, err)
+	}
+	connection, err := st.GetConnection(device.ConnectionID)
+	if err != nil {
+		return fmt.Errorf("get connection: %w", err)
+	}
+	drv, err := driver.Get(connection.Driver)
+	if err != nil {
+		return err
+	}
+	conn, err := drv.Open(ctx, driver.OpenRequest{
+		DeviceID:     device.ID,
+		ConnectionID: device.ConnectionID,
+		ConnConfig:   connection.Config,
+		DeviceParams: device.Params,
+	})
+	if err != nil {
+		return fmt.Errorf("open device: %w", err)
+	}
+	defer conn.Close()
+	prober, ok := conn.(driver.Prober)
+	if !ok {
+		// 用 output 包的哨兵错误:插件可 errors.Is 识别"驱动不支持探测"并回退软诊断
+		// (output 不 import core,core 已 import output,单向依赖无环)。
+		return fmt.Errorf("%w: %s", output.ErrNotProbeable, connection.Driver)
+	}
+	return prober.Probe(ctx, device.Points)
 }

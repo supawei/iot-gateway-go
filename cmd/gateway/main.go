@@ -201,6 +201,10 @@ func buildOutputs(st *store.Store, write output.WriteFunc, valuesReg *values.Reg
 				}
 				return m
 			},
+			// 设备诊断 DC1003:经 core.ProbeDevice 做真实协议往返探测设备可达性。
+			Probe: func(ctx context.Context, deviceID string) error {
+				return core.ProbeDevice(ctx, st, deviceID)
+			},
 		}
 		configs, err := st.ListOutputs()
 		if err != nil {

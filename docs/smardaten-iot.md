@@ -1,6 +1,6 @@
 # smardaten-iot 私有 IoT 平台对接设计文档
 
-> **状态**: 已实现（阶段 1 完成 + 自动同步 + 稳定性修复）；**设备诊断（通道 6）为桩实现，功能不完善**（详见 [11.7](#117-设备诊断功能完善度分析)）
+> **状态**: 已实现（阶段 1 完成 + 自动同步 + 稳定性修复）；**设备诊断（通道 6）已完善**：DC1001 结合 MQTT 连接态、DC1003 支持真实协议探测（详见 [11.7](#117-设备诊断功能完善度分析)）
 > **关联**: 平台交互契约文档 `iot_platform_interaction.md`
 > **更新**: 2026-08-18
 
@@ -228,7 +228,7 @@ smardaten-iot MQTT handler
     ▼ 组响应包 → MQTT Publish(/sys/{gatewayID}/thing/event/diagnose/set_reply, Qos1)
 ```
 
-> **实现现状注（详见 [11.7 设备诊断功能完善度分析](#117-设备诊断功能完善度分析)）**：诊断通道框架（订阅/解析/响应发布）已完成，但诊断项判定目前为**桩实现**——`handleDiagnose` 对 DC1001 与 DC1003 均硬编码返回 `status=1`，未按设计"尝试连接设备"做真实探测，请求中的 `deviceId`/`controllerId` 未参与判定。DC1002（DTU）按约定暂不实现。
+> **实现现状注（详见 [11.7 设备诊断功能完善度分析](#117-设备诊断功能完善度分析)）**：诊断通道框架（订阅/解析/响应发布）已完成，且诊断项判定已从桩实现完善为真实判定——DC1001 以网关↔平台 MQTT 连接态为信号，DC1003 分层判定（设备存在性 → 真实协议探测 → 软诊断兜底）。DC1002（DTU）按约定暂不实现。
 
 ---
 
@@ -412,7 +412,7 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
 
 3. ~~**服务调用的 get 语义**：平台 `serviceType=get` 要求返回设备当前属性值，但 Go 网关的采集是定时拉取，无实时缓存。需要 `values.Registry` 提供最新值查询能力。~~ ✅ **已解决**：`output.BuildContext` 新增 `LatestValues` 回调，由 main 注入 `values.Registry` 的最新值快照；`handleServiceGet` 据此组包返回设备当前属性值（未注入时回退到待发缓冲）。
 
-4. **设备诊断 DC1003（终端设备连通性）**：需要 driver 层提供"探测设备是否可达"的能力，当前 `Driver` 接口无此方法，需评估是否扩展。**❌ 仍未解决**：`handleDiagnose` 对 DC1003 硬编码 `status=1`，未做任何真实探测，诊断结果恒为"设备在线"（完善度分析见 [11.7](#117-设备诊断功能完善度分析)）。
+4. **设备诊断 DC1003（终端设备连通性）**：需要 driver 层提供"探测设备是否可达"的能力，当前 `Driver` 接口无此方法，需评估是否扩展。**✅ 已解决**：新增可选 `driver.Prober` 能力（类型断言，仿 `Writer`/`Subscriber` 模式），`core.ProbeDevice` 经 `output.BuildContext.Probe` 注入插件，modbus/opcua 驱动实现真实读探测（见 [11.7](#117-设备诊断功能完善度分析)）。
 
 5. **多平台连接**：若同一网关需同时对接多个 smardaten-iot 平台实例，当前每个插件实例维护一个 MQTT 连接的设计可以支持（创建多个 output 配置即可），但 application.json 的隔离需要确认。
 
@@ -433,7 +433,7 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
 | 通道 3 | 属性上报 | — | `{events[].method}` 动态 (QoS1) | ✅ 已实现 |
 | 通道 4 | 设备状态上报 | — | `/sys/thing/event/deviceStatus/post` (QoS1) | ✅ 已实现 |
 | 通道 5 | 服务调用 | `{services[].method}` 动态 (QoS2) | `{services[].responseMethod}` 动态 (QoS1) | ✅ 已实现 |
-| 通道 6 | 设备诊断 | `/sys/{gw}/thing/event/diagnose/set` (QoS1) | `/sys/{gw}/thing/event/diagnose/set_reply` (QoS1) | 🟡 通道框架已实现，诊断项为桩实现（见 [11.7](#117-设备诊断功能完善度分析)） |
+| 通道 6 | 设备诊断 | `/sys/{gw}/thing/event/diagnose/set` (QoS1) | `/sys/{gw}/thing/event/diagnose/set_reply` (QoS1) | ✅ 已实现（DC1001/DC1003 真实判定，见 [11.7](#117-设备诊断功能完善度分析)） |
 | 通道 7 | DTU 状态上报 | — | `/sys/thing/event/dtuStatus/post` (QoS1) | ❌ 未实现 |
 | 通道 8 | HTTP 下载配置 (RSA 鉴权) | — | — | ✅ 已实现 |
 | 通道 9 | HTTP 下载驱动 (无鉴权) | — | — | ❌ 未实现 |
@@ -447,7 +447,7 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
 | 行为契约：精度 2 位小数、毫秒时间戳、pubMode 0/1、变化死区 0.01 | ✅ 已实现 |
 | HTTP 鉴权：RSA_PKCS1v15 + PEM SPKI + base64 + 关闭证书校验 + 重定向 ≤10 | ✅ 已实现 |
 | application.json 解析：完整结构 | ✅ 已实现 |
-| 三个诊断 item_id（DC1001/DC1002/DC1003） | ⚠️ DC1001 + DC1003 均返回桩值 `status=1`，未做真实探测；DC1002（DTU）不适用（见 [11.7](#117-设备诊断功能完善度分析)） |
+| 三个诊断 item_id（DC1001/DC1002/DC1003） | ✅ DC1001（MQTT 连接态）+ DC1003（存在性→真实探测→软诊断）；DC1002（DTU）不适用（见 [11.7](#117-设备诊断功能完善度分析)） |
 | 枚举值：dataType / statusCode / 控制器类型 | ✅ 已实现 |
 
 ### 11.3 稳定性修复记录
@@ -475,21 +475,19 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `internal/output/smardaten/smardaten.go` | ~780 | 插件注册、MQTT 连接、数据缓冲、上下行处理、flush |
+| `internal/output/smardaten/smardaten.go` | ~855 | 插件注册、MQTT 连接、数据缓冲、上下行处理、flush、设备诊断判定 |
 | `internal/output/smardaten/application.go` | ~372 | application.json 解析、平台消息类型、topic 映射 |
 | `internal/output/smardaten/sync.go` | ~330 | application.json → 网关配置自动同步 |
 | `internal/output/smardaten/http.go` | ~199 | RSA 加密、HTTP 下载、TLS 跳过校验 |
-| `internal/output/smardaten/smardaten_test.go` | ~110 | 配置解析回归测试 |
-| `internal/output/registry.go` | +12 | BuildContext.Store 注入 |
+| `internal/output/smardaten/smardaten_test.go` | ~590 | 配置解析/缓冲/非阻塞连接/服务调用/设备诊断测试 |
+| `internal/output/registry.go` | +12 | BuildContext.Store 注入（+ Probe 注入） |
 | **合计** | **~1800** | |
 
 ### 11.7 设备诊断功能完善度分析
 
-> **结论：不完善——通道级（订阅/解析/响应发布）已完成，但诊断项判定为桩实现，无法真实反映设备/网关健康状态。**
+> **结论：已完善**——初始实现（通道框架 + 硬编码桩值）经改造后，DC1001/DC1003 均做真实判定；DC1002（DTU）按约定暂不实现。
 
-#### 对比基准（设计承诺）
-
-设计 §4.4 定义的三项诊断与判定语义：
+#### 设计承诺（§4.4）
 
 | 诊断项 | 设计语义 | 预期判定 |
 |---|---|---|
@@ -497,39 +495,50 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
 | DC1002 | DTU | `status=0`（Go 网关无 DTU，暂不实现） |
 | DC1003 | 设备 | **尝试连接设备**，`status=1/0` |
 
-#### 实现现状（`internal/output/smardaten/smardaten.go` `handleDiagnose` L529-565）
+#### 完善后的实现
 
-**✅ 已完成（通道框架）**：
+**通道框架（原已具备，保持不变）**：
 
 - 订阅 `/sys/{gatewayID}/thing/event/diagnose/set`（QoS1），随 `subscribeAll` 在每次连接/重连后重建
 - 解析 `DiagnoseRequestMessage` 全部字段（`deviceId`/`controllerId`/`diagnose_report_id`/`asset_id`/`executeTime`）
 - 响应包结构与契约字段对齐：`issuance_time`/`asset_id`/`data[]`，每项含 `diagnose_report_id`/`diagnose_item_id`/`diagnose_item_result_desc`/`status`/`execute_time`
 - 发布到 `/sys/{gatewayID}/thing/event/diagnose/set_reply`（QoS1）
 
-**❌ 缺口（诊断内容）**：
+**新增的判定逻辑（`handleDiagnose` → `diagnoseGateway` / `diagnoseDevice`）**：
 
-| # | 缺口 | 影响 |
+| 诊断项 | 判定逻辑 | 结果 |
 |---|---|---|
-| 1 | **DC1003 硬编码** `status=1`「设备在线」，未按设计"尝试连接设备"，`deviceId`/`controllerId` 未参与判定 | 离线/故障/不存在的设备也被报为在线，诊断结果对平台无实际价值，无法发现真实故障 |
-| 2 | **DC1001 硬编码**「网关服务正常」，未结合任何真实信号（如 MQTT 连接态、driver 健康） | 平台无法感知网关侧异常（断连、假死等） |
-| 3 | 无"设备不存在/离线 → `status=0`"分支 | 对未知或离线设备仍返回假"正常"，误导排障 |
-| 4 | `smardaten_test.go` 无 `handleDiagnose` 单元测试（仅覆盖配置解析/缓冲/非阻塞连接/服务调用 get） | 后续改造无回归保护 |
+| DC1001 | 以网关↔平台 MQTT 连接态为真实信号 | 已连接→`status=1`「网关服务正常」；断连→`status=0`「网关 MQTT 连接断开」 |
+| DC1003 | 分层：① 设备是否存在于 application.json → 不存在即 `status=0`「设备不存在」；② 已注入 `Probe` 回调时做真实协议探测 → 可达 `status=1`「设备在线」/不可达 `status=0`「设备不可达」；③ 探测回调返回 `output.ErrNotProbeable`（驱动未实现 `Prober`，如 modbus_listen）或未注入时，回退软诊断（在线集合 + 最新值新鲜度） | 各层 `status=1/0` 均反映真实状态 |
 
-#### 根因
+**打通真实探测所需的新增能力**（"尝试连接设备"的落地路径）：
 
-设计 §10 开放问题 #4 仍未解决：`Driver` 接口（`Open/Read/Close` + 可选 `Writer/Subscriber/Listener`）没有"探测设备是否可达"的能力，插件无法发起真实连接探测，只能退回桩值。
+| 组件 | 变更 |
+|---|---|
+| `driver.Prober` | 新增可选能力：`Probe(ctx, points) error`，仿 `Writer`/`Subscriber` 的类型断言模式 |
+| `internal/driver/modbus` | `modbusConn.Probe`：优先读显式 pollBlock → 首个可解析点位 → 兜底读 holding 0；modbus 异常码响应视为可达（证明设备在总线上），仅传输/超时错误判不可达 |
+| `internal/driver/opcua` | `opcuaConn.Probe`：对可解析节点做一次真实读往返；能收到响应即 server 可达 |
+| `core.ProbeDevice` | 仿 `WritePoint`：查设备/连接 → 打开驱动连接 → `conn.(Prober).Probe`；驱动不支持时返回 `output.ErrNotProbeable`（哨兵定义在 output 包，插件可 errors.Is 识别并回退软诊断） |
+| `output.BuildContext.Probe` | 新增 `ProbeFunc`，由 main 注入 `core.ProbeDevice` |
+| `cmd/gateway/main.go` | 注入 `Probe: core.ProbeDevice` |
 
-#### 已具备、可低成本利用的现成信号（不必扩接口即可让诊断"半真实"）
+**软诊断信号**（探测不可用时的兜底，沿用现成数据）：
 
 | 信号 | 来源 | 用途 |
 |---|---|---|
-| `o.connected` | `DeviceOnline/DeviceOffline` 通知维护的在线集合 | DC1003 直接判在线/离线 |
+| `o.connected` | `DeviceOnline/DeviceOffline` 通知维护的在线集合（flush 内锁保护） | DC1003 直接判在线/离线 |
 | `o.latestValues` | main 注入的 `values.Registry` 快照 | 设备最近是否采到有效值（值新鲜度推断在线） |
-| `o.topics.hasDevice()` | application.json 映射 | 请求 `deviceId` 是否存在于平台配置（不存在→`status=0`「设备不存在」） |
-| `o.client.IsConnected()` | MQTT 连接态 | DC1001 判定网关↔平台链路 |
+| `o.topics.hasDevice()` | application.json 映射 | 请求 `deviceId` 是否存在于平台配置 |
 
-#### 建议（分级）
+**测试覆盖**（`internal/output/smardaten/smardaten_test.go`、`internal/core/probe_test.go`、`internal/driver/modbus/probe_test.go`）：
 
-1. **短期（不改接口）**：在 `handleDiagnose` 中接入上述现成信号做"软诊断"——设备不存在/离线 → `status=0` + 明确 desc；DC1001 结合 MQTT 连接态；为各分支补单元测试。可立即消除"恒在线"的误导。
-2. **中期（扩接口）**：为 `Driver` 增加可选 `Prober` 能力（类型断言，仿 `Writer`/`Subscriber` 模式），modbus 等驱动实现真实读探测（读单个点位看超时/错误），DC1003 走真实连接探测。
-3. **长期**：DC1002（DTU）随 DTU 透传场景引入；诊断结果落库留痕，便于排障追溯。
+- 响应信封（topic/issuance_time/asset_id/两项齐全）
+- DC1001：MQTT 连接/断连两态
+- DC1003：设备不存在、软诊断在线/离线、值新鲜度兜底、真实探测成功/失败、探测不支持（`ErrNotProbeable`）回退软诊断
+- `core.ProbeDevice`：可达/不可达/设备不存在/驱动不支持（`ErrNotProbeable`）
+- modbus `Probe`：pollBlock 优先、点位回退、holding 0 兜底、传输错误判不可达、异常码判可达
+
+#### 待办（long-term，非当前功能缺口）
+
+1. **DC1002（DTU 在线检测）**：Go 网关暂无 DTU 透传场景，随该场景引入。
+2. **诊断结果落库留痕**：便于排障追溯。

@@ -1,7 +1,9 @@
 package smardaten
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +11,7 @@ import (
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 
 	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/output/mqtttest"
 	"iot-gateway-go/internal/output/mqttutil"
 )
@@ -164,7 +167,7 @@ func TestFlushResetsPendingCount(t *testing.T) {
 // 返回且不报错(非阻塞构造),这是「启动不卡」在 smardaten 的回归测试。
 func TestNewNonBlockingUnreachable(t *testing.T) {
 	start := time.Now()
-	out, err := New(Config{Broker: "tcp://192.0.2.1:1883", ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil, nil)
+	out, err := New(Config{Broker: "tcp://192.0.2.1:1883", ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil, nil, nil)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("New should not fail on unreachable broker, got %v", err)
@@ -183,7 +186,7 @@ func TestNewNonBlockingUnreachable(t *testing.T) {
 func TestNewWithReachableBroker(t *testing.T) {
 	b := mqtttest.StartSilent(t)
 	start := time.Now()
-	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil, nil)
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil, nil, nil)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -323,6 +326,243 @@ func TestServiceGetReturnsLatestValues(t *testing.T) {
 	// 关键断言:params 必须包含实际属性,不能只有 deviceId + reportTime。
 	if len(resp.Params) < 4 {
 		t.Errorf("params only has %d entries, want ≥4 (deviceId+reportTime+temperature+switch), got %v", len(resp.Params), resp.Params)
+	}
+}
+
+// ---------- 设备诊断(通道 6)测试 ----------
+
+// testMessage 是 paho.Message 的最小桩。
+type testMessage struct {
+	topic   string
+	payload []byte
+}
+
+func (m testMessage) Duplicate() bool        { return false }
+func (m testMessage) Qos() byte              { return 1 }
+func (m testMessage) Retained() bool         { return false }
+func (m testMessage) Topic() string          { return m.topic }
+func (m testMessage) MessageID() uint16      { return 0 }
+func (m testMessage) Payload() []byte        { return m.payload }
+func (m testMessage) Ack()                   {}
+
+// stateClient 在 captureClient 基础上可配置连接态(DC1001 用)。
+type stateClient struct {
+	*captureClient
+	connected bool
+}
+
+func (c *stateClient) IsConnected() bool { return c.connected }
+
+// newDiagnoseTestOutput 构造诊断测试用的 platformOutput,topics 含设备 dev1。
+func newDiagnoseTestOutput(client pahomqtt.Client, probe output.ProbeFunc, latestValues output.LatestValuesFunc) *platformOutput {
+	o := &platformOutput{
+		gatewayID:    "gw-1",
+		topics:       newTopicMapping(),
+		client:       client,
+		probe:        probe,
+		latestValues: latestValues,
+		connected:    make(map[string]bool),
+		mu:           sync.Mutex{},
+	}
+	o.topics.buildFrom(&ApplicationConfig{Devices: []PlatformDevice{{DeviceID: "dev1"}}})
+	return o
+}
+
+// diagnoseReq 是诊断请求的 JSON 载荷。
+var diagnoseReq = `{"deviceId":"dev1","controllerId":"ctrl1","diagnose_report_id":"rpt1","asset_id":"asset1","executeTime":1000}`
+
+// parseDiagnoseResp 解析响应并断言发布 topic。
+func parseDiagnoseResp(t *testing.T, client *captureClient) DiagnoseResponseMessage {
+	t.Helper()
+	topic, payload := client.last()
+	if topic != "/sys/gw-1/thing/event/diagnose/set_reply" {
+		t.Fatalf("resp topic = %q, want /sys/gw-1/thing/event/diagnose/set_reply", topic)
+	}
+	var resp DiagnoseResponseMessage
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	return resp
+}
+
+func findItem(resp DiagnoseResponseMessage, id string) *DiagnoseItem {
+	for i := range resp.Data {
+		if resp.Data[i].DiagnoseItemID == id {
+			return &resp.Data[i]
+		}
+	}
+	return nil
+}
+
+// TestDiagnoseEnvelope 验证响应包信封字段与两个诊断项齐全。
+func TestDiagnoseEnvelope(t *testing.T) {
+	client := &captureClient{}
+	o := newDiagnoseTestOutput(client, nil, nil)
+	o.handleDiagnose(nil, testMessage{topic: "/sys/gw-1/thing/event/diagnose/set", payload: []byte(diagnoseReq)})
+
+	resp := parseDiagnoseResp(t, client)
+	if resp.IssuanceTime != 1000 {
+		t.Errorf("issuance_time = %d, want 1000", resp.IssuanceTime)
+	}
+	if resp.AssetID != "asset1" {
+		t.Errorf("asset_id = %q, want asset1", resp.AssetID)
+	}
+	if len(resp.Data) != 2 {
+		t.Fatalf("items = %d, want 2 (DC1001 + DC1003)", len(resp.Data))
+	}
+	for _, id := range []string{"DC1001", "DC1003"} {
+		item := findItem(resp, id)
+		if item == nil {
+			t.Fatalf("missing item %s", id)
+		}
+		if item.DiagnoseReportID != "rpt1" {
+			t.Errorf("%s diagnose_report_id = %q, want rpt1", id, item.DiagnoseReportID)
+		}
+		if item.ExecuteTime == 0 {
+			t.Errorf("%s execute_time should be set", id)
+		}
+	}
+}
+
+// TestDiagnoseGatewayMQTTConnected/Disconnected:DC1001 以 MQTT 连接态为真实信号。
+func TestDiagnoseGatewayMQTTConnected(t *testing.T) {
+	client := &stateClient{captureClient: &captureClient{}, connected: true}
+	o := newDiagnoseTestOutput(client, nil, nil)
+	o.handleDiagnose(nil, testMessage{payload: []byte(diagnoseReq)})
+
+	item := findItem(parseDiagnoseResp(t, client.captureClient), "DC1001")
+	if item == nil || item.Status != 1 {
+		t.Fatalf("DC1001 connected should be status=1, got %+v", item)
+	}
+}
+
+func TestDiagnoseGatewayMQTTDisconnected(t *testing.T) {
+	client := &stateClient{captureClient: &captureClient{}, connected: false}
+	o := newDiagnoseTestOutput(client, nil, nil)
+	o.handleDiagnose(nil, testMessage{payload: []byte(diagnoseReq)})
+
+	item := findItem(parseDiagnoseResp(t, client.captureClient), "DC1001")
+	if item == nil || item.Status != 0 {
+		t.Fatalf("DC1001 disconnected should be status=0, got %+v", item)
+	}
+	if item.DiagnoseItemResultDesc != "网关 MQTT 连接断开" {
+		t.Errorf("DC1001 desc = %q, want 网关 MQTT 连接断开", item.DiagnoseItemResultDesc)
+	}
+}
+
+// TestDiagnoseDeviceNotFound:请求的 deviceId 不在 application.json → status=0。
+func TestDiagnoseDeviceNotFound(t *testing.T) {
+	client := &captureClient{}
+	o := newDiagnoseTestOutput(client, nil, nil)
+	req := `{"deviceId":"ghost","diagnose_report_id":"rpt1","executeTime":1000}`
+	o.handleDiagnose(nil, testMessage{payload: []byte(req)})
+
+	item := findItem(parseDiagnoseResp(t, client), "DC1003")
+	if item == nil || item.Status != 0 {
+		t.Fatalf("unknown device should be status=0, got %+v", item)
+	}
+	if item.DiagnoseItemResultDesc != "设备不存在: ghost" {
+		t.Errorf("desc = %q, want 设备不存在: ghost", item.DiagnoseItemResultDesc)
+	}
+}
+
+// TestDiagnoseDeviceSoftOnline/Offline:未注入探测回调时走软诊断。
+func TestDiagnoseDeviceSoftOnline(t *testing.T) {
+	client := &captureClient{}
+	o := newDiagnoseTestOutput(client, nil, nil)
+	o.mu.Lock()
+	o.connected["dev1"] = true
+	o.mu.Unlock()
+	o.handleDiagnose(nil, testMessage{payload: []byte(diagnoseReq)})
+
+	item := findItem(parseDiagnoseResp(t, client), "DC1003")
+	if item == nil || item.Status != 1 {
+		t.Fatalf("online device should be status=1, got %+v", item)
+	}
+}
+
+func TestDiagnoseDeviceSoftOffline(t *testing.T) {
+	client := &captureClient{}
+	o := newDiagnoseTestOutput(client, nil, nil)
+	o.handleDiagnose(nil, testMessage{payload: []byte(diagnoseReq)})
+
+	item := findItem(parseDiagnoseResp(t, client), "DC1003")
+	if item == nil || item.Status != 0 {
+		t.Fatalf("offline device should be status=0, got %+v", item)
+	}
+	if item.DiagnoseItemResultDesc != "设备离线" {
+		t.Errorf("desc = %q, want 设备离线", item.DiagnoseItemResultDesc)
+	}
+}
+
+// TestDiagnoseDeviceSoftFreshness:不在在线集合但最近采到有效值 → 视为在线。
+func TestDiagnoseDeviceSoftFreshness(t *testing.T) {
+	client := &captureClient{}
+	o := newDiagnoseTestOutput(client, nil, func(deviceID string) map[string]interface{} {
+		return map[string]interface{}{"p1": 23.5}
+	})
+	o.handleDiagnose(nil, testMessage{payload: []byte(diagnoseReq)})
+
+	item := findItem(parseDiagnoseResp(t, client), "DC1003")
+	if item == nil || item.Status != 1 {
+		t.Fatalf("device with fresh values should be status=1, got %+v", item)
+	}
+}
+
+// TestDiagnoseDeviceProbeSuccess/Failure:注入探测回调后做真实判定。
+func TestDiagnoseDeviceProbeSuccess(t *testing.T) {
+	client := &captureClient{}
+	probed := false
+	o := newDiagnoseTestOutput(client, func(_ context.Context, deviceID string) error {
+		probed = true
+		return nil
+	}, nil)
+	o.handleDiagnose(nil, testMessage{payload: []byte(diagnoseReq)})
+
+	if !probed {
+		t.Fatal("probe callback should be invoked when injected")
+	}
+	item := findItem(parseDiagnoseResp(t, client), "DC1003")
+	if item == nil || item.Status != 1 {
+		t.Fatalf("probe success should be status=1, got %+v", item)
+	}
+}
+
+func TestDiagnoseDeviceProbeFailure(t *testing.T) {
+	client := &captureClient{}
+	o := newDiagnoseTestOutput(client, func(_ context.Context, deviceID string) error {
+		return errors.New("read timeout")
+	}, nil)
+	o.handleDiagnose(nil, testMessage{payload: []byte(diagnoseReq)})
+
+	item := findItem(parseDiagnoseResp(t, client), "DC1003")
+	if item == nil || item.Status != 0 {
+		t.Fatalf("probe failure should be status=0, got %+v", item)
+	}
+	if item.DiagnoseItemResultDesc != "设备不可达: read timeout" {
+		t.Errorf("desc = %q, want 设备不可达: read timeout", item.DiagnoseItemResultDesc)
+	}
+}
+
+// TestDiagnoseDeviceProbeNotProbeableFallback:驱动不支持探测(ErrNotProbeable)时
+// 回退软诊断,不能把在线设备误判为不可达。
+func TestDiagnoseDeviceProbeNotProbeableFallback(t *testing.T) {
+	client := &captureClient{}
+	o := newDiagnoseTestOutput(client, func(_ context.Context, deviceID string) error {
+		return output.ErrNotProbeable
+	}, nil)
+	// 设备在线集合中含 dev1 → 软诊断判在线
+	o.mu.Lock()
+	o.connected["dev1"] = true
+	o.mu.Unlock()
+	o.handleDiagnose(nil, testMessage{payload: []byte(diagnoseReq)})
+
+	item := findItem(parseDiagnoseResp(t, client), "DC1003")
+	if item == nil || item.Status != 1 {
+		t.Fatalf("ErrNotProbeable with online device should fall back to status=1, got %+v", item)
+	}
+	if item.DiagnoseItemResultDesc != "设备在线" {
+		t.Errorf("desc = %q, want 设备在线", item.DiagnoseItemResultDesc)
 	}
 }
 

@@ -3,6 +3,7 @@ package output
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -12,7 +13,8 @@ import (
 
 // BuildContext 是构造输出所需的网关上下文:与输出自身配置无关的部分。
 // 由 main 注入(gatewayID 用于 topic/标识,Write 用于下行写回设备,Store 用于插件自动同步配置,
-// LatestValues 用于查询设备点位最新采集值,服务调用 get 等需要"设备当前属性值"的场景使用)。
+// LatestValues 用于查询设备点位最新采集值,服务调用 get 等需要"设备当前属性值"的场景使用;
+// Probe 用于设备连通性诊断(DC1003),经 core.ProbeDevice 做真实协议往返)。
 type BuildContext struct {
 	GatewayID string
 	Write     WriteFunc
@@ -21,11 +23,23 @@ type BuildContext struct {
 	// LatestValues 查询设备全部点位的最新采集值快照(pointID -> value)。
 	// 由 main 基于 values.Registry 注入;实现可返回空 map(设备从未采集到有效值)。
 	LatestValues LatestValuesFunc
+
+	// Probe 探测设备连通性(设备诊断 DC1003 用)。由 main 注入 core.ProbeDevice;
+	// 未注入时插件回退到在线状态等软信号诊断。
+	Probe ProbeFunc
 }
 
 // LatestValuesFunc 返回设备全部点位的最新采集值快照,key 为 pointID,value 为采集值。
 // 只包含有效值点位(值为 nil 的点位不返回,与 Publish 的 STRING/空值跳过语义一致)。
 type LatestValuesFunc func(deviceID string) map[string]interface{}
+
+// ProbeFunc 探测设备是否可达(连通性诊断)。返回 nil 表示可达;错误含具体原因
+// (设备不存在/驱动不支持/协议往返失败)。ctx 带超时,实现须可取消。
+type ProbeFunc func(ctx context.Context, deviceID string) error
+
+// ErrNotProbeable 是 Probe 返回的可识别错误:驱动的 Conn 未实现 Prober(无法做真实探测)。
+// 插件应 errors.Is 识别并回退到在线状态等软诊断,而不是把设备判为不可达。
+var ErrNotProbeable = errors.New("driver does not support probe")
 
 // WriteFunc 是下行写回调(如 ThingsBoard 共享属性 / RPC → 设备写)。
 // 由 main 注入,最终落到 core.WritePoint。

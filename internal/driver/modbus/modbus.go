@@ -213,6 +213,44 @@ func (c *modbusConn) Close() error {
 	return c.driver.release(c.shared)
 }
 
+// Probe 探测设备可达性(设备诊断 DC1003):优先读显式声明的固定读块(设备已知支持),
+// 否则读首个可解析点位,再回退读 holding 寄存器 0——均走 readRaw 真实协议往返。
+// 返回 nil 表示设备可达,非 nil 表示不可达(超时/无响应/传输错误)。
+func (c *modbusConn) Probe(ctx context.Context, points []model.Point) error {
+	// 1) 显式声明的固定读块:设备已知支持,最可靠
+	for _, blocks := range c.pollBlocks {
+		if len(blocks) == 0 {
+			continue
+		}
+		blk := blocks[0]
+		return c.probeRead(ctx, blk.Function, blk.Start, blk.Count)
+	}
+	// 2) 首个可解析点位(与采集同寻址语义)
+	for _, p := range points {
+		function, register, err := parseAddress(p.Address)
+		if err != nil {
+			continue
+		}
+		return c.probeRead(ctx, function, register, quantityOf(p.DataType))
+	}
+	// 3) 兜底:读 holding 寄存器 0
+	return c.probeRead(ctx, "holding", 0, 1)
+}
+
+// probeRead 执行一次真实读往返。modbus 异常码响应视为"设备可达"(证明设备在总线上,
+// 只是该地址非法),仅传输/超时等错误判为不可达。
+func (c *modbusConn) probeRead(ctx context.Context, function string, register, quantity uint16) error {
+	_, err := c.readRaw(ctx, function, register, quantity)
+	if err == nil {
+		return nil
+	}
+	var mbErr *modbus.Error
+	if errors.As(err, &mbErr) && mbErr.ExceptionCode != 0 {
+		return nil
+	}
+	return err
+}
+
 // Write 下发点位值:holding 寄存器写(16/32 位 + float32),coil 线圈写(bool)。
 // input/discrete 只读,标记 Ok=false。单点失败不阻断同批。
 func (c *modbusConn) Write(ctx context.Context, items []model.WriteItem) ([]driver.WriteResult, error) {

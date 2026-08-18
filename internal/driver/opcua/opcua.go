@@ -189,6 +189,18 @@ func (c *opcuaConn) Close() error {
 	return c.driver.release(c.shared)
 }
 
+// Probe 探测设备可达性(设备诊断 DC1003):对可解析点位做一次真实读往返。
+// OPC UA 单节点状态码(如 BadNodeIdUnknown)在 Read 响应内返回,能收到响应即证明
+// server 可达;仅 client.Read 的传输/会话错误判为不可达。
+func (c *opcuaConn) Probe(ctx context.Context, points []model.Point) error {
+	nodes, _ := planReads(points)
+	if len(nodes) == 0 {
+		return errors.New("opcua probe: no parseable points")
+	}
+	_, err := c.shared.client.Read(ctx, &ua.ReadRequest{NodesToRead: nodes})
+	return err
+}
+
 // Write 下发点位值:解析 NodeID 后构造批量 WriteRequest,按 server 返回 status 标记各点。
 // 单点 NodeID 解析失败或类型不匹配标记 Ok=false,不阻断同批。
 func (c *opcuaConn) Write(ctx context.Context, items []model.WriteItem) ([]driver.WriteResult, error) {

@@ -47,6 +47,15 @@ type Subscriber interface {
 	Subscribe(ctx context.Context, points []model.Point, onData func(model.DataPoint)) error
 }
 
+// Prober 是南向驱动的可选探测能力:实现它的 Conn 支持"设备连通性诊断"(如
+// smardaten-iot 通道 6 的 DC1003)。points 为该设备配置的全部点位,实现可取
+// 代表性点位做一次轻量协议级读来确认设备可达(与采集同寻址语义)。
+// 返回 nil 表示设备可达;非 nil 表示不可达(含原因)。未实现该接口的驱动,
+// 诊断方回退到在线状态等软信号。
+type Prober interface {
+	Probe(ctx context.Context, points []model.Point) error
+}
+
 // Listener 是南向驱动的可选监听能力:实现它的 Conn 表示网关被动 listen,
 // 设备主动连入并上报数据(与 Subscriber 的"网关主动订阅"相对)。
 // scheduler 检测到该能力后,不再按 intervalMs 定时调用 Read,而是注册一次

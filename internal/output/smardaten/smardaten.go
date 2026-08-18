@@ -3,6 +3,7 @@ package smardaten
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -26,6 +27,8 @@ const (
 	defaultFlushInterval = 200 * time.Millisecond
 	defaultMaxPubTime    = 60
 	writeTimeout         = 5 * time.Second
+	// probeTimeout 设备连通性探测(DC1003)的单次超时:超出即视为不可达。
+	probeTimeout = 3 * time.Second
 
 	// maxPendingPoints 待上报缓冲的全局上限:断连期间 flush 仍持续灌入时,
 	// 超过上限丢弃新点并告警,避免内存无界增长(正常时 flush 每 200ms 清空)。
@@ -100,7 +103,7 @@ func init() {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			return nil, fmt.Errorf("smardaten-iot config: %w", err)
 		}
-		return New(cfg, bc.GatewayID, bc.Write, bc.Store, bc.LatestValues)
+		return New(cfg, bc.GatewayID, bc.Write, bc.Store, bc.LatestValues, bc.Probe)
 	})
 }
 
@@ -113,6 +116,10 @@ type platformOutput struct {
 	// latestValues 查询设备点位最新采集值(服务调用 get 返回设备当前属性值)。
 	// 由 main 基于 values.Registry 注入;nil 时回退到待发缓冲(直接构造的旧测试兼容)。
 	latestValues output.LatestValuesFunc
+
+	// probe 设备连通性探测回调(设备诊断 DC1003)。由 main 注入 core.ProbeDevice,
+	// 做真实协议往返;nil 时回退到在线状态软诊断。
+	probe output.ProbeFunc
 
 	client pahomqtt.Client
 	qos    byte
@@ -148,7 +155,7 @@ type platformOutput struct {
 }
 
 // New 构造 smardaten-iot 平台输出。
-func New(cfg Config, gatewayID string, write output.WriteFunc, store output.StoreAccessor, latestValues output.LatestValuesFunc) (output.Output, error) {
+func New(cfg Config, gatewayID string, write output.WriteFunc, store output.StoreAccessor, latestValues output.LatestValuesFunc, probe output.ProbeFunc) (output.Output, error) {
 	if cfg.Broker == "" {
 		return nil, fmt.Errorf("smardaten-iot broker is required")
 	}
@@ -183,6 +190,7 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 		write:         write,
 		store:         store,
 		latestValues:  latestValues,
+		probe:         probe,
 		qos:           defaultQoS,
 		cfg:           cfg,
 		topics:        newTopicMapping(),
@@ -537,20 +545,8 @@ func (o *platformOutput) handleDiagnose(_ pahomqtt.Client, msg pahomqtt.Message)
 
 	now := time.Now().UnixMilli()
 	items := []DiagnoseItem{
-		{
-			DiagnoseReportID:       req.DiagnoseReportID,
-			DiagnoseItemID:         "DC1001",
-			DiagnoseItemResultDesc: "网关服务正常",
-			Status:                 1,
-			ExecuteTime:            now,
-		},
-		{
-			DiagnoseReportID:       req.DiagnoseReportID,
-			DiagnoseItemID:         "DC1003",
-			DiagnoseItemResultDesc: "设备在线",
-			Status:                 1,
-			ExecuteTime:            now,
-		},
+		o.diagnoseGateway(req, now), // DC1001: 网关服务
+		o.diagnoseDevice(req, now),  // DC1003: 设备连通性
 	}
 
 	resp := DiagnoseResponseMessage{
@@ -562,6 +558,90 @@ func (o *platformOutput) handleDiagnose(_ pahomqtt.Client, msg pahomqtt.Message)
 	topic := fmt.Sprintf("/sys/%s/thing/event/diagnose/set_reply", o.gatewayID)
 	data, _ := json.Marshal(resp)
 	o.client.Publish(topic, defaultQoS, false, data)
+}
+
+// diagnoseGateway 诊断网关服务（DC1001）:以网关↔平台 MQTT 连接态为真实信号,
+// 断连即报故障,避免"网关假死/断连时仍报正常"。
+func (o *platformOutput) diagnoseGateway(req DiagnoseRequestMessage, now int64) DiagnoseItem {
+	item := DiagnoseItem{
+		DiagnoseReportID: req.DiagnoseReportID,
+		DiagnoseItemID:   "DC1001",
+		ExecuteTime:      now,
+	}
+	if o.client != nil && o.client.IsConnected() {
+		item.Status = 1
+		item.DiagnoseItemResultDesc = "网关服务正常"
+	} else {
+		item.Status = 0
+		item.DiagnoseItemResultDesc = "网关 MQTT 连接断开"
+	}
+	return item
+}
+
+// diagnoseDevice 诊断设备连通性（DC1003）,分层判定,任一环节失败即 status=0:
+//  1. 设备是否存在于平台配置(application.json);不存在→"设备不存在"
+//  2. 已注入真实探测回调(core.ProbeDevice)时,做协议级读往返判定可达性
+//  3. 未注入/驱动不支持探测时,回退到软诊断:在线状态集合 + 最新值新鲜度
+func (o *platformOutput) diagnoseDevice(req DiagnoseRequestMessage, now int64) DiagnoseItem {
+	item := DiagnoseItem{
+		DiagnoseReportID: req.DiagnoseReportID,
+		DiagnoseItemID:   "DC1003",
+		ExecuteTime:      now,
+	}
+
+	if !o.topics.hasDevice(req.DeviceID) {
+		item.Status = 0
+		item.DiagnoseItemResultDesc = "设备不存在: " + req.DeviceID
+		return item
+	}
+
+	if o.probe != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		defer cancel()
+		err := o.probe(ctx, req.DeviceID)
+		if err == nil {
+			item.Status = 1
+			item.DiagnoseItemResultDesc = "设备在线"
+			return item
+		}
+		// 驱动不支持真实探测(未实现 Prober):回退软诊断,不能把设备误判为不可达
+		if errors.Is(err, output.ErrNotProbeable) {
+			if o.isDeviceOnlineSoft(req.DeviceID) {
+				item.Status = 1
+				item.DiagnoseItemResultDesc = "设备在线"
+				return item
+			}
+			item.Status = 0
+			item.DiagnoseItemResultDesc = "设备离线"
+			return item
+		}
+		item.Status = 0
+		item.DiagnoseItemResultDesc = "设备不可达: " + err.Error()
+		return item
+	}
+
+	if o.isDeviceOnlineSoft(req.DeviceID) {
+		item.Status = 1
+		item.DiagnoseItemResultDesc = "设备在线"
+		return item
+	}
+	item.Status = 0
+	item.DiagnoseItemResultDesc = "设备离线"
+	return item
+}
+
+// isDeviceOnlineSoft 软诊断:设备在在线状态集合,或最近采到有效值(值新鲜度兜底)。
+func (o *platformOutput) isDeviceOnlineSoft(deviceID string) bool {
+	o.mu.Lock()
+	online := o.connected[deviceID]
+	o.mu.Unlock()
+	if online {
+		return true
+	}
+	if o.latestValues != nil {
+		return len(o.latestValues(deviceID)) > 0
+	}
+	return false
 }
 
 // ---------- 配置加载 ----------
@@ -617,17 +697,17 @@ func (o *platformOutput) flush() {
 
 	now := time.Now().UnixMilli()
 
-	// 处理 disconnect
+	// 处理 disconnect/connect:更新在线集合(锁保护,供诊断等并发读取)。
+	// disconnects/connects 为上面锁内换出的本地副本,此处持锁处理无死锁风险。
+	// 注意:平台不支持 status=0,设备离线不上报离线事件,仅更新本地在线集合。
+	o.mu.Lock()
 	for deviceID := range disconnects {
 		delete(o.connected, deviceID)
-		// 平台不支持 status=0，不发送离线
-		_ = deviceID
 	}
-
-	// 处理 connect
 	for deviceID := range connects {
 		o.connected[deviceID] = true
 	}
+	o.mu.Unlock()
 
 	// 属性上报
 	for deviceID, points := range pending {
