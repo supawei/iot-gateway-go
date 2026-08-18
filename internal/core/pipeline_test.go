@@ -24,8 +24,12 @@ func (m *mockOutput) Close() error { return nil }
 // newTestManager 用一组输出构造 Manager 并完成首次 Reload。
 func newTestManager(t *testing.T, outs ...output.Output) *output.Manager {
 	t.Helper()
-	mgr := output.NewManager(func() ([]output.Output, error) {
-		return outs, nil
+	insts := make([]output.Instance, 0, len(outs))
+	for _, o := range outs {
+		insts = append(insts, output.Instance{Out: o})
+	}
+	mgr := output.NewManager(func() ([]output.Instance, error) {
+		return insts, nil
 	})
 	if err := mgr.Reload(); err != nil {
 		t.Fatalf("reload outputs: %v", err)

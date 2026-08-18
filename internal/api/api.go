@@ -91,6 +91,7 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/outputs", a.require(auth.ScopeOutputsRead, a.listOutputs))
 	mux.HandleFunc("POST /api/v1/outputs", a.require(auth.ScopeOutputsWrite, a.createOutput))
 	mux.HandleFunc("GET /api/v1/outputs/{outputId}", a.require(auth.ScopeOutputsRead, a.getOutput))
+	mux.HandleFunc("GET /api/v1/outputs/status", a.require(auth.ScopeStatusRead, a.listOutputStatus))
 	mux.HandleFunc("PUT /api/v1/outputs/{outputId}", a.require(auth.ScopeOutputsWrite, a.putOutput))
 	mux.HandleFunc("DELETE /api/v1/outputs/{outputId}", a.require(auth.ScopeOutputsWrite, a.deleteOutput))
 	// 网关设置(网关 ID,默认预置,管理员可改)
@@ -543,6 +544,42 @@ func (a *API) getOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, maskOutput(o))
+}
+
+// listOutputStatus 返回输出运行态:Manager 运行时状态 × store 配置合并。
+// 配置存在但未运行(禁用或构建失败)的输出以 Active=false 呈现。
+// 见 docs/output-status-design.md。
+func (a *API) listOutputStatus(w http.ResponseWriter, r *http.Request) {
+	configs, err := a.store.ListOutputs()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	active := make(map[string]output.OutputStatus, len(configs))
+	if a.outputs != nil {
+		for _, st := range a.outputs.Status() {
+			active[st.OutputID] = st
+		}
+	}
+	result := make([]output.OutputStatus, 0, len(configs))
+	for _, c := range configs {
+		if st, ok := active[c.ID]; ok {
+			// 身份以 store 配置为准(名称/类型/启用以配置为权威)。
+			st.Name = c.Name
+			st.Type = c.Type
+			st.Enabled = c.Enabled
+			result = append(result, st)
+			continue
+		}
+		result = append(result, output.OutputStatus{
+			OutputID: c.ID,
+			Name:     c.Name,
+			Type:     c.Type,
+			Enabled:  c.Enabled,
+			Active:   false,
+		})
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *API) createOutput(w http.ResponseWriter, r *http.Request) {

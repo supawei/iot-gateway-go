@@ -222,3 +222,18 @@ func TestNewRejectsError(t *testing.T) {
 		t.Fatal("New should return error when TDengine returns code != 0")
 	}
 }
+
+// TestRuntimeStatusPending RuntimeStatus 应如实上报待写缓冲长度。
+func TestRuntimeStatusPending(t *testing.T) {
+	o := &tdengineOutput{}
+	o.mu.Lock()
+	o.pending = []model.DataPoint{{DeviceID: "d", Point: "p"}}
+	o.mu.Unlock()
+	st := o.RuntimeStatus()
+	if st.Pending != 1 {
+		t.Fatalf("pending = %d, want 1", st.Pending)
+	}
+	if st.Connected || st.ConnectionOpen {
+		t.Fatal("tdengine has no connection state")
+	}
+}

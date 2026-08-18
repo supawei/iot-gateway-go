@@ -42,6 +42,10 @@ func TestBuildSetPartialFailure(t *testing.T) {
 	if len(outs) != 1 {
 		t.Fatalf("got %d outputs, want 1 (only the failing one skipped)", len(outs))
 	}
+	// Instance 应携带配置身份(供运行态关联)
+	if outs[0].ID != "o1" || outs[0].Type != "testset-ok" || !outs[0].Enabled || outs[0].Out == nil {
+		t.Fatalf("instance identity not carried: %+v", outs[0])
+	}
 }
 
 // TestBuildSetAllFail 有启用项但全部失败时返回错误(调用方据此保留旧输出)。

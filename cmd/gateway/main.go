@@ -180,7 +180,7 @@ func fatal(msg string, args ...any) {
 // 经 output.BuildSet 逐个构建。单个输出失败仅跳过(失败隔离),全失败才返回错误,
 // 由 Manager 保留旧输出(原子替换语义)。
 func buildOutputs(st *store.Store, write output.WriteFunc) output.BuildFunc {
-	return func() ([]output.Output, error) {
+	return func() ([]output.Instance, error) {
 		gatewayID, err := st.GetGatewayID()
 		if err != nil {
 			return nil, err

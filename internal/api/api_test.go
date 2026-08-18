@@ -1132,7 +1132,7 @@ func TestGatewayWriteTriggersReload(t *testing.T) {
 
 	var mu sync.Mutex
 	var reloads int
-	mgr := output.NewManager(func() ([]output.Output, error) {
+	mgr := output.NewManager(func() ([]output.Instance, error) {
 		mu.Lock()
 		reloads++
 		mu.Unlock()
@@ -1163,7 +1163,7 @@ func TestOutputWriteTriggersReload(t *testing.T) {
 
 	var mu sync.Mutex
 	var reloads int
-	mgr := output.NewManager(func() ([]output.Output, error) {
+	mgr := output.NewManager(func() ([]output.Instance, error) {
 		mu.Lock()
 		reloads++
 		mu.Unlock()
@@ -1285,5 +1285,89 @@ func TestErrorBodyUniformCode(t *testing.T) {
 	}
 	if got := errorCode(t, rec); got != "forbidden" {
 		t.Fatalf("403 code: got %q want forbidden", got)
+	}
+}
+
+// statusStubOutput 实现 Output + StatusProvider,供输出状态合并测试使用。
+type statusStubOutput struct {
+	rt output.RuntimeStatus
+}
+
+func (s *statusStubOutput) Publish(model.DataPoint) error { return nil }
+func (s *statusStubOutput) Close() error                  { return nil }
+func (s *statusStubOutput) RuntimeStatus() output.RuntimeStatus {
+	return s.rt
+}
+
+// TestOutputStatusMerge 验证 /outputs/status 合并 store 配置与 Manager 运行态。
+func TestOutputStatusMerge(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	// out-1 运行中(带类型相关状态);out-2 配置存在但禁用。
+	mgr := output.NewManager(func() ([]output.Instance, error) {
+		return []output.Instance{{
+			Out:     &statusStubOutput{rt: output.RuntimeStatus{Connected: true, ConnectionOpen: true, Pending: 7, Sent: 42}},
+			ID:      "out-1",
+			Name:    "运行中",
+			Type:    "smardaten-iot",
+			Enabled: true,
+		}}, nil
+	})
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	t.Cleanup(mgr.Close)
+
+	if err := st.SaveOutput(model.Output{ID: "out-1", Name: "运行中", Type: "smardaten-iot", Enabled: true, Config: json.RawMessage(`{}`)}); err != nil {
+		t.Fatalf("save out-1: %v", err)
+	}
+	if err := st.SaveOutput(model.Output{ID: "out-2", Name: "禁用", Type: "mqtt", Enabled: false, Config: json.RawMessage(`{}`)}); err != nil {
+		t.Fatalf("save out-2: %v", err)
+	}
+
+	handler := New(st, status.NewRegistry(), values.NewRegistry(), nil, false, mgr).Routes()
+	rec := doRequest(t, handler, "GET", "/api/v1/outputs/status", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var list []output.OutputStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("len = %d, want 2: %+v", len(list), list)
+	}
+	byID := make(map[string]output.OutputStatus, len(list))
+	for _, s := range list {
+		byID[s.OutputID] = s
+	}
+	o1 := byID["out-1"]
+	if !o1.Active || !o1.Connected || !o1.ConnectionOpen || o1.Pending != 7 || o1.Sent != 42 {
+		t.Fatalf("out-1 status: %+v", o1)
+	}
+	o2 := byID["out-2"]
+	if o2.Active || o2.Type != "mqtt" || o2.Name != "禁用" || o2.Enabled {
+		t.Fatalf("out-2 status: %+v", o2)
+	}
+}
+
+// TestOutputStatusNoManager 未接线 Manager 时返回配置列表(全部 Active=false),不 panic。
+func TestOutputStatusNoManager(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+	rec := doRequest(t, handler, "GET", "/api/v1/outputs/status", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var list []output.OutputStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("empty store should yield empty status, got %+v", list)
 	}
 }

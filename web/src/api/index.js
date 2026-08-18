@@ -66,6 +66,7 @@ export const api = {
   // 北向输出
   listOutputs: () => http.get('/outputs'),
   listOutputTypes: () => http.get('/outputs/types'),
+  listOutputStatus: () => http.get('/outputs/status'),
   createOutput: (data) => http.post('/outputs', data),
   updateOutput: (id, data) => http.put(`/outputs/${id}`, data),
   deleteOutput: (id) => http.delete(`/outputs/${id}`),

@@ -138,6 +138,9 @@ type platformOutput struct {
 	flushInterval time.Duration
 	done          chan struct{}
 	wg            sync.WaitGroup
+
+	// 实际上送统计(见 docs/output-status-design.md)
+	output.SendStats
 }
 
 // New 构造 smardaten-iot 平台输出。
@@ -260,6 +263,28 @@ func (o *platformOutput) Close() error {
 	o.flush()
 	o.client.Disconnect(uint(disconnectQuiesce / time.Millisecond))
 	return nil
+}
+
+// RuntimeStatus 实现 output.StatusProvider:报告 MQTT 连接态、内部待发缓冲与上送统计。
+func (o *platformOutput) RuntimeStatus() output.RuntimeStatus {
+	o.mu.Lock()
+	pending := o.pendingCount
+	o.mu.Unlock()
+	sent, lastSentAt, lastErr, lastErrAt := o.SendStats.Snapshot()
+	var connected, open bool
+	if o.client != nil {
+		connected = o.client.IsConnected()
+		open = o.client.IsConnectionOpen()
+	}
+	return output.RuntimeStatus{
+		Connected:      connected,
+		ConnectionOpen: open,
+		Pending:        pending,
+		Sent:           sent,
+		LastSentAt:     lastSentAt,
+		LastError:      lastErr,
+		LastErrorAt:    lastErrAt,
+	}
 }
 
 // ---------- MQTT 连接 ----------
@@ -608,9 +633,11 @@ func (o *platformOutput) flush() {
 
 		// 有界等待:半死 broker 时最多阻塞 PublishTimeout 后报错,不卡死 flusher。
 		if err := mqttutil.WaitToken(o.client.Publish(eventTopic, defaultQoS, false, data), mqttutil.PublishTimeout); err != nil {
+			o.SendStats.Failure(err)
 			slog.Error("publish property report", "device", deviceID, "topic", eventTopic, "err", err)
 			continue
 		}
+		o.SendStats.Success(time.Now())
 
 		// 紧随属性上报后发送设备状态上报（通道 4）
 		o.publishDeviceStatus(deviceID, now)

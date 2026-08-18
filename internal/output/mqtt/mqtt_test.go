@@ -48,3 +48,27 @@ func TestPublishTimeout(t *testing.T) {
 		t.Fatalf("Publish blocked for %v, want ≤ %v+1s", elapsed, mqttutil.PublishTimeout)
 	}
 }
+
+// TestRuntimeStatusConnected 连接建立后 RuntimeStatus 应上报 connected=true。
+func TestRuntimeStatusConnected(t *testing.T) {
+	b := mqtttest.StartSilent(t)
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "st", QoS: 1}, "gw-01")
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer out.Close()
+	mo := out.(*mqttOutput)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		st := mo.RuntimeStatus()
+		if st.ConnectionOpen {
+			if !st.Connected {
+				t.Fatal("connected should be true when connection is open")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("connection never opened")
+}

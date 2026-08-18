@@ -84,6 +84,9 @@ type tdengineOutput struct {
 
 	done chan struct{}
 	wg   sync.WaitGroup
+
+	// 实际上送统计(见 docs/output-status-design.md)
+	output.SendStats
 }
 
 // New 构造 TDengine 输出:校验配置、建库建表(幂等)、启动 flusher goroutine。
@@ -204,8 +207,27 @@ func (o *tdengineOutput) flush() {
 			o.created[child] = true
 		}
 		if err := o.exec(buildInsertSQL(o.db, child, groups[k])); err != nil {
+			o.SendStats.Failure(err)
 			slog.Error("tdengine insert failed", "device", k.deviceID, "point", k.point, "err", err)
+			continue
 		}
+		o.SendStats.Success(time.Now())
+	}
+}
+
+// RuntimeStatus 实现 output.StatusProvider:TDengine 为 HTTP 无长连接,Connected 恒 false,
+// 健康由 LastError/LastSentAt 体现;Pending 为待写缓冲长度。
+func (o *tdengineOutput) RuntimeStatus() output.RuntimeStatus {
+	o.mu.Lock()
+	pending := len(o.pending)
+	o.mu.Unlock()
+	sent, lastSentAt, lastErr, lastErrAt := o.SendStats.Snapshot()
+	return output.RuntimeStatus{
+		Pending:     pending,
+		Sent:        sent,
+		LastSentAt:  lastSentAt,
+		LastError:   lastErr,
+		LastErrorAt: lastErrAt,
 	}
 }
 

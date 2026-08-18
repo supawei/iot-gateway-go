@@ -51,6 +51,8 @@ type mqttOutput struct {
 	client    pahomqtt.Client
 	gatewayID string
 	qos       byte
+	// 实际上送统计(见 docs/output-status-design.md)
+	output.SendStats
 }
 
 func New(cfg Config, gatewayID string) (output.Output, error) {
@@ -78,7 +80,26 @@ func (m *mqttOutput) Publish(dp model.DataPoint) error {
 		return fmt.Errorf("marshal datapoint: %w", err)
 	}
 	// 有界等待:半死 broker 时最多阻塞 PublishTimeout 后返回错误,绝不永久卡死发布 goroutine。
-	return mqttutil.WaitToken(m.client.Publish(topic, m.qos, false, payload), mqttutil.PublishTimeout)
+	err = mqttutil.WaitToken(m.client.Publish(topic, m.qos, false, payload), mqttutil.PublishTimeout)
+	if err != nil {
+		m.SendStats.Failure(err)
+		return err
+	}
+	m.SendStats.Success(time.Now())
+	return nil
+}
+
+// RuntimeStatus 实现 output.StatusProvider:报告 MQTT 连接态与上送统计。
+func (m *mqttOutput) RuntimeStatus() output.RuntimeStatus {
+	sent, lastSentAt, lastErr, lastErrAt := m.SendStats.Snapshot()
+	return output.RuntimeStatus{
+		Connected:      m.client.IsConnected(),
+		ConnectionOpen: m.client.IsConnectionOpen(),
+		Sent:           sent,
+		LastSentAt:     lastSentAt,
+		LastError:      lastErr,
+		LastErrorAt:    lastErrAt,
+	}
 }
 
 func (m *mqttOutput) Close() error {

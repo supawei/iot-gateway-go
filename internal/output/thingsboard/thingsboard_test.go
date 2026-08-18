@@ -174,3 +174,21 @@ func TestNewWithReachableBroker(t *testing.T) {
 	}
 	out.Close()
 }
+
+// TestRuntimeStatusPending RuntimeStatus 应如实上报内部待发缓冲,且无 client 时不 panic。
+func TestRuntimeStatusPending(t *testing.T) {
+	o := &thingsboardOutput{
+		pending: make(map[string][]model.DataPoint),
+	}
+	dp := model.DataPoint{DeviceID: "sensor-01", Point: "temperature", Value: 25.5, Timestamp: time.Now()}
+	for i := 0; i < 3; i++ {
+		o.Publish(dp)
+	}
+	st := o.RuntimeStatus()
+	if st.Pending != 3 {
+		t.Fatalf("pending = %d, want 3", st.Pending)
+	}
+	if st.Connected || st.ConnectionOpen {
+		t.Fatal("nil client should report not connected")
+	}
+}

@@ -107,6 +107,9 @@ type thingsboardOutput struct {
 	writeCh chan writeRequest // 下行写请求队列(非阻塞投递,不关闭)
 	done    chan struct{}
 	wg      sync.WaitGroup
+
+	// 实际上送统计(见 docs/output-status-design.md)
+	output.SendStats
 }
 
 type writeRequest struct {
@@ -420,7 +423,35 @@ func (o *thingsboardOutput) publish(topic string, payload interface{}) error {
 		return fmt.Errorf("thingsboard marshal: %w", err)
 	}
 	// 有界等待:半死 broker 时最多阻塞 PublishTimeout 后报错,不卡死 flusher。
-	return mqttutil.WaitToken(o.client.Publish(topic, o.qos, false, data), mqttutil.PublishTimeout)
+	err = mqttutil.WaitToken(o.client.Publish(topic, o.qos, false, data), mqttutil.PublishTimeout)
+	if err != nil {
+		o.SendStats.Failure(err)
+		return err
+	}
+	o.SendStats.Success(time.Now())
+	return nil
+}
+
+// RuntimeStatus 实现 output.StatusProvider:报告 MQTT 连接态、内部待发缓冲与上送统计。
+func (o *thingsboardOutput) RuntimeStatus() output.RuntimeStatus {
+	o.mu.Lock()
+	pending := o.pendingCount
+	o.mu.Unlock()
+	sent, lastSentAt, lastErr, lastErrAt := o.SendStats.Snapshot()
+	var connected, open bool
+	if o.client != nil {
+		connected = o.client.IsConnected()
+		open = o.client.IsConnectionOpen()
+	}
+	return output.RuntimeStatus{
+		Connected:      connected,
+		ConnectionOpen: open,
+		Pending:        pending,
+		Sent:           sent,
+		LastSentAt:     lastSentAt,
+		LastError:      lastErr,
+		LastErrorAt:    lastErrAt,
+	}
 }
 
 func (o *thingsboardOutput) Close() error {

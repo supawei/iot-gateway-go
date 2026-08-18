@@ -317,8 +317,8 @@ func (m *mockNotifier) DeviceOffline(id string)       { m.offline = append(m.off
 func TestSchedulerNotifiesTransitions(t *testing.T) {
 	reg := status.NewRegistry()
 	n := &mockNotifier{}
-	mgr := output.NewManager(func() ([]output.Output, error) {
-		return []output.Output{n}, nil
+	mgr := output.NewManager(func() ([]output.Instance, error) {
+		return []output.Instance{{Out: n}}, nil
 	})
 	if err := mgr.Reload(); err != nil {
 		t.Fatalf("reload outputs: %v", err)
