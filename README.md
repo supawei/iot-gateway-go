@@ -248,3 +248,7 @@ internal/
   config/             YAML 配置
 web/                  管理界面(Vue 3 + Element Plus,dist 经 go:embed 内嵌)
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 iot-gateway-go contributors
