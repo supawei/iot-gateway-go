@@ -2,11 +2,20 @@ package opcua
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
+	"net"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +23,7 @@ import (
 	"github.com/gopcua/opcua"
 	"github.com/gopcua/opcua/id"
 	"github.com/gopcua/opcua/ua"
+	"github.com/gopcua/opcua/uapolicy"
 
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
@@ -48,10 +58,21 @@ func (*opcuaDriver) EndpointKey(connection json.RawMessage) string {
 
 // ConfigSchema 声明 Connection.config 结构。
 func (*opcuaDriver) ConfigSchema() []driver.Field {
+	secShow := &driver.ShowWhen{Field: "securityMode", In: []string{"sign", "signAndEncrypt"}}
 	return []driver.Field{
 		{Name: "endpoint", Label: "端点", Type: driver.FieldString, Required: true, Placeholder: "opc.tcp://192.168.1.5:4840"},
 		{Name: "mode", Label: "采集模式", Type: driver.FieldEnum, Default: "poll", Options: []string{"poll", "subscribe"}, Hint: "poll=轮询 / subscribe=订阅推送"},
-		{Name: "securityMode", Label: "安全模式", Type: driver.FieldEnum, Default: "none", Options: []string{"none"}},
+		{Name: "securityMode", Label: "安全模式", Type: driver.FieldEnum, Default: "none", Options: []string{"none", "sign", "signAndEncrypt"},
+			Hint: "sign=签名防篡改 / signAndEncrypt=签名+加密"},
+		{Name: "securityPolicy", Label: "安全策略", Type: driver.FieldEnum, Default: "auto",
+			Options: []string{"auto", "Basic128Rsa15", "Basic256", "Basic256Sha256", "Aes128Sha256RsaOaep", "Aes256Sha256RsaPss"},
+			Hint:    "auto=按服务器端点协商选最强;Basic256Sha256 为工业界事实标准", ShowWhen: secShow},
+		{Name: "clientCertFile", Label: "客户端证书", Type: driver.FieldString, Placeholder: "opcua-client-cert.pem",
+			Hint: "留空自动生成自签证书(工作目录)", ShowWhen: secShow},
+		{Name: "clientKeyFile", Label: "客户端私钥", Type: driver.FieldString, Placeholder: "opcua-client-key.pem",
+			Hint: "留空自动生成;证书/私钥须成对配置", ShowWhen: secShow},
+		{Name: "serverThumbprint", Label: "服务器证书指纹", Type: driver.FieldString,
+			Hint: "40 位 SHA-1 指纹(hex);设置后建连前校验,防中间人/防证书被换", ShowWhen: secShow},
 		{Name: "username", Label: "用户名", Type: driver.FieldString, Hint: "留空为匿名"},
 		{Name: "password", Label: "密码", Type: driver.FieldString},
 		{Name: "timeout", Label: "请求超时", Type: driver.FieldString, Default: "5s"},
@@ -664,9 +685,17 @@ func notificationToDataPoint(deviceID string, point model.Point, dv *ua.DataValu
 type connConfig struct {
 	Endpoint     string `json:"endpoint"`
 	SecurityMode string `json:"securityMode"`
-	Username     string `json:"username"`
-	Password     string `json:"password"`
-	Timeout      string `json:"timeout"`
+	// SecurityPolicy 安全策略(仅 securityMode != none 生效):"auto"(默认,按端点协商)
+	// 或 Basic128Rsa15/Basic256/Basic256Sha256/Aes128Sha256RsaOaep/Aes256Sha256RsaPss。
+	SecurityPolicy string `json:"securityPolicy"`
+	// ClientCertFile/ClientKeyFile 客户端证书与私钥文件;留空自动生成(工作目录)。
+	ClientCertFile string `json:"clientCertFile"`
+	ClientKeyFile  string `json:"clientKeyFile"`
+	// ServerThumbprint 服务器证书 SHA-1 指纹(40 位 hex);设置后建连前校验(信任锚点)。
+	ServerThumbprint string `json:"serverThumbprint"`
+	Username         string `json:"username"`
+	Password         string `json:"password"`
+	Timeout          string `json:"timeout"`
 	// Mode 采集模式:"poll"(默认,按周期轮询) 或 "subscribe"(订阅,数据变化即推送)。
 	Mode string `json:"mode"`
 	// PublishInterval 订阅发布间隔(如 "1s"、"500ms");仅 Mode=subscribe 时生效。
@@ -681,12 +710,24 @@ const (
 	modePoll      = "poll"
 	modeSubscribe = "subscribe"
 
+	modeSecurityNone           = "none"
+	modeSecuritySign           = "sign"
+	modeSecuritySignAndEncrypt = "signAndEncrypt"
+
 	defaultPublishInterval = 1 * time.Second
 	defaultQueueSize       = 10
 
 	// opc.tcp URL 未写端口时的缺省值,用于端点归一化
 	defaultEndpointPort = "4840"
+
+	// 客户端自动生成证书/私钥的默认文件名(网关工作目录)
+	defaultClientCertFile = "opcua-client-cert.pem"
+	defaultClientKeyFile  = "opcua-client-key.pem"
+	clientCertValidFor    = 10 * 365 * 24 * time.Hour
 )
+
+// supportedSecurityPolicies 是允许配置的安全策略(短名;auto 表示按端点协商)。
+var supportedSecurityPolicies = []string{"Basic128Rsa15", "Basic256", "Basic256Sha256", "Aes128Sha256RsaOaep", "Aes256Sha256RsaPss"}
 
 func parseConnConfig(raw json.RawMessage) (connConfig, error) {
 	cfg := connConfig{SecurityMode: "none", Timeout: "5s", Mode: modePoll}
@@ -701,8 +742,40 @@ func parseConnConfig(raw json.RawMessage) (connConfig, error) {
 	if cfg.SecurityMode == "" {
 		cfg.SecurityMode = "none"
 	}
-	if cfg.SecurityMode != "none" {
-		return connConfig{}, fmt.Errorf("opcua securityMode %q not supported (only \"none\" for now)", cfg.SecurityMode)
+	switch cfg.SecurityMode {
+	case modeSecurityNone, modeSecuritySign, modeSecuritySignAndEncrypt:
+	default:
+		return connConfig{}, fmt.Errorf("opcua securityMode %q not supported (only %q, %q or %q)", cfg.SecurityMode, modeSecurityNone, modeSecuritySign, modeSecuritySignAndEncrypt)
+	}
+	if cfg.SecurityMode != modeSecurityNone {
+		// 安全策略校验(空/auto 允许)
+		if p := strings.TrimSpace(cfg.SecurityPolicy); p != "" && p != "auto" {
+			ok := false
+			for _, supported := range supportedSecurityPolicies {
+				if strings.EqualFold(p, supported) {
+					cfg.SecurityPolicy = supported
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				return connConfig{}, fmt.Errorf("opcua securityPolicy %q not supported (auto/%v)", cfg.SecurityPolicy, supportedSecurityPolicies)
+			}
+		}
+		// 客户端证书/私钥须成对
+		if (cfg.ClientCertFile == "") != (cfg.ClientKeyFile == "") {
+			return connConfig{}, errors.New("opcua clientCertFile and clientKeyFile must be set together")
+		}
+		// 服务器指纹须为 40 位 hex(SHA-1)
+		if s := strings.TrimSpace(cfg.ServerThumbprint); s != "" {
+			if len(s) != 40 {
+				return connConfig{}, fmt.Errorf("opcua serverThumbprint must be 40 hex chars, got %d", len(s))
+			}
+			if _, err := hex.DecodeString(s); err != nil {
+				return connConfig{}, fmt.Errorf("opcua serverThumbprint must be hex: %w", err)
+			}
+			cfg.ServerThumbprint = strings.ToLower(s)
+		}
 	}
 	if cfg.Timeout == "" {
 		cfg.Timeout = "5s"
@@ -733,15 +806,34 @@ const opcuaReconnectInterval = 5 * time.Second
 
 // buildClient 建立启用了自动重连的 OPC UA client:连接断开后库自动重连,
 // 状态变更经 stateCh 输出供 monitorConnState 记录离线/恢复。
+// securityMode=none 走原路径;sign/signAndEncrypt 走安全建连(见 selectEndpoint)。
 func buildClient(ctx context.Context, cfg connConfig) (*opcua.Client, error) {
 	timeout, _ := time.ParseDuration(cfg.Timeout)
 	stateCh := make(chan opcua.ConnState, 8)
 	opts := []opcua.Option{
-		opcua.SecurityMode(ua.MessageSecurityModeNone),
 		opcua.RequestTimeout(timeout),
 		opcua.AutoReconnect(true),
 		opcua.ReconnectInterval(opcuaReconnectInterval),
 		opcua.StateChangedCh(stateCh),
+	}
+	if cfg.SecurityMode == modeSecurityNone {
+		opts = append(opts, opcua.SecurityMode(ua.MessageSecurityModeNone))
+	} else {
+		// 安全建连:客户端证书 → 端点发现匹配 → 服务器指纹校验 → SecurityFromEndpoint
+		cert, key, err := ensureClientCert(cfg.ClientCertFile, cfg.ClientKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		ep, err := selectEndpoint(ctx, cfg, cert, key)
+		if err != nil {
+			return nil, err
+		}
+		authType := ua.UserTokenTypeAnonymous
+		if cfg.Username != "" {
+			authType = ua.UserTokenTypeUserName
+		}
+		opts = append(opts, opcua.Certificate(cert), opcua.PrivateKey(key), opcua.SecurityFromEndpoint(ep, authType))
+		slog.Info("opcua secure connection", "endpoint", cfg.Endpoint, "mode", cfg.SecurityMode, "policy", ep.SecurityPolicyURI, "securityLevel", ep.SecurityLevel)
 	}
 	if cfg.Username != "" {
 		opts = append(opts, opcua.AuthUsername(cfg.Username, cfg.Password))
@@ -757,6 +849,178 @@ func buildClient(ctx context.Context, cfg connConfig) (*opcua.Client, error) {
 	}
 	go monitorConnState(ctx, cfg.Endpoint, stateCh)
 	return client, nil
+}
+
+// selectEndpoint 经 GetEndpoints 发现服务器端点,按 securityMode/securityPolicy 匹配
+// (auto 选同 mode 下 SecurityLevel 最高),并对 ep 内嵌的服务器证书做指纹校验。
+// 注:gopcua 不做证书链/信任校验,指纹校验是网关补的信任锚点(防中间人/防证书被换)。
+func selectEndpoint(ctx context.Context, cfg connConfig, cert []byte, key *rsa.PrivateKey) (*ua.EndpointDescription, error) {
+	endpoints, err := opcua.GetEndpoints(ctx, cfg.Endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("opcua security: get endpoints %q: %w", cfg.Endpoint, err)
+	}
+	mode := securityModeEnum(cfg.SecurityMode)
+	wantPolicy := strings.TrimSpace(cfg.SecurityPolicy)
+	var best *ua.EndpointDescription
+	for _, ep := range endpoints {
+		if ep.SecurityMode != mode {
+			continue
+		}
+		if wantPolicy != "" && wantPolicy != "auto" && ep.SecurityPolicyURI != ua.FormatSecurityPolicyURI(wantPolicy) {
+			continue
+		}
+		if best == nil || ep.SecurityLevel >= best.SecurityLevel {
+			best = ep
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("opcua security: no endpoint for mode %s policy %q; server offers: %s", mode, wantPolicy, endpointSummary(endpoints))
+	}
+	// 服务器证书指纹校验(信任锚点)
+	if s := cfg.ServerThumbprint; s != "" {
+		got := hex.EncodeToString(uapolicy.Thumbprint(best.ServerCertificate))
+		if !strings.EqualFold(got, s) {
+			return nil, fmt.Errorf("opcua security: server certificate thumbprint mismatch (server %s, configured %s) — 可能被中间人篡改或配置错误", got, s)
+		}
+		slog.Info("opcua server certificate thumbprint verified", "endpoint", cfg.Endpoint)
+	}
+	return best, nil
+}
+
+func securityModeEnum(s string) ua.MessageSecurityMode {
+	switch {
+	case strings.EqualFold(s, modeSecuritySign):
+		return ua.MessageSecurityModeSign
+	case strings.EqualFold(s, modeSecuritySignAndEncrypt):
+		return ua.MessageSecurityModeSignAndEncrypt
+	default:
+		return ua.MessageSecurityModeNone
+	}
+}
+
+func endpointSummary(endpoints []*ua.EndpointDescription) string {
+	parts := make([]string, 0, len(endpoints))
+	for _, ep := range endpoints {
+		parts = append(parts, fmt.Sprintf("%s/%s(level=%d)", ep.SecurityPolicyURI, ep.SecurityMode, ep.SecurityLevel))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ensureClientCert 返回客户端证书(DER)与 RSA 私钥,供安全建连使用。
+// 配置了 clientCertFile/clientKeyFile 则加载;留空则自动生成自签证书并持久化到
+// 网关工作目录(opcua-client-cert.pem / opcua-client-key.pem),仅生成一次,后续复用。
+func ensureClientCert(certFile, keyFile string) ([]byte, *rsa.PrivateKey, error) {
+	useDefault := certFile == "" && keyFile == ""
+	if useDefault {
+		certFile, keyFile = defaultClientCertFile, defaultClientKeyFile
+	}
+	if certFile == "" || keyFile == "" {
+		return nil, nil, errors.New("opcua security: clientCertFile and clientKeyFile must be set together")
+	}
+	certPEM, certErr := os.ReadFile(certFile)
+	keyPEM, keyErr := os.ReadFile(keyFile)
+	if certErr == nil && keyErr == nil {
+		return parseClientCert(certPEM, keyPEM)
+	}
+	if useDefault {
+		// 自动生成(默认路径缺失即生成;用户显式路径缺失则报错,避免覆盖)
+		certPEM, keyPEM, err := generateClientCert()
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := os.WriteFile(certFile, certPEM, 0o644); err != nil {
+			return nil, nil, fmt.Errorf("opcua security: write client cert %s: %w", certFile, err)
+		}
+		if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+			return nil, nil, fmt.Errorf("opcua security: write client key %s: %w", keyFile, err)
+		}
+		slog.Info("opcua client certificate generated", "cert", certFile, "key", keyFile)
+		return parseClientCert(certPEM, keyPEM)
+	}
+	return nil, nil, fmt.Errorf("opcua security: load client cert/key: cert=%v key=%v", certErr, keyErr)
+}
+
+// parseClientCert 从 PEM 证书与私钥解析出 DER 证书与 RSA 私钥(gopcua 需要 DER)。
+func parseClientCert(certPEM, keyPEM []byte) ([]byte, *rsa.PrivateKey, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, nil, errors.New("opcua security: invalid client certificate PEM")
+	}
+	key, err := parsePrivateKeyPEM(keyPEM)
+	if err != nil {
+		return nil, nil, err
+	}
+	return block.Bytes, key, nil
+}
+
+// parsePrivateKeyPEM 解析 PKCS#1(RSA PRIVATE KEY)与 PKCS#8(PRIVATE KEY)私钥 PEM。
+func parsePrivateKeyPEM(pemBytes []byte) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return nil, errors.New("opcua security: invalid private key PEM")
+	}
+	switch block.Type {
+	case "RSA PRIVATE KEY":
+		return x509.ParsePKCS1PrivateKey(block.Bytes)
+	case "PRIVATE KEY":
+		k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		key, ok := k.(*rsa.PrivateKey)
+		if !ok {
+			return nil, errors.New("opcua security: private key is not RSA")
+		}
+		return key, nil
+	default:
+		return nil, fmt.Errorf("opcua security: unsupported private key PEM type %q", block.Type)
+	}
+}
+
+// generateClientCert 生成 OPC UA 客户端自签名证书(含 ApplicationURI、ClientAuth 用法)。
+func generateClientCert() (certPEM, keyPEM []byte, err error) {
+	hostname, _ := os.Hostname()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opcua security: generate key: %w", err)
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opcua security: generate serial: %w", err)
+	}
+	now := time.Now()
+	tmpl := x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{Organization: []string{"iot-gateway"}, CommonName: "iot-gateway opcua client"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(clientCertValidFor),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageDataEncipherment | x509.KeyUsageContentCommitment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		DNSNames:              []string{hostname},
+		URIs:                  []*url.URL{{Scheme: "urn", Opaque: "iot-gateway:" + hostname}},
+		BasicConstraintsValid: true,
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
+		tmpl.DNSNames = nil
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opcua security: create certificate: %w", err)
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: mustMarshalPKCS8(priv)})
+	return certPEM, keyPEM, nil
+}
+
+func mustMarshalPKCS8(key *rsa.PrivateKey) []byte {
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		// 生成刚创建的有效 RSA 私钥,不可能失败
+		panic(err)
+	}
+	return der
 }
 
 // monitorConnState 记录连接状态变更(离线/重连/恢复),ctx 取消或连接 Closed 时退出。

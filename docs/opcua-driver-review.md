@@ -1,9 +1,9 @@
 # OPC UA 驱动实现评审
 
 > **评审时间**:2026-08-18(评审后随问题修复补充)
-> **评审对象**:`internal/driver/opcua/opcua.go`(678 行)+ `opcua_test.go`(275 行)
+> **评审对象**:`internal/driver/opcua/opcua.go` + `opcua_test.go`(评审后逐步扩展)
 > **依赖**:`github.com/gopcua/opcua v0.9.1`(纯 Go,无 CGO)
-> **结论**:核心采集链路(轮询/订阅/读写/探测/重连)实现**完善**,可满足基本接入;**生产化缺口**集中在安全模式、节点浏览与数据类型覆盖三处,另有若干低危语义/健壮性问题。
+> **结论**:核心采集链路(轮询/订阅/读写/探测/重连)实现**完善**;评审后已补齐**写值 Bug、数据正确性、可观测性、节点浏览、安全模式(Sign/SignAndEncrypt)**等 P0/P1 项,剩余仅数据类型覆盖等 P2 按需项。
 >
 > **⚠️ 评审后修复一例**:初次评审认为 Write 正确,随后按真实服务器复现发现**写值请求未携带值内容**(DataValue 缺 `EncodingMask=DataValueValue`,gopcua 编码时不序列化 Value,服务端收到空写),已修复并加端到端回归测试,见 [2.3](#23-写入-write-已修复bug) 与 [附:测试覆盖清单](#附测试覆盖清单)。
 
@@ -75,7 +75,7 @@ gopcua v0.9.1 的重连状态机在断线后:
 
 ### 2.7 配置校验与 schema(正确)
 
-`parseConnConfig` 校验:endpoint 必填、`securityMode` 仅 `none`、timeout/publishInterval 可解析、mode 枚举、订阅默认值(publishInterval=1s、queueSize=10)。`showWhen` 使订阅参数仅在 `mode=subscribe` 时显示。
+`parseConnConfig` 校验:endpoint 必填、`securityMode` 枚举(none/sign/signAndEncrypt)、`securityPolicy` 枚举与客户端证书成对性、`serverThumbprint` 40 位 hex、timeout/publishInterval 可解析、mode 枚举、订阅默认值(publishInterval=1s、queueSize=10)。`showWhen` 使订阅参数仅在 `mode=subscribe`、安全参数仅在 `securityMode!=none` 时显示。
 
 ---
 
@@ -85,8 +85,8 @@ gopcua v0.9.1 的重连状态机在断线后:
 
 | 缺口 | 影响 | 说明 |
 |---|---|---|
-| **安全模式仅 `none`** | 无法对接启用签名/加密的服务器 | `Sign`/`SignAndEncrypt` 需证书管理,当前 `securityMode` 枚举只提供 `none`,用户名/密码(UsernameIdentityToken)已支持。多数 PLC/上位机默认 `none`,短期可接受 |
-| **无节点浏览(Browse)/发现** | 点位地址只能手填 NodeID,无法从服务器浏览选取 | 生产 OPC UA 网关必备;需引入 Browse 服务 + Web UI 选择器,属较大功能项 |
+| **~~安全模式仅 `none`~~(已实现)** | 无法对接启用签名/加密的服务器 | 已支持 `sign`/`signAndEncrypt` + `securityPolicy` + 客户端证书(自动生成/导入)+ `serverThumbprint` 指纹信任锚,设计见 [docs/opcua-security-design.md](docs/opcua-security-design.md)。注意:不做 CA 证书链校验(以指纹为信任锚),用户名/密码认证可组合 |
+| **~~无节点浏览(Browse)/发现~~(已实现)** | 点位地址只能手填 NodeID | 已支持 `driver.Browser` + REST 浏览端点 + Web UI 节点树选择器 |
 | **无方法调用(Method)** | 无法调用服务器方法(如复位/校零) | 需要 `driver` 增加方法调用能力或专用下行接口 |
 | **无历史数据(HistoryRead)** | 无法读取服务器历史库 | 多数场景可后置 |
 
@@ -138,18 +138,18 @@ gopcua v0.9.1 的重连状态机在断线后:
 | ~~P0~~(已完成) | ① `decodeValue` 未知类型 `ok=false` ✅;② Monitor 结果缺失补日志 ✅;③ README NodeID 裸字符串陷阱 ✅ |
 | ~~可观测性~~(已完成) | Read 整批失败透出真实错误原因 ✅;订阅 `StatusChangeNotification` 透出日志 ✅ |
 | ~~节点浏览/发现~~(已完成) | `driver.Browser` 能力 + opcua Browse(层次引用,懒加载)+ `POST /api/v1/connections/{id}/browse` + Web UI 点位"浏览选择"节点树 ✅ |
-| P1(生产化前) | ① 安全模式 `Sign`/`SignAndEncrypt` + 证书配置 |
-| P2(按需) | 方法调用、历史数据、数组/扩展类型、订阅失效→设备离线联动、订阅背压、stateCh 健壮性、modbus 错误透出对齐、浏览返回变量 DataType 提示 |
+| ~~P1-① 安全模式~~(已完成) | `securityMode`(sign/signAndEncrypt)+ `securityPolicy` + 客户端证书自动生成/导入 + `serverThumbprint` 指纹信任锚,设计见 [docs/opcua-security-design.md](docs/opcua-security-design.md) ✅ |
+| P2(按需) | 方法调用、历史数据、数组/扩展类型、订阅失效→设备离线联动、订阅背压、stateCh 健壮性、modbus 错误透出对齐、浏览返回变量 DataType 提示、CA 证书链校验(当前以指纹为信任锚) |
 
-> 集成测试(原 P2)已补齐:基于 gopcua 进程内 server 的 `TestReadE2E`/`TestProbeE2E`/`TestSubscribeE2E`/`TestBrowseE2E` 均已通过。
+> 集成测试(原 P2)已补齐:基于 gopcua 进程内 server 的 `TestReadE2E`/`TestProbeE2E`/`TestSubscribeE2E`/`TestBrowseE2E` 及安全模式 `TestSecurity*E2E` 均已通过。
 
 ---
 
 ## 附:测试覆盖清单
 
-`go test ./internal/driver/opcua/ -v` 全部通过(共享单例 server 启动约 13s 一次,包内测试总计约 1s):
+`go test ./internal/driver/opcua/ -v` 全部通过(共享 none 服务器 + 安全服务器单例,包内测试总计约 2s):
 
-- `TestParseConnConfig` / `TestParseConnConfigDefaults` / `TestParseConnConfigSubscribe` / `TestParseConnConfigSubscribeErrors`
+- `TestParseConnConfig` / `TestParseConnConfigDefaults` / `TestParseConnConfigSubscribe` / `TestParseConnConfigSubscribeErrors` / `TestParseConnConfigSecurity`
 - `TestParseNodeIDAddress`
 - `TestDecodeValue` / `TestEncodeValue`
 - `TestBuildWriteValue`(写值回归:DataValue 编码必须携带值内容,防 `EncodingMask` 缺失复发)
@@ -163,5 +163,9 @@ gopcua v0.9.1 的重连状态机在断线后:
 - `TestProbeE2E`(可达/无可解析点位/未监听端口不可达)
 - `TestSubscribeE2E`(订阅后从另一连接写值,onData 推送目标值;覆盖 release 顺序修复)
 - `TestBrowseE2E`(从命名空间 Objects 浏览取到挂接的变量子节点,核对 NodeID/名称;根浏览不报错)
+- `TestSecuritySignE2E` / `TestSecuritySignAndEncryptE2E`(Basic256Sha256 安全通道写读往返)
+- `TestSecurityThumbprintE2E`(服务器指纹校验:正确通过/错误拒绝)
+- `TestSecurityNoEndpointE2E`(请求未提供策略→明确报错)
+- `TestSecurityAutoCertE2E`(客户端证书自动生成后建连成功)
 
 > 另含 `internal/api` 的 `TestBrowseConnection`(浏览端点:正常返回/驱动不支持 501/连接不存在 404/浏览失败 502)。

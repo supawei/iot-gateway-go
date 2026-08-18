@@ -139,8 +139,12 @@ PollBlock:
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
 | `endpoint` | string | 是 | - | OPC UA 端点 |
-| `securityMode` | string | 否 | `none` | 安全模式,目前仅支持 `none`(签名/加密需证书,留未来) |
-| `username` | string | 否 | - | 非空则用户名密码认证,否则匿名 |
+| `securityMode` | string | 否 | `none` | 安全模式:`none`/`sign`(签名防篡改)/`signAndEncrypt`(签名+加密) |
+| `securityPolicy` | string | 否 | `auto` | 安全策略:`auto`(按端点协商选最强)/`Basic128Rsa15`/`Basic256`/`Basic256Sha256`/`Aes128Sha256RsaOaep`/`Aes256Sha256RsaPss`(仅安全模式生效) |
+| `clientCertFile` | string | 否 | - | 客户端证书文件;留空自动生成自签证书(网关工作目录,仅生成一次) |
+| `clientKeyFile` | string | 否 | - | 客户端私钥文件;须与 `clientCertFile` 成对 |
+| `serverThumbprint` | string | 否 | - | 服务器证书 SHA-1 指纹(40 位 hex);设置后建连前校验,防中间人/防证书被换 |
+| `username` | string | 否 | - | 非空则用户名密码认证,否则匿名(可与安全模式组合) |
 | `password` | string | 否 | - | 配合 `username` |
 | `timeout` | string | 否 | `5s` | 请求超时 |
 | `mode` | string | 否 | `poll` | 采集模式:`poll`(按周期轮询)或 `subscribe`(订阅,数据变化即推送) |
@@ -164,7 +168,7 @@ PollBlock:
 >
 > **节点浏览**:点位编辑时可调用 `POST /api/v1/connections/{connectionId}/browse` 懒加载服务器节点树、选择 NodeID 自动回填地址(见「节点浏览」一节)。
 >
-> **已知限制与缺口**:安全模式仅支持 `none`;数据类型仅标量(不支持数组/DateTime/结构体等);无方法调用与历史读取。实现完整性分析见 [docs/opcua-driver-review.md](docs/opcua-driver-review.md)。
+> **已知限制与缺口**:数据类型仅标量(不支持数组/DateTime/结构体等);无方法调用与历史读取;安全模式不做 CA 证书链校验(以 `serverThumbprint` 指纹为信任锚,设计见 [docs/opcua-security-design.md](docs/opcua-security-design.md))。实现完整性分析见 [docs/opcua-driver-review.md](docs/opcua-driver-review.md)。
 
 ## 连接容错与重连
 

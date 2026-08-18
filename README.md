@@ -117,13 +117,25 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 | 字段 | 说明 |
 |---|---|
 | `endpoint` | OPC UA 端点,如 `opc.tcp://192.168.1.5:4840` |
-| `securityMode` | 安全模式,目前仅支持 `none`(默认) |
-| `username`/`password` | 可选,留空则匿名 |
+| `securityMode` | 安全模式:`none`(默认)/ `sign`(签名防篡改)/ `signAndEncrypt`(签名+加密) |
+| `securityPolicy` | 安全策略:`auto`(默认,按端点协商选最强)/ `Basic128Rsa15` / `Basic256` / `Basic256Sha256`(工业界事实标准)/ `Aes128Sha256RsaOaep` / `Aes256Sha256RsaPss`(仅安全模式生效) |
+| `clientCertFile`/`clientKeyFile` | 客户端证书/私钥文件;留空自动生成自签证书(网关工作目录),仅生成一次 |
+| `serverThumbprint` | 服务器证书 SHA-1 指纹(40 位 hex);设置后建连前校验,防中间人/防证书被换 |
+| `username`/`password` | 可选,留空则匿名(可与安全模式组合) |
 | `timeout` | 请求超时,默认 `5s` |
 | `mode` | 采集模式:`poll`(默认,按周期轮询)或 `subscribe`(订阅,数据变化即推送) |
 | `publishInterval` | 订阅发布间隔,如 `1s`、`500ms`,默认 `1s`(仅 `subscribe` 生效) |
 | `samplingInterval` | 监控项采样间隔(毫秒),`0` 表示沿用发布间隔(仅 `subscribe` 生效) |
 | `queueSize` | 每个点位在服务端的队列长度,默认 `10`(仅 `subscribe` 生效) |
+
+安全连接示例:
+
+```json
+{ "endpoint": "opc.tcp://192.168.1.5:4840", "securityMode": "signAndEncrypt",
+  "securityPolicy": "Basic256Sha256", "serverThumbprint": "0123...abcd" }
+```
+
+> **部署提示**:启用安全模式后,网关自动生成的客户端证书 `opcua-client-cert.pem` 需导入服务器信任库(部分服务器拒绝未知客户端证书);`serverThumbprint` 建议配置以开启服务器证书校验。详见 [docs/opcua-security-design.md](docs/opcua-security-design.md)。
 
 **点位地址** (`address` 字段):OPC UA NodeID,如 `ns=2;s=Temperature`、`ns=0;i=2258`、`i=1234`。
 
@@ -145,7 +157,7 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
   "publishInterval": "1s", "samplingInterval": 250, "queueSize": 10 }
 ```
 
-> **已知限制与缺口**:安全模式仅支持 `none`;数据类型仅标量(不支持数组/DateTime/结构体等);无方法调用与历史读取。实现完整性分析见 [docs/opcua-driver-review.md](docs/opcua-driver-review.md)。
+> **已知限制与缺口**:数据类型仅标量(不支持数组/DateTime/结构体等);无方法调用与历史读取;安全模式不做 CA 证书链校验(以 `serverThumbprint` 指纹为信任锚)。实现完整性分析见 [docs/opcua-driver-review.md](docs/opcua-driver-review.md)。
 
 ## 监听类驱动(modbus_listen)
 

@@ -23,7 +23,6 @@ func TestParseConnConfig(t *testing.T) {
 	}{
 		{"valid", `{"endpoint":"opc.tcp://x:4840"}`, false, "opc.tcp://x:4840"},
 		{"missing endpoint", `{}`, true, ""},
-		{"unsupported security", `{"endpoint":"opc.tcp://x:4840","securityMode":"sign"}`, true, ""},
 		{"invalid timeout", `{"endpoint":"opc.tcp://x:4840","timeout":"abc"}`, true, ""},
 	}
 	for _, tt := range tests {
@@ -36,6 +35,42 @@ func TestParseConnConfig(t *testing.T) {
 				t.Fatalf("endpoint=%q want %q", cfg.Endpoint, tt.wantEndpoint)
 			}
 		})
+	}
+}
+
+// TestParseConnConfigSecurity 覆盖安全模式配置校验。
+func TestParseConnConfigSecurity(t *testing.T) {
+	valid := []string{
+		`{"endpoint":"opc.tcp://x:4840","securityMode":"sign"}`,
+		`{"endpoint":"opc.tcp://x:4840","securityMode":"signAndEncrypt","securityPolicy":"Basic256Sha256"}`,
+		`{"endpoint":"opc.tcp://x:4840","securityMode":"sign","serverThumbprint":"0123456789abcdef0123456789abcdef01234567"}`,
+		`{"endpoint":"opc.tcp://x:4840","securityMode":"signAndEncrypt","securityPolicy":"auto"}`,
+	}
+	for _, raw := range valid {
+		if _, err := parseConnConfig(json.RawMessage(raw)); err != nil {
+			t.Fatalf("want valid %s, got %v", raw, err)
+		}
+	}
+	invalid := []string{
+		`{"endpoint":"opc.tcp://x:4840","securityMode":"bogus"}`,
+		`{"endpoint":"opc.tcp://x:4840","securityMode":"sign","securityPolicy":"BogusPolicy"}`,
+		`{"endpoint":"opc.tcp://x:4840","securityMode":"sign","clientCertFile":"/tmp/a.pem"}`,
+		`{"endpoint":"opc.tcp://x:4840","securityMode":"sign","serverThumbprint":"abcd"}`,
+		`{"endpoint":"opc.tcp://x:4840","securityMode":"sign","serverThumbprint":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}`,
+	}
+	for _, raw := range invalid {
+		if _, err := parseConnConfig(json.RawMessage(raw)); err == nil {
+			t.Fatalf("want error for %s", raw)
+		}
+	}
+
+	// 安全策略短名归一化
+	cfg, err := parseConnConfig(json.RawMessage(`{"endpoint":"opc.tcp://x:4840","securityMode":"signAndEncrypt","securityPolicy":"basic256sha256"}`))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if cfg.SecurityPolicy != "Basic256Sha256" {
+		t.Fatalf("securityPolicy=%q want Basic256Sha256", cfg.SecurityPolicy)
 	}
 }
 
