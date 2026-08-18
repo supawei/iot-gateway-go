@@ -34,8 +34,7 @@ const (
 // Config 是 smardaten-iot 平台输出的配置（存 SQLite，经 Web UI 配置）。
 // 所有数值字段使用 flexInt 类型，兼容 Web UI 发送的数字或字符串。
 type Config struct {
-	Broker   string  `json:"broker"`   // MQTT broker 地址
-	Port     flexInt `json:"port"`     // MQTT 端口
+	Broker   string  `json:"broker"`   // MQTT broker 完整地址，如 tcp://10.0.0.1:1883
 	ProtoVer flexInt `json:"protoVer"` // 311(3.1.1) 或 5
 	Username string  `json:"username"` // MQTT 用户名
 	Password string  `json:"password"` // MQTT 密码
@@ -85,8 +84,7 @@ func init() {
 		Type:  "smardaten-iot",
 		Label: "smardaten-iot",
 		Schema: []output.Field{
-			{Name: "broker", Label: "Broker 地址", Type: output.FieldString, Required: true, Placeholder: "tcp://平台IP:1883"},
-			{Name: "port", Label: "端口", Type: output.FieldInt, Default: 1883},
+			{Name: "broker", Label: "Broker 地址", Type: output.FieldString, Required: true, Placeholder: "tcp://平台IP:1883", Hint: "完整地址，含协议与端口"},
 			{Name: "protoVer", Label: "MQTT 协议版本", Type: output.FieldEnum, Options: []string{"311", "5"}, Default: 311},
 			{Name: "username", Label: "用户名", Type: output.FieldString},
 			{Name: "password", Label: "密码", Type: output.FieldPassword},
@@ -182,7 +180,7 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 	}
 
 	// 构建 MQTT 连接
-	client, err := connectMQTT(cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, gatewayID, int(cfg.Port), protoVer)
+	client, err := connectMQTT(cfg.Broker, cfg.ClientID, cfg.Username, cfg.Password, gatewayID, protoVer)
 	if err != nil {
 		return nil, fmt.Errorf("mqtt connect: %w", err)
 	}
@@ -277,13 +275,9 @@ func (o *platformOutput) Close() error {
 
 // ---------- MQTT 连接 ----------
 
-// connectMQTT 建立到平台的 MQTT 连接。
-func connectMQTT(broker, clientID, username, password, gatewayID string, port, protoVer int) (pahomqtt.Client, error) {
+// connectMQTT 建立到平台的 MQTT 连接，broker 为完整地址（含协议与端口）。
+func connectMQTT(broker, clientID, username, password, gatewayID string, protoVer int) (pahomqtt.Client, error) {
 	opts := pahomqtt.NewClientOptions()
-
-	if port > 0 {
-		broker = fmt.Sprintf("tcp://%s:%d", stripProtocol(broker), port)
-	}
 	opts.AddBroker(broker)
 
 	if clientID == "" {
@@ -318,14 +312,6 @@ func connectMQTT(broker, clientID, username, password, gatewayID string, port, p
 
 	slog.Info("smardaten-iot mqtt connected", "broker", broker, "clientId", clientID)
 	return client, nil
-}
-
-// stripProtocol 去掉 tcp:// 前缀。
-func stripProtocol(addr string) string {
-	if len(addr) > 6 && addr[:6] == "tcp://" {
-		return addr[6:]
-	}
-	return addr
 }
 
 // ---------- 订阅管理 ----------

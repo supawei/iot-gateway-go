@@ -88,7 +88,6 @@ smardaten-iot 与其他输出插件一样，配置存储在 SQLite 的 `output` 
 ```json
 {
   "broker":      "tcp://平台MQTT地址:1883",
-  "port":        1883,
   "protoVer":    311,
   "username":    "admin",
   "password":    "admin",
@@ -104,8 +103,7 @@ smardaten-iot 与其他输出插件一样，配置存储在 SQLite 的 `output` 
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |---|---|---|---|---|
-| `broker` | string | 是 | — | 平台 MQTT broker 地址，如 `tcp://10.0.0.1:1883` |
-| `port` | int | 否 | 1883 | MQTT 端口（broker 已含端口时可选） |
+| `broker` | string | 是 | — | 平台 MQTT broker 完整地址（含协议与端口），如 `tcp://10.0.0.1:1883` |
 | `protoVer` | int | 否 | 311 | MQTT 协议版本：311=3.1.1, 5=5.0 |
 | `username` | string | 否 | — | MQTT 用户名 |
 | `password` | string | 否 | — | MQTT 密码 |
@@ -459,7 +457,6 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
 | 问题 | 原因 | 修复 |
 |---|---|---|
 | `cannot unmarshal string into Config.pubMode of type int` | Web UI FieldEnum 发字符串，Config 字段是 int | 引入 `flexInt` 类型（数字/字符串/null 均可解析） |
-| `cannot unmarshal number into Config.port of type string` | FieldInt 发数字，但被误改为 string | 所有数值字段统一用 `flexInt`，彻底消除类型不匹配 |
 | 新增输出后网关不响应（HTTP 挂起） | MQTT `Connect()` 无超时，broker 不可达时阻塞 | `SetConnectTimeout(5s)` |
 | 更新网关 ID 报 `connection lost before Subscribe completed` | 重载时新旧连接 clientID 相同，broker 踢旧连接 | clientID 改用 gatewayID 生成，重载时新旧唯一 |
 

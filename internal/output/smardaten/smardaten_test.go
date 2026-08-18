@@ -12,31 +12,27 @@ func TestConfigUnmarshalMixedTypes(t *testing.T) {
 	cases := []struct {
 		name       string
 		raw        string
-		wantPort   int
 		wantProto  int
 		wantPub    int
 		wantMaxPub int
 	}{
 		{
 			name:       "all strings (user-selected enum values)",
-			raw:        `{"broker":"tcp://x:1883","port":"1883","protoVer":"311","pubMode":"0","maxPubTime":"60"}`,
-			wantPort:   1883,
+			raw:        `{"broker":"tcp://x:1883","protoVer":"311","pubMode":"0","maxPubTime":"60"}`,
 			wantProto:  311,
 			wantPub:    0,
 			wantMaxPub: 60,
 		},
 		{
 			name:       "all numbers (enum defaults sent as numbers)",
-			raw:        `{"broker":"tcp://x:1883","port":1883,"protoVer":311,"pubMode":0,"maxPubTime":60}`,
-			wantPort:   1883,
+			raw:        `{"broker":"tcp://x:1883","protoVer":311,"pubMode":0,"maxPubTime":60}`,
 			wantProto:  311,
 			wantPub:    0,
 			wantMaxPub: 60,
 		},
 		{
 			name:       "mixed types",
-			raw:        `{"broker":"tcp://x:1883","port":1883,"protoVer":"5","pubMode":1,"maxPubTime":"30"}`,
-			wantPort:   1883,
+			raw:        `{"broker":"tcp://x:1883","protoVer":"5","pubMode":1,"maxPubTime":"30"}`,
 			wantProto:  5,
 			wantPub:    1,
 			wantMaxPub: 30,
@@ -49,8 +45,8 @@ func TestConfigUnmarshalMixedTypes(t *testing.T) {
 			if err := json.Unmarshal([]byte(tc.raw), &cfg); err != nil {
 				t.Fatalf("unmarshal failed: %v", err)
 			}
-			if int(cfg.Port) != tc.wantPort {
-				t.Errorf("port = %d, want %d", cfg.Port, tc.wantPort)
+			if cfg.Broker != "tcp://x:1883" {
+				t.Errorf("broker = %q, want %q", cfg.Broker, "tcp://x:1883")
 			}
 			if int(cfg.ProtoVer) != tc.wantProto {
 				t.Errorf("protoVer = %d, want %d", cfg.ProtoVer, tc.wantProto)
@@ -72,8 +68,11 @@ func TestConfigUnmarshalMissingOptional(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
-	if cfg.Port != 0 {
-		t.Errorf("port should default to 0, got %d", cfg.Port)
+	if cfg.Broker != "tcp://x:1883" {
+		t.Errorf("broker = %q, want %q", cfg.Broker, "tcp://x:1883")
+	}
+	if cfg.ProtoVer != 0 {
+		t.Errorf("protoVer should default to 0, got %d", cfg.ProtoVer)
 	}
 }
 
@@ -99,19 +98,5 @@ func TestFlexIntInvalid(t *testing.T) {
 	}
 	if f != 0 {
 		t.Errorf("null should set value to 0, got %d", f)
-	}
-}
-
-// TestConnectMQTTClientID 验证 clientID 生成使用 gatewayID。
-func TestConnectMQTTClientID(t *testing.T) {
-	// 无法真正连接 MQTT，这里只验证 clientID 生成逻辑本身。
-	// clientID 为空时应使用 "gw-dev-manage-<gatewayID>"。
-	// 该逻辑在 connectMQTT 内部，通过直接检查生成结果不可行，
-	// 因此此处仅验证 stripProtocol 工具函数。
-	if got := stripProtocol("tcp://10.0.0.1:1883"); got != "10.0.0.1:1883" {
-		t.Errorf("stripProtocol = %q, want %q", got, "10.0.0.1:1883")
-	}
-	if got := stripProtocol("10.0.0.1:1883"); got != "10.0.0.1:1883" {
-		t.Errorf("stripProtocol without prefix = %q", got)
 	}
 }
