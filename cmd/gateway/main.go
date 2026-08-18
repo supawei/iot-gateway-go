@@ -35,6 +35,7 @@ import (
 	_ "iot-gateway-go/internal/driver/opcua"         // 注册 opcua 驱动
 	_ "iot-gateway-go/internal/output/mqtt"          // 注册 mqtt 输出
 	_ "iot-gateway-go/internal/output/smardaten"     // 注册 smardaten-iot 输出
+	_ "iot-gateway-go/internal/output/sparkplugb"    // 注册 sparkplugb 输出
 	_ "iot-gateway-go/internal/output/tdengine"      // 注册 tdengine 输出
 	_ "iot-gateway-go/internal/output/thingsboard"   // 注册 thingsboard 输出
 )
