@@ -61,16 +61,17 @@ func main() {
 		_, err := core.WritePoint(ctx, st, deviceID, point, value)
 		return err
 	}
+	statusReg := status.NewRegistry()
+	valuesReg := values.NewRegistry()
+
 	// 输出管理器:从 SQLite 读配置动态构建,Web UI 变更后热重载(原子替换 + 关闭旧输出)。
 	// 网关 ID 亦存 SQLite(settings 表),每次重载时读取,故改 ID 后热重载即生效。
-	outputs := output.NewManager(buildOutputs(st, write))
+	outputs := output.NewManager(buildOutputs(st, write, valuesReg))
 	if err := outputs.Reload(); err != nil {
 		// 首次构建失败不退出:API 仍可修复配置并触发热重载。
 		slog.Warn("initial output reload failed", "err", err)
 	}
 
-	statusReg := status.NewRegistry()
-	valuesReg := values.NewRegistry()
 	dataPoints := make(chan model.DataPoint, datapointBufferSize)
 
 	// 鉴权:预置默认管理员(首次登录强制改密),内存 session TTL 来自配置。
@@ -179,13 +180,28 @@ func fatal(msg string, args ...any) {
 // buildOutputs 返回输出管理器的构建函数:每次重载都从 SQLite 读最新网关 ID 与输出配置,
 // 经 output.BuildSet 逐个构建。单个输出失败仅跳过(失败隔离),全失败才返回错误,
 // 由 Manager 保留旧输出(原子替换语义)。
-func buildOutputs(st *store.Store, write output.WriteFunc) output.BuildFunc {
+func buildOutputs(st *store.Store, write output.WriteFunc, valuesReg *values.Registry) output.BuildFunc {
 	return func() ([]output.Instance, error) {
 		gatewayID, err := st.GetGatewayID()
 		if err != nil {
 			return nil, err
 		}
-		bc := output.BuildContext{GatewayID: gatewayID, Write: write, Store: st}
+		bc := output.BuildContext{
+			GatewayID: gatewayID,
+			Write:     write,
+			Store:     st,
+			// 服务调用 get 等需要"设备当前属性值"的场景:从实时值注册表读取最新采集值。
+			LatestValues: func(deviceID string) map[string]interface{} {
+				dv := valuesReg.Get(deviceID)
+				m := make(map[string]interface{}, len(dv.Points))
+				for _, p := range dv.Points {
+					if p.Value != nil {
+						m[p.Point] = p.Value
+					}
+				}
+				return m
+			},
+		}
 		configs, err := st.ListOutputs()
 		if err != nil {
 			return nil, err

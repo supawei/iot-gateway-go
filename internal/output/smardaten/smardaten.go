@@ -100,7 +100,7 @@ func init() {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			return nil, fmt.Errorf("smardaten-iot config: %w", err)
 		}
-		return New(cfg, bc.GatewayID, bc.Write, bc.Store)
+		return New(cfg, bc.GatewayID, bc.Write, bc.Store, bc.LatestValues)
 	})
 }
 
@@ -109,6 +109,10 @@ type platformOutput struct {
 	gatewayID string
 	write     output.WriteFunc     // 下行写回调
 	store     output.StoreAccessor // 配置同步（application.json → 网关配置）
+
+	// latestValues 查询设备点位最新采集值(服务调用 get 返回设备当前属性值)。
+	// 由 main 基于 values.Registry 注入;nil 时回退到待发缓冲(直接构造的旧测试兼容)。
+	latestValues output.LatestValuesFunc
 
 	client pahomqtt.Client
 	qos    byte
@@ -144,7 +148,7 @@ type platformOutput struct {
 }
 
 // New 构造 smardaten-iot 平台输出。
-func New(cfg Config, gatewayID string, write output.WriteFunc, store output.StoreAccessor) (output.Output, error) {
+func New(cfg Config, gatewayID string, write output.WriteFunc, store output.StoreAccessor, latestValues output.LatestValuesFunc) (output.Output, error) {
 	if cfg.Broker == "" {
 		return nil, fmt.Errorf("smardaten-iot broker is required")
 	}
@@ -178,6 +182,7 @@ func New(cfg Config, gatewayID string, write output.WriteFunc, store output.Stor
 		gatewayID:     gatewayID,
 		write:         write,
 		store:         store,
+		latestValues:  latestValues,
 		qos:           defaultQoS,
 		cfg:           cfg,
 		topics:        newTopicMapping(),
@@ -438,26 +443,38 @@ func (o *platformOutput) handleServiceCall(_ pahomqtt.Client, msg pahomqtt.Messa
 
 // handleServiceGet 处理 get 服务调用。
 func (o *platformOutput) handleServiceGet(req ServiceCallMessage, respTopic string, now int64) {
-	// 构造响应：从缓冲中取最新值
-	o.mu.Lock()
-	points := o.pending[req.DeviceID]
-	o.mu.Unlock()
-
 	params := map[string]interface{}{
 		"deviceId":   req.DeviceID,
 		"reportTime": now,
 	}
 
-	// 取每个属性的最新值
-	seen := make(map[string]bool)
-	for i := len(points) - 1; i >= 0; i-- {
-		dp := points[i]
-		identifier := o.topics.propIdentifier(req.DeviceID, dp.Point)
-		if identifier == "" || seen[identifier] {
-			continue
+	// 优先从最新值注册表读取"设备当前属性值"(get 的契约语义):pending 缓冲每
+	// flushInterval 就被清空,服务调用到达时往往为空,导致 params 只剩 deviceId+reportTime。
+	// 未注入注册表时(直接构造的旧测试)回退到待发缓冲,保持原有行为。
+	if o.latestValues != nil {
+		for pointID, val := range o.latestValues(req.DeviceID) {
+			identifier := o.topics.propIdentifier(req.DeviceID, pointID)
+			if identifier == "" {
+				continue
+			}
+			params[identifier] = roundValue(val)
 		}
-		seen[identifier] = true
-		params[identifier] = roundValue(dp.Value)
+	} else {
+		o.mu.Lock()
+		points := o.pending[req.DeviceID]
+		o.mu.Unlock()
+
+		// 取每个属性的最新值
+		seen := make(map[string]bool)
+		for i := len(points) - 1; i >= 0; i-- {
+			dp := points[i]
+			identifier := o.topics.propIdentifier(req.DeviceID, dp.Point)
+			if identifier == "" || seen[identifier] {
+				continue
+			}
+			seen[identifier] = true
+			params[identifier] = roundValue(dp.Value)
+		}
 	}
 
 	resp := ServiceGetResponseMessage{

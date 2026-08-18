@@ -2,8 +2,11 @@ package smardaten
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
+
+	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output/mqtttest"
@@ -161,7 +164,7 @@ func TestFlushResetsPendingCount(t *testing.T) {
 // 返回且不报错(非阻塞构造),这是「启动不卡」在 smardaten 的回归测试。
 func TestNewNonBlockingUnreachable(t *testing.T) {
 	start := time.Now()
-	out, err := New(Config{Broker: "tcp://192.0.2.1:1883", ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil)
+	out, err := New(Config{Broker: "tcp://192.0.2.1:1883", ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil, nil)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("New should not fail on unreachable broker, got %v", err)
@@ -180,7 +183,7 @@ func TestNewNonBlockingUnreachable(t *testing.T) {
 func TestNewWithReachableBroker(t *testing.T) {
 	b := mqtttest.StartSilent(t)
 	start := time.Now()
-	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil)
+	out, err := New(Config{Broker: "tcp://" + b.Addr, ClientID: "t", IotConfigPath: "/nonexistent/application.json"}, "gw-01", nil, nil, nil)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -212,5 +215,158 @@ func TestRuntimeStatusPending(t *testing.T) {
 	}
 	if st.Connected || st.ConnectionOpen {
 		t.Fatal("nil client should report not connected")
+	}
+}
+
+// captureClient 是 paho.Client 的测试替身:记录最后一次 Publish 的 topic 与 payload。
+type captureClient struct {
+	mu      sync.Mutex
+	topic   string
+	payload []byte
+}
+
+func (c *captureClient) IsConnected() bool       { return true }
+func (c *captureClient) IsConnectionOpen() bool  { return true }
+func (c *captureClient) Connect() pahomqtt.Token { return &pahomqtt.DummyToken{} }
+func (c *captureClient) Disconnect(uint)         {}
+func (c *captureClient) Publish(topic string, _ byte, _ bool, payload interface{}) pahomqtt.Token {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.topic = topic
+	if b, ok := payload.([]byte); ok {
+		c.payload = b
+	} else {
+		c.payload = nil
+	}
+	return &pahomqtt.DummyToken{}
+}
+func (c *captureClient) Subscribe(string, byte, pahomqtt.MessageHandler) pahomqtt.Token {
+	return &pahomqtt.DummyToken{}
+}
+func (c *captureClient) SubscribeMultiple(map[string]byte, pahomqtt.MessageHandler) pahomqtt.Token {
+	return &pahomqtt.DummyToken{}
+}
+func (c *captureClient) Unsubscribe(...string) pahomqtt.Token     { return &pahomqtt.DummyToken{} }
+func (c *captureClient) AddRoute(string, pahomqtt.MessageHandler) {}
+func (c *captureClient) OptionsReader() pahomqtt.ClientOptionsReader {
+	return pahomqtt.ClientOptionsReader{}
+}
+
+func (c *captureClient) last() (string, []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.topic, c.payload
+}
+
+// TestServiceGetReturnsLatestValues 回归:服务调用 get 应返回设备当前属性值,
+// 即使待发缓冲已被 flusher 清空,params 也不能只剩 deviceId + reportTime。
+// (修复前 handleServiceGet 只读 pending 缓冲,缓冲为空时返回
+// {"deviceId":..., "reportTime":...},与设计不符。)
+func TestServiceGetReturnsLatestValues(t *testing.T) {
+	cfg := &ApplicationConfig{
+		Devices: []PlatformDevice{{
+			DeviceID: "dev1",
+			Properties: []PlatformProperty{
+				{Identifier: "temperature", PointID: "p1"},
+				{Identifier: "switch", PointID: "p2"},
+			},
+			Services: []PlatformService{{
+				Method:         "/svc/get",
+				ResponseMethod: "/svc/get_reply",
+			}},
+		}},
+	}
+
+	o := &platformOutput{
+		topics:  newTopicMapping(),
+		pending: make(map[string][]model.DataPoint),
+		// 模拟 main 注入的 values.Registry 查询:设备已有最新采集值,但 pending 为空。
+		latestValues: func(deviceID string) map[string]interface{} {
+			return map[string]interface{}{
+				"p1": 23.456,
+				"p2": 1.0,
+			}
+		},
+	}
+	o.topics.buildFrom(cfg)
+
+	client := &captureClient{}
+	o.client = client
+
+	o.handleServiceGet(ServiceCallMessage{
+		ServiceType: "get",
+		DeviceID:    "dev1",
+		CmdID:       "cmd-1",
+	}, "/svc/get_reply", 1234567890123)
+
+	topic, payload := client.last()
+	if topic != "/svc/get_reply" {
+		t.Fatalf("resp topic = %q, want /svc/get_reply", topic)
+	}
+
+	var resp ServiceGetResponseMessage
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.CmdID != "cmd-1" || resp.StatusCode != 0 || resp.Version != "1.0" || resp.ReportTime != 1234567890123 {
+		t.Fatalf("unexpected response envelope: %+v", resp)
+	}
+	if got := resp.Params["temperature"]; got != 23.46 {
+		t.Errorf("temperature = %v, want 23.46 (rounded)", got)
+	}
+	if got := resp.Params["switch"]; got != 1.0 {
+		t.Errorf("switch = %v, want 1.0", got)
+	}
+	if resp.Params["deviceId"] != "dev1" {
+		t.Errorf("deviceId = %v, want dev1", resp.Params["deviceId"])
+	}
+	// 关键断言:params 必须包含实际属性,不能只有 deviceId + reportTime。
+	if len(resp.Params) < 4 {
+		t.Errorf("params only has %d entries, want ≥4 (deviceId+reportTime+temperature+switch), got %v", len(resp.Params), resp.Params)
+	}
+}
+
+// TestServiceGetFallbackPending latestValues 未注入(直接构造)时,get 回退到待发缓冲取最新值。
+func TestServiceGetFallbackPending(t *testing.T) {
+	cfg := &ApplicationConfig{
+		Devices: []PlatformDevice{{
+			DeviceID: "dev1",
+			Properties: []PlatformProperty{
+				{Identifier: "temperature", PointID: "p1"},
+			},
+			Services: []PlatformService{{
+				Method:         "/svc/get",
+				ResponseMethod: "/svc/get_reply",
+			}},
+		}},
+	}
+
+	o := &platformOutput{
+		topics:  newTopicMapping(),
+		pending: make(map[string][]model.DataPoint),
+	}
+	o.topics.buildFrom(cfg)
+
+	now := time.Now()
+	o.pending["dev1"] = []model.DataPoint{
+		{DeviceID: "dev1", Point: "p1", Value: 36.6, Timestamp: now},
+	}
+
+	client := &captureClient{}
+	o.client = client
+
+	o.handleServiceGet(ServiceCallMessage{
+		ServiceType: "get",
+		DeviceID:    "dev1",
+		CmdID:       "cmd-2",
+	}, "/svc/get_reply", 1234567890123)
+
+	_, payload := client.last()
+	var resp ServiceGetResponseMessage
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got := resp.Params["temperature"]; got != 36.6 {
+		t.Errorf("temperature = %v, want 36.6 (from pending)", got)
 	}
 }

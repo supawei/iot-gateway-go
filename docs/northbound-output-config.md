@@ -83,7 +83,7 @@ broker 地址、凭据属于"部署环境"信息,天然适合 yaml 这类**可�
   - **扇出**:每个输出独立队列 + 发布 goroutine,输出间背压隔离(接管原 `core.RunPipeline` 的分发职责)。
   - **热重载**:构建新输出集 → 原子替换 → 关闭旧输出;构建失败保留旧输出(返回错误)。
   - **设备通知**:scheduler 经 `Manager.Notifiers()` 动态获取实现 `DeviceNotifier` 的输出,热重载后自动跟随最新输出。
-- `BuildContext{GatewayID, Write}` 由 main 注入:gatewayID 用于 topic/标识,Write 为下行写回调(落到 `core.WritePoint`),二者属网关上下文而非输出自身配置,故不进注册表。
+- `BuildContext{GatewayID, Write, Store, LatestValues}` 由 main 注入:gatewayID 用于 topic/标识,Write 为下行写回调(落到 `core.WritePoint`),Store 供插件自动同步配置,LatestValues 为查询设备点位最新采集值的回调(基于 `values.Registry`,服务调用 get 等场景用),这些均属网关上下文而非输出自身配置,故不进注册表。
 
 ### 7.3 配置来源切换
 

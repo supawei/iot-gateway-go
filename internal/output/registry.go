@@ -11,12 +11,21 @@ import (
 )
 
 // BuildContext 是构造输出所需的网关上下文:与输出自身配置无关的部分。
-// 由 main 注入(gatewayID 用于 topic/标识,Write 用于下行写回设备,Store 用于插件自动同步配置)。
+// 由 main 注入(gatewayID 用于 topic/标识,Write 用于下行写回设备,Store 用于插件自动同步配置,
+// LatestValues 用于查询设备点位最新采集值,服务调用 get 等需要"设备当前属性值"的场景使用)。
 type BuildContext struct {
 	GatewayID string
 	Write     WriteFunc
 	Store     StoreAccessor
+
+	// LatestValues 查询设备全部点位的最新采集值快照(pointID -> value)。
+	// 由 main 基于 values.Registry 注入;实现可返回空 map(设备从未采集到有效值)。
+	LatestValues LatestValuesFunc
 }
+
+// LatestValuesFunc 返回设备全部点位的最新采集值快照,key 为 pointID,value 为采集值。
+// 只包含有效值点位(值为 nil 的点位不返回,与 Publish 的 STRING/空值跳过语义一致)。
+type LatestValuesFunc func(deviceID string) map[string]interface{}
 
 // WriteFunc 是下行写回调(如 ThingsBoard 共享属性 / RPC → 设备写)。
 // 由 main 注入,最终落到 core.WritePoint。
