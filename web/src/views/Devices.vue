@@ -5,6 +5,7 @@ import { Plus } from '@element-plus/icons-vue'
 import api from '../api'
 import SchemaForm from '../components/SchemaForm.vue'
 import { defaultModel, modelFromValue, valueFromModel } from '../utils/schema'
+import { encryptSensitive } from '../utils/crypto'
 
 const DATA_TYPES = [
   'bool', 'int16', 'uint16', 'int32', 'uint32', 'int64',
@@ -110,6 +111,7 @@ async function save() {
   let params
   try {
     params = valueFromModel(paramSchema.value, paramsModel.value)
+    params = await encryptSensitive(params, paramSchema.value)
   } catch (e) {
     ElMessage.error(e.message)
     return
@@ -350,7 +352,7 @@ onUnmounted(() => {
         <!-- 设备参数:按所选连接的驱动 schema 动态渲染 -->
         <template v-if="paramSchema.length">
           <el-divider content-position="left">设备参数</el-divider>
-          <SchemaForm :schema="paramSchema" :model="paramsModel" />
+          <SchemaForm :schema="paramSchema" :model="paramsModel" :editing="!!editingId" />
         </template>
 
         <el-divider content-position="left">点位</el-divider>

@@ -4,13 +4,22 @@ import { isVisible } from '../utils/schema'
 // 通用配置表单:根据驱动声明的 schema 动态渲染字段。
 // 需放在 el-form 内部使用;json 字段以文本框编辑 JSON,其余字段用对应控件。
 // 字段带 showWhen 时,依赖字段值不匹配则隐藏。
+// editing=true 时,密码字段提示"留空则不修改(保持原值)"——对应后端"空密码继承旧值"语义。
 const props = defineProps({
   schema: { type: Array, default: () => [] },
   model: { type: Object, required: true },
+  editing: { type: Boolean, default: false },
 })
 
 function visible(f) {
   return isVisible(f, props.model)
+}
+
+function passwordHint(f) {
+  if (props.editing && f.type === 'password') {
+    return f.hint ? `${f.hint};留空则不修改(保持原值)` : '留空则不修改(保持原值)'
+  }
+  return f.hint
 }
 </script>
 
@@ -59,7 +68,7 @@ function visible(f) {
       />
       <!-- 兜底 -->
       <el-input v-else v-model="model[f.name]" />
-      <div v-if="f.hint" class="form-hint">{{ f.hint }}</div>
+      <div v-if="passwordHint(f)" class="form-hint">{{ passwordHint(f) }}</div>
     </el-form-item>
   </template>
 </template>

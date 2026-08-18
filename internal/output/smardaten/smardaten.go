@@ -284,7 +284,7 @@ func connectMQTT(broker, clientID, username, password, gatewayID string) (pahomq
 		opts.SetPassword(password)
 	}
 
-	// 协议版本：固定 MQTT 3.1.1（paho 用 3 表示）
+	// 协议版本：固定 MQTT 3.1.1（paho 用 4 表示）
 	opts.SetProtocolVersion(4)
 
 	client := pahomqtt.NewClient(opts)

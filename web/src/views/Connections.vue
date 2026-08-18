@@ -5,6 +5,7 @@ import { Plus } from '@element-plus/icons-vue'
 import api from '../api'
 import SchemaForm from '../components/SchemaForm.vue'
 import { defaultModel, modelFromValue, valueFromModel } from '../utils/schema'
+import { encryptSensitive } from '../utils/crypto'
 
 const list = ref([])
 const drivers = ref([])
@@ -59,6 +60,7 @@ async function save() {
   let config
   try {
     config = valueFromModel(currentSchema.value, configModel.value)
+    config = await encryptSensitive(config, currentSchema.value)
   } catch (e) {
     ElMessage.error(e.message)
     return
@@ -142,7 +144,7 @@ onMounted(load)
             <el-option v-for="d in drivers" :key="d.name" :label="d.name" :value="d.name" />
           </el-select>
         </el-form-item>
-        <SchemaForm :schema="currentSchema" :model="configModel" />
+        <SchemaForm :schema="currentSchema" :model="configModel" :editing="!!editingId" />
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>

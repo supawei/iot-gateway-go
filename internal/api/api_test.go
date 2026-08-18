@@ -3,7 +3,13 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net/http"
@@ -673,9 +679,11 @@ func newAuthAPI(t *testing.T) (*API, *auth.Manager) {
 }
 
 // loginAs 登录并返回 Bearer token;默认用预置管理员账号。
+// 密码按前端契约先拉取公钥做 RSA-OAEP-SHA256 加密,模拟真实 Web UI。
 func loginAs(t *testing.T, handler http.Handler, user, pass string) (string, bool) {
 	t.Helper()
-	rec := doRequest(t, handler, "POST", "/api/v1/auth/login", map[string]string{"username": user, "password": pass})
+	rec := doRequest(t, handler, "POST", "/api/v1/auth/login",
+		map[string]string{"username": user, "password": encryptForTest(t, handler, pass)})
 	if rec.Code != http.StatusOK {
 		return "", false
 	}
@@ -685,6 +693,67 @@ func loginAs(t *testing.T, handler http.Handler, user, pass string) (string, boo
 	}
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	return resp.Token, resp.MustChangePassword
+}
+
+// encryptForTest 从 /crypto/publicKey 拉取测试 API 的 RSA 公钥,
+// 用 RSA-OAEP-SHA256 加密明文,返回 base64 密文(与前端行为一致)。
+func encryptForTest(t *testing.T, handler http.Handler, plain string) string {
+	t.Helper()
+	rec := doRequest(t, handler, "GET", "/api/v1/crypto/publicKey", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get public key: got %d", rec.Code)
+	}
+	var body struct {
+		PublicKey string `json:"publicKey"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal public key: %v", err)
+	}
+	block, _ := pem.Decode([]byte(body.PublicKey))
+	if block == nil {
+		t.Fatal("decode public key pem failed")
+	}
+	pubAny, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse public key: %v", err)
+	}
+	pub, ok := pubAny.(*rsa.PublicKey)
+	if !ok {
+		t.Fatal("public key is not RSA")
+	}
+	ct, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, pub, []byte(plain), nil)
+	if err != nil {
+		t.Fatalf("encrypt oaep: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(ct)
+}
+
+// changePasswordForTest 以加密后的旧/新密码执行改密。
+func changePasswordForTest(t *testing.T, handler http.Handler, token, oldP, newP string) *httptest.ResponseRecorder {
+	t.Helper()
+	return doRequestAuth(t, handler, "PUT", "/api/v1/auth/password", token, map[string]string{
+		"oldPassword": encryptForTest(t, handler, oldP),
+		"newPassword": encryptForTest(t, handler, newP),
+	})
+}
+
+// encryptConfigForTest 把配置中敏感字段(名称命中)加密,模拟前端提交。
+func encryptConfigForTest(t *testing.T, handler http.Handler, raw json.RawMessage, sensitive map[string]bool) json.RawMessage {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	for name := range sensitive {
+		if s, ok := m[name].(string); ok && s != "" {
+			m[name] = encryptForTest(t, handler, s)
+		}
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	return out
 }
 
 func doRequestAuth(t *testing.T, handler http.Handler, method, path, token string, body interface{}) *httptest.ResponseRecorder {
@@ -729,8 +798,7 @@ func TestLoginAndProtectedEndpoint(t *testing.T) {
 	}
 
 	// 改密后可正常访问
-	rec = doRequestAuth(t, handler, "PUT", "/api/v1/auth/password", token,
-		map[string]string{"oldPassword": auth.DefaultAdminPassword, "newPassword": "newpass123"})
+	rec = changePasswordForTest(t, handler, token, auth.DefaultAdminPassword, "newpass123")
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("change password: got %d", rec.Code)
 	}
@@ -747,8 +815,7 @@ func TestCreateClientAutoID(t *testing.T) {
 	handler := apiInstance.Routes()
 
 	token, _ := loginAs(t, handler, auth.DefaultAdminUser, auth.DefaultAdminPassword)
-	doRequestAuth(t, handler, "PUT", "/api/v1/auth/password", token,
-		map[string]string{"oldPassword": auth.DefaultAdminPassword, "newPassword": "newpass123"})
+	changePasswordForTest(t, handler, token, auth.DefaultAdminPassword, "newpass123")
 	rec := doRequestAuth(t, handler, "POST", "/api/v1/clients", token,
 		map[string]any{"name": "MES", "scopes": []string{"devices:read"}})
 	if rec.Code != http.StatusCreated {
@@ -808,8 +875,7 @@ func TestClientsCRUDRequiresAdmin(t *testing.T) {
 
 	// admin 登录改密后 → 可管理
 	token, _ := loginAs(t, handler, auth.DefaultAdminUser, auth.DefaultAdminPassword)
-	doRequestAuth(t, handler, "PUT", "/api/v1/auth/password", token,
-		map[string]string{"oldPassword": auth.DefaultAdminPassword, "newPassword": "newpass123"})
+	changePasswordForTest(t, handler, token, auth.DefaultAdminPassword, "newpass123")
 
 	rec = doRequestAuth(t, handler, "POST", "/api/v1/clients", token,
 		map[string]any{"id": "mes-ro", "name": "MES", "scopes": []string{"devices:read"}})

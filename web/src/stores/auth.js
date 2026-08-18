@@ -1,5 +1,6 @@
 import { reactive } from 'vue'
 import { api, setToken } from '../api'
+import { encryptField } from '../utils/crypto'
 
 // 前端鉴权状态:登录态、当前主体、是否须改密、鉴权开关。
 const state = reactive({
@@ -25,14 +26,17 @@ async function refresh() {
 }
 
 async function login(username, password) {
-  const res = await api.login({ username, password })
+  const res = await api.login({ username, password: await encryptField(password) })
   setToken(res.token)
   state.me = { kind: 'user', id: res.id, scopes: res.scopes, mustChangePassword: res.mustChangePassword }
   return res
 }
 
 async function changePassword(oldPassword, newPassword) {
-  await api.changePassword({ oldPassword, newPassword })
+  await api.changePassword({
+    oldPassword: await encryptField(oldPassword),
+    newPassword: await encryptField(newPassword),
+  })
   if (state.me) state.me.mustChangePassword = false
 }
 

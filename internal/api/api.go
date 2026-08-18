@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"iot-gateway-go/internal/auth"
@@ -22,6 +23,7 @@ import (
 
 // API 提供 REST 配置接口,操作 store 并通过 OnChange 触发 scheduler 热加载;
 // 同时提供设备运行时状态与实时值查询。所有接口经 auth 中间件做鉴权与 scope 授权。
+// 密码类字段统一经 cryptoBox(RSA-OAEP)加密传输,GET 回显一律打码。
 type API struct {
 	store       *store.Store
 	status      *status.Registry
@@ -29,10 +31,23 @@ type API struct {
 	auth        *auth.Manager
 	authEnabled bool
 	outputs     *output.Manager // 输出配置变更后触发热重载;可为 nil(测试或未接线时跳过)
+
+	// 会话级密码加密盒(懒初始化)
+	cryptoOnce sync.Once
+	crypto     *cryptoBox
+	cryptoErr  error
 }
 
 func New(st *store.Store, statusReg *status.Registry, valuesReg *values.Registry, authz *auth.Manager, authEnabled bool, outputs *output.Manager) *API {
 	return &API{store: st, status: statusReg, values: valuesReg, auth: authz, authEnabled: authEnabled, outputs: outputs}
+}
+
+// cryptoBox 懒初始化 RSA 密钥对;失败一次即永久记住。
+func (a *API) cryptoBox() (*cryptoBox, error) {
+	a.cryptoOnce.Do(func() {
+		a.crypto, a.cryptoErr = newCryptoBox()
+	})
+	return a.crypto, a.cryptoErr
 }
 
 // Routes 返回挂载好路由的 ServeMux,由 main 直接用作 http.Server Handler。
@@ -45,6 +60,8 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/auth/logout", a.requireAuth(a.logout))
 	mux.HandleFunc("GET /api/v1/auth/me", a.requireAuth(a.me))
 	mux.HandleFunc("PUT /api/v1/auth/password", a.requireAuth(a.changePassword))
+	// 密码加密传输:RSA 公钥(匿名可拉取,登录前就需要)
+	mux.HandleFunc("GET /api/v1/crypto/publicKey", a.publicKey)
 	// 三方 client 管理(仅 admin 持有 * 可访问)
 	mux.HandleFunc("GET /api/v1/clients", a.require(auth.ScopeClientsRead, a.listClients))
 	mux.HandleFunc("POST /api/v1/clients", a.require(auth.ScopeClientsWrite, a.createClient))
@@ -87,6 +104,13 @@ func (a *API) createConnection(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// 敏感字段解密(非空必须是合法 RSA 密文)
+	cfg, err := a.decryptConfig(conn.Config, driverSensitiveFields(conn.Driver))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	conn.Config = cfg
 	if conn.ID == "" {
 		conn.ID = a.uniqueConnectionID()
 	}
@@ -97,7 +121,7 @@ func (a *API) createConnection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, conn)
+	writeJSON(w, http.StatusCreated, maskConnection(conn))
 }
 
 // idRetryLimit 是自动生成 ID 撞已有 ID 时的重试次数;8 位十六进制随机空间下
@@ -206,6 +230,9 @@ func (a *API) listConnections(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	for i := range conns {
+		conns[i] = maskConnection(conns[i])
+	}
 	writeJSON(w, http.StatusOK, conns)
 }
 
@@ -215,7 +242,7 @@ func (a *API) getConnection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, conn)
+	writeJSON(w, http.StatusOK, maskConnection(conn))
 }
 
 func (a *API) putConnection(w http.ResponseWriter, r *http.Request) {
@@ -224,6 +251,21 @@ func (a *API) putConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.ID = r.PathValue("connectionId")
+	sensitive := driverSensitiveFields(conn.Driver)
+	cfg, err := a.decryptConfig(conn.Config, sensitive)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	// 敏感字段留空 → 继承旧值(密码不修改)
+	if old, err := a.store.GetConnection(conn.ID); err == nil {
+		cfg, err = inheritSensitive(cfg, old.Config, sensitive)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	conn.Config = cfg
 	if !a.checkEndpointConflict(w, conn) {
 		return
 	}
@@ -231,7 +273,7 @@ func (a *API) putConnection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, conn)
+	writeJSON(w, http.StatusOK, maskConnection(conn))
 }
 
 func (a *API) deleteConnection(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +302,15 @@ func (a *API) createDevice(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// 参数中的敏感字段解密(非空必须是合法 RSA 密文)
+	if len(device.Params) > 0 {
+		cfg, err := a.decryptConfig(device.Params, nil)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		device.Params = cfg
+	}
 	if device.ID == "" {
 		device.ID = a.uniqueDeviceID()
 	}
@@ -267,7 +318,7 @@ func (a *API) createDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, device)
+	writeJSON(w, http.StatusCreated, maskDevice(device))
 }
 
 // cloneRequest 描述复制设备时的覆盖字段;未提供的字段从源设备继承,points 始终整体拷贝。
@@ -323,7 +374,7 @@ func (a *API) cloneDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, cloned)
+	writeJSON(w, http.StatusCreated, maskDevice(cloned))
 }
 
 // writeRequest 是下发写操作的请求体:点位名 + 工程值。
@@ -367,6 +418,9 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	for i := range devices {
+		devices[i] = maskDevice(devices[i])
+	}
 	writeJSON(w, http.StatusOK, devices)
 }
 
@@ -376,7 +430,7 @@ func (a *API) getDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, device)
+	writeJSON(w, http.StatusOK, maskDevice(device))
 }
 
 func (a *API) putDevice(w http.ResponseWriter, r *http.Request) {
@@ -385,11 +439,28 @@ func (a *API) putDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	device.ID = r.PathValue("deviceId")
+	// 敏感字段解密 + 留空继承旧值(与输出/连接一致)
+	if len(device.Params) > 0 {
+		cfg, err := a.decryptConfig(device.Params, nil)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		device.Params = cfg
+	}
+	if old, err := a.store.GetDevice(device.ID); err == nil {
+		cfg, err := inheritSensitive(device.Params, old.Params, nil)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		device.Params = cfg
+	}
 	if err := a.store.SaveDevice(device); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, device)
+	writeJSON(w, http.StatusOK, maskDevice(device))
 }
 
 func (a *API) deleteDevice(w http.ResponseWriter, r *http.Request) {
@@ -459,6 +530,9 @@ func (a *API) listOutputs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	for i := range outputs {
+		outputs[i] = maskOutput(outputs[i])
+	}
 	writeJSON(w, http.StatusOK, outputs)
 }
 
@@ -468,7 +542,7 @@ func (a *API) getOutput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, o)
+	writeJSON(w, http.StatusOK, maskOutput(o))
 }
 
 func (a *API) createOutput(w http.ResponseWriter, r *http.Request) {
@@ -476,12 +550,19 @@ func (a *API) createOutput(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if o.ID == "" {
-		o.ID = a.uniqueOutputID()
-	}
 	if o.Type == "" {
 		writeError(w, http.StatusBadRequest, errors.New("output type is required"))
 		return
+	}
+	// 敏感字段解密(非空必须是合法 RSA 密文)
+	cfg, err := a.decryptConfig(o.Config, outputSensitiveFields(o.Type))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	o.Config = cfg
+	if o.ID == "" {
+		o.ID = a.uniqueOutputID()
 	}
 	if err := a.store.SaveOutput(o); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -492,7 +573,7 @@ func (a *API) createOutput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, fmt.Errorf("output saved but reload failed: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusCreated, o)
+	writeJSON(w, http.StatusCreated, maskOutput(o))
 }
 
 func (a *API) putOutput(w http.ResponseWriter, r *http.Request) {
@@ -505,6 +586,21 @@ func (a *API) putOutput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("output type is required"))
 		return
 	}
+	sensitive := outputSensitiveFields(o.Type)
+	cfg, err := a.decryptConfig(o.Config, sensitive)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	// 敏感字段留空 → 继承旧值(密码不修改)
+	if old, err := a.store.GetOutput(o.ID); err == nil {
+		cfg, err = inheritSensitive(cfg, old.Config, sensitive)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	o.Config = cfg
 	if err := a.store.SaveOutput(o); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -513,7 +609,7 @@ func (a *API) putOutput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, fmt.Errorf("output saved but reload failed: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, o)
+	writeJSON(w, http.StatusOK, maskOutput(o))
 }
 
 func (a *API) deleteOutput(w http.ResponseWriter, r *http.Request) {
@@ -666,7 +762,18 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	token, p, err := a.auth.Login(req.Username, req.Password)
+	cb, err := a.cryptoBox()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	password, err := cb.decrypt(req.Password)
+	if err != nil {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_password_encryption",
+			"password must be RSA encrypted")
+		return
+	}
+	token, p, err := a.auth.Login(req.Username, password)
 	if err != nil {
 		writeErrorCode(w, http.StatusUnauthorized, "unauthenticated", "invalid username or password")
 		return
@@ -733,11 +840,28 @@ func (a *API) changePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if req.NewPassword == "" {
+	cb, err := a.cryptoBox()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	oldPassword, err := cb.decrypt(req.OldPassword)
+	if err != nil {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_password_encryption",
+			"old password must be RSA encrypted")
+		return
+	}
+	newPassword, err := cb.decrypt(req.NewPassword)
+	if err != nil {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_password_encryption",
+			"new password must be RSA encrypted")
+		return
+	}
+	if newPassword == "" {
 		writeError(w, http.StatusBadRequest, errors.New("new password is required"))
 		return
 	}
-	if err := a.auth.ChangePassword(p.ID, req.OldPassword, req.NewPassword); err != nil {
+	if err := a.auth.ChangePassword(p.ID, oldPassword, newPassword); err != nil {
 		if errors.Is(err, auth.ErrAuthn) {
 			writeErrorCode(w, http.StatusUnauthorized, "unauthenticated", "invalid old password")
 			return
@@ -746,6 +870,19 @@ func (a *API) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- 密码加密传输 ----
+
+// publicKey 返回会话 RSA 公钥(SPKI PEM),供前端对密码字段加密后传输。
+// 匿名可访问(登录前就需要);公钥本身非机密,会话私钥仅驻内存。
+func (a *API) publicKey(w http.ResponseWriter, r *http.Request) {
+	cb, err := a.cryptoBox()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"publicKey": cb.publicKeyPEM()})
 }
 
 // ---- 三方 client 管理 ----
