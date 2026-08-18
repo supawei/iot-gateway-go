@@ -8,6 +8,7 @@ Go 实现的开源工业物联网边缘网关。插件化架构,南向接入工�
 ┌──────────────────────────────────────────────────┐
 │  Northbound 北向输出层（输出插件）                  │
 │  已实现: MQTT / ThingsBoard / TDengine / smardaten │
+│         / Sparkplug B                             │
 ├──────────────────────────────────────────────────┤
 │  Processing 处理层（边缘计算: 过滤/聚合）           │
 ├──────────────────────────────────────────────────┤
@@ -250,6 +251,33 @@ tdengine:
 
 配置 `url` 后即启用(可与 mqtt / thingsboard 输出并存)。
 
+## Sparkplug B 输出
+
+以**边缘节点(edge node)**身份接入 Sparkplug B(工业 MQTT 事实标准):按
+`spBv1.0/{group}/{type}/{edgeNode}[/{device}]` 发布出生/数据/死亡消息,平台方订阅即可
+自动发现设备与点位。经 Web UI「北向输出」配置,类型选 **Sparkplug B**。详见
+[docs/sparkplugb.md](docs/sparkplugb.md)。
+
+| 配置 | 说明 | 默认 |
+|---|---|---|
+| `broker` | MQTT broker 地址 | 必填 |
+| `clientId` / `username` / `password` | 连接凭据 | - |
+| `qos` | QoS | 1 |
+| `groupId` | topic group 段 | `iot-gateway` |
+| `edgeNodeId` | topic edge node 段 | 网关 ID |
+| `deviceNamePrefix` | 设备 topic 段前缀 | 空 |
+
+行为要点:
+
+- **出生**:连接/重连自动发 `STATE ONLINE` + `NBIRTH`(设备数)+ 各设备 `DBIRTH`
+  (声明点位 name/alias/datatype 及当前值),均 retained,晚加入的平台也能发现;
+- **数据**:采集点经 `DDATA` 上送,**用别名压缩**(出生时声明,数据消息不含点位名),
+  每条消息 seq 单调递增;
+- **上下线**:设备上线发 `DBIRTH`、离线发 `DDEATH`(retained,空 payload);
+  网关优雅关闭发 `NDEATH` + `STATE OFFLINE`;
+- 复用 MQTT 韧性(非阻塞建连 + 指数退避)与**断网补传**(未连接时数据落库,连上出生后重放);
+- 当前**只发布不消费**(NCMD/DCMD 下行未实现,有需求再扩展)。
+
 ## REST API
 
 | 方法 | 路径 | 说明 |
@@ -307,6 +335,7 @@ internal/
     thingsboard/      ThingsBoard 输出
     tdengine/         TDengine 输出
     smardaten/        smardaten-iot 输出
+    sparkplugb/       Sparkplug B 输出(工业 MQTT 标准)
   processing/         边缘处理层(过滤/聚合)
   core/               scheduler + pipeline
   store/              SQLite 持久化

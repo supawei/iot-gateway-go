@@ -98,7 +98,7 @@
 ## P4 产品化
 
 - [ ] **更多协议**:Profinet / EtherCAT(工业以太网实时)、现场总线
-- [ ] **Sparkplug B 支持**:工业 MQTT 事实标准(topic 命名空间已预留)
+- [x] **Sparkplug B 支持**:工业 MQTT 事实标准——网关作为边缘节点发布 STATE/NBIRTH/DBIRTH/DDATA/DDEATH/NDEATH,手写 protobuf 编码 + 别名压缩,复用 mqttutil 韧性,接入设备上下线通知与断网补传(设计见 [docs/sparkplugb.md](docs/sparkplugb.md),2026-08-18)
 - [ ] **运维监控**:指标采集、结构化日志增强、健康检查端点
 - [ ] **物模型映射层**:在设备-点位之上加云物模型(TSL)映射,对接云平台语义(草案见 [docs/tsl-mapping.md](docs/tsl-mapping.md))
 
@@ -111,7 +111,7 @@
 | `go plugin` / 进程外插件 | 起步无隔离需求,坑多/复杂度高 | 出现不稳定驱动需隔离或第三方插件 |
 | 规则引擎 | 非 MVP 核心,复杂度高 | P3 或真实需求驱动(断网补传已 P3 完成) |
 | 工业以太网(Profinet/EtherCAT)/ 现场总线 | P1/P2 聚焦 Modbus、OPC UA | P4 或有真实设备需求 |
-| Sparkplug B | JSON 起步快,已留扩展点 | P4 或有互操作需求 |
+| Sparkplug B 下行(NCMD/DCMD) | 出生/数据/死亡已完成(2026-08-18),下行暂缓 | 有 host 下发指令的真实需求 |
 
 ---
 
@@ -142,3 +142,4 @@
 | 配置/数据库变更 | 开发期不做迁移,直接改结构 | 未发布无存量部署;发布后再引入版本化迁移,见 [docs/development-conventions.md](docs/development-conventions.md) |
 | 网关 ID | 从 config.yaml 迁到 SQLite(默认预置,Web UI 可改) | 属运行时配置而非引导配置,与输出配置一致走数据库 + 热重载;yaml 只留引导项 |
 | 边缘处理 | 插入 pipeline 处理层(`processing.Engine`),配置挂在设备点位 | 单点位过滤 + 聚合,避免通用规则引擎;派生点走完整输出链路;原始值仍进 values 实时值 |
+| Sparkplug B | 手写最小 protobuf 编码器 + 独立输出插件,别名压缩 + 出生/死亡生命周期 | 避免引入 protobuf 运行时依赖;复用 mqttutil/补传/DeviceNotifier;先发布后消费(下行按需扩展) |
