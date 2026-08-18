@@ -8,10 +8,19 @@ DIST_DIR     := dist
 
 GO := go
 
+# 版本注入:优先取最近的 git tag(如 v1.2.0),无 tag 时回退到短提交哈希/dirty 标记
+VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GIT_COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+BUILD_TIME  ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+VERSION_LDFLAGS := \
+	-X iot-gateway-go/internal/version.Version=$(VERSION) \
+	-X iot-gateway-go/internal/version.Commit=$(GIT_COMMIT) \
+	-X iot-gateway-go/internal/version.BuildTime=$(BUILD_TIME)
+
 # 关闭 CGO：依赖全为纯 Go，静态编译便于在无 libc 的网关盒上部署
 CGO_ENABLED := 0
 # 剥离调试符号与 DWARF，缩小二进制体积（工业网关存储/带宽有限）
-LDFLAGS := -s -w
+LDFLAGS := -s -w $(VERSION_LDFLAGS)
 
 # arm32 软浮点 ABI 版本：7 = Cortex-A 系列（工业网关主流），6 = 旧款 ARMv6
 ARM32_GOARM := 7

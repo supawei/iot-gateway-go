@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,14 +25,15 @@ import (
 	"iot-gateway-go/internal/status"
 	"iot-gateway-go/internal/store"
 	"iot-gateway-go/internal/values"
+	"iot-gateway-go/internal/version"
 	"iot-gateway-go/web"
 
 	_ "iot-gateway-go/internal/driver/modbus"        // 注册 modbus 驱动
 	_ "iot-gateway-go/internal/driver/modbus_listen" // 注册 modbus 监听驱动
 	_ "iot-gateway-go/internal/driver/opcua"         // 注册 opcua 驱动
 	_ "iot-gateway-go/internal/output/mqtt"          // 注册 mqtt 输出
+	_ "iot-gateway-go/internal/output/smardaten"     // 注册 smardaten-iot 输出
 	_ "iot-gateway-go/internal/output/tdengine"      // 注册 tdengine 输出
-	_ "iot-gateway-go/internal/output/smardaten"    // 注册 smardaten-iot 输出
 	_ "iot-gateway-go/internal/output/thingsboard"   // 注册 thingsboard 输出
 )
 
@@ -38,11 +42,67 @@ const (
 	shutdownTimeout     = 5 * time.Second
 )
 
-func main() {
-	configPath := "config.yaml"
-	if len(os.Args) > 1 {
-		configPath = os.Args[1]
+// usageText 是 -h/--help 与参数解析错误的帮助文本,头部会拼接当前版本号。
+const usageText = `用法:
+  gateway [options] [config-path]
+
+参数:
+  config-path            配置文件路径(位置参数,默认 config.yaml)
+
+选项:
+  -h, -help, --help      显示程序当前版本与用法并退出
+  -v, -version, --version
+                         仅显示程序当前版本并退出
+  -config <path>         指定配置文件路径(默认 config.yaml)
+
+示例:
+  gateway                使用默认 config.yaml 启动
+  gateway /etc/gateway.yaml
+                         使用指定配置文件启动
+  gateway -h             查看当前版本与用法
+`
+
+// printUsage 输出版本信息与用法,供 -h/--help 及参数错误时调用。
+func printUsage() {
+	fmt.Fprintf(os.Stdout, "%s\n\n%s", version.String(), usageText)
+}
+
+// parseArgs 解析命令行参数,返回配置文件路径。帮助/版本请求会直接退出进程。
+// 位置参数(兼容旧用法 ./gateway config.yaml)优先于 -config,再回退到默认值。
+func parseArgs(args []string) (configPath string) {
+	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // 错误文本由本函数自行处理,不打印 flag 包英文信息
+	showVersion := fs.Bool("v", false, "print version and exit")
+	fs.BoolVar(showVersion, "version", false, "print version and exit")
+	configFlag := fs.String("config", "", "path to config file")
+	fs.Usage = printUsage
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			// flag 包遇到 -h/-help 时已调用 fs.Usage 输出版本与用法,直接退出即可。
+			os.Exit(0)
+		}
+		fmt.Fprintln(os.Stderr, "gateway:", err)
+		fmt.Fprintln(os.Stderr, "run 'gateway -h' for usage")
+		os.Exit(2)
 	}
+	if *showVersion {
+		fmt.Fprintln(os.Stdout, version.String())
+		os.Exit(0)
+	}
+
+	configPath = "config.yaml"
+	if *configFlag != "" {
+		configPath = *configFlag
+	}
+	if fs.NArg() > 0 {
+		configPath = fs.Arg(0)
+	}
+	return configPath
+}
+
+func main() {
+	configPath := parseArgs(os.Args[1:])
 
 	cfg, err := config.Load(configPath)
 	if err != nil {

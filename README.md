@@ -27,11 +27,23 @@ Go 实现的开源工业物联网边缘网关。插件化架构,南向接入工�
 
 ```bash
 cp config.example.yaml config.yaml   # 编辑 MQTT broker 等
-go build -o gateway ./cmd/gateway
+go build -o gateway ./cmd/gateway    # 或 make build(自动注入版本号)
 ./gateway
 ```
 
 启动后可通过 Web 管理界面操作设备/连接(默认 `http://localhost:8080` 提供 API,前端见 [web/](web/))。
+
+## 命令行参数与版本
+
+```bash
+./gateway -h          # 显示程序当前版本与用法
+./gateway -v          # 仅显示当前版本(等价于 --version)
+./gateway             # 使用默认 config.yaml 启动
+./gateway /etc/gateway.yaml   # 指定配置文件启动
+./gateway -config /etc/gateway.yaml
+```
+
+版本号(语义化版本 + git 提交哈希 + 构建时间 + Go 版本)在编译时自动注入:`make build` 会取最近的 git tag(如 `v1.2.0`),无 tag 时回退到短提交哈希;`go build` 直编则显示占位版本 `dev`。要打版本 tag,执行 `git tag v1.2.0 && make build` 即可。
 
 ## 网关配置
 
