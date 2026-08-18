@@ -258,6 +258,49 @@ func TestEncodeValue(t *testing.T) {
 	}
 }
 
+// TestBuildWriteValue 回归:写值必须携带值内容。
+// 根因:DataValue 未设置 EncodingMask=DataValueValue 时,gopcua 编码不序列化 Value,
+// 发出的 WriteRequest 不含任何值,服务端不写入(前端"写值"表面成功、实际无效)。
+func TestBuildWriteValue(t *testing.T) {
+	point := model.Point{Name: "sp", Address: "ns=2;s=Setpoint", DataType: model.DataTypeInt32}
+
+	wv, ok := buildWriteValue(point, float64(42))
+	if !ok {
+		t.Fatalf("build failed")
+	}
+	if wv.AttributeID != ua.AttributeIDValue {
+		t.Fatalf("attribute: %v", wv.AttributeID)
+	}
+	if wv.Value == nil || wv.Value.EncodingMask != ua.DataValueValue {
+		t.Fatalf("DataValue.EncodingMask=%v want DataValueValue(0x1)", wv.Value.EncodingMask)
+	}
+
+	// 关键:编码后的 DataValue 必须包含值内容(掩码字节 1 + variant 至少 2 字节)
+	encoded, err := wv.Value.Encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if len(encoded) <= 1 {
+		t.Fatalf("encoded DataValue too short (%d bytes), value not serialized", len(encoded))
+	}
+	// 解码回读,确认值完好
+	var decoded ua.DataValue
+	if _, err := decoded.Decode(encoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.Value == nil || decoded.Value.Value() != int32(42) {
+		t.Fatalf("decoded value: %v", decoded.Value)
+	}
+
+	// 非法地址 / 类型不匹配应失败
+	if _, ok := buildWriteValue(model.Point{Name: "bad", Address: "ns=abc;i=1", DataType: model.DataTypeInt32}, float64(1)); ok {
+		t.Fatal("invalid address should fail")
+	}
+	if _, ok := buildWriteValue(point, "not-an-int"); ok {
+		t.Fatal("type mismatch should fail")
+	}
+}
+
 func TestEndpointKey(t *testing.T) {
 	drv := &opcuaDriver{}
 	if got := drv.EndpointKey(json.RawMessage(`{"endpoint":"opc.tcp://192.168.1.5:4840"}`)); got != "tcp|192.168.1.5:4840" {

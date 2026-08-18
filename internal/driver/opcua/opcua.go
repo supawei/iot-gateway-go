@@ -209,23 +209,11 @@ func (c *opcuaConn) Write(ctx context.Context, items []model.WriteItem) ([]drive
 	var indices []int
 	for index, item := range items {
 		results[index] = driver.WriteResult{Point: item.Point.Name}
-		nodeID, err := ua.ParseNodeID(item.Point.Address)
-		if err != nil {
-			continue
-		}
-		val, ok := encodeValue(item.Value, item.Point.DataType)
+		wv, ok := buildWriteValue(item.Point, item.Value)
 		if !ok {
 			continue
 		}
-		variant, err := ua.NewVariant(val)
-		if err != nil {
-			continue
-		}
-		nodes = append(nodes, &ua.WriteValue{
-			NodeID:      nodeID,
-			AttributeID: ua.AttributeIDValue,
-			Value:       &ua.DataValue{Value: variant},
-		})
+		nodes = append(nodes, wv)
 		indices = append(indices, index)
 	}
 	if len(nodes) == 0 {
@@ -244,6 +232,32 @@ func (c *opcuaConn) Write(ctx context.Context, items []model.WriteItem) ([]drive
 		}
 	}
 	return results, nil
+}
+
+// buildWriteValue 为单个点位构造 WriteValue:NodeID 解析失败或类型不匹配返回 ok=false。
+// 关键:DataValue 必须显式设置 EncodingMask=DataValueValue——gopcua 编码时仅按该位
+// 序列化 Value,缺省(0)会发出"不含值内容"的空写请求,服务端收到后不写入任何值。
+func buildWriteValue(point model.Point, value interface{}) (*ua.WriteValue, bool) {
+	nodeID, err := ua.ParseNodeID(point.Address)
+	if err != nil {
+		return nil, false
+	}
+	val, ok := encodeValue(value, point.DataType)
+	if !ok {
+		return nil, false
+	}
+	variant, err := ua.NewVariant(val)
+	if err != nil {
+		return nil, false
+	}
+	return &ua.WriteValue{
+		NodeID:      nodeID,
+		AttributeID: ua.AttributeIDValue,
+		Value: &ua.DataValue{
+			EncodingMask: ua.DataValueValue,
+			Value:        variant,
+		},
+	}, true
 }
 
 // planReads 解析每个点位的 NodeID 地址;解析失败的点跳过(保持 bad),成功的收集为批量读请求。
