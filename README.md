@@ -94,6 +94,11 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 
 数据即按周期采集并发布到 MQTT topic `gateway/{gatewayId}/device/sensor-01/data`。
 
+MQTT 输出默认**即时单条发布**(payload 为单个 `DataPoint` 对象);设置 `flushInterval`
+(如 `200ms`)可启用**批量模式**:同一设备在一个窗口内到达的点聚合为一条消息,
+payload 为 `DataPoint` 数组,`batchMax` 控制单条最大点数(超出拆分)。详见
+[docs/mqtt-batch-publish-design.md](docs/mqtt-batch-publish-design.md)。
+
 ## Modbus 驱动
 
 **连接配置** (`Connection.config` 字段,传输参数;从机地址 `slaveId` 在 `Device.params`):

@@ -10,7 +10,7 @@
 |---|---|---|
 | **P1** | MVP:Modbus→MQTT 端到端链路 + REST 配置 + SQLite | ✅ 已完成 (2026-08-13) |
 | **P2** | 验证扩展性:第二协议 / 第二北向输出 / 能力接口 | ✅ 已完成 (2026-08-16) |
-| **P3** | 增强:边缘计算、断网补传、更多云平台、增量热加载、API 鉴权 | 🔶 进行中(鉴权/输出SQLite/断网补传/增量热加载已完成) |
+| **P3** | 增强:边缘计算、断网补传、更多云平台、增量热加载、API 鉴权 | 🔶 进行中(鉴权/输出SQLite/断网补传/增量热加载/MQTT批量已完) |
 | **P4** | 产品化:更多协议、Sparkplug B、运维监控、物模型映射 | ⬜ 待开始 |
 
 ---
@@ -88,6 +88,7 @@
 - [x] **北向输出迁移 SQLite + Web UI**:输出注册表 + OutputManager 热重载(见 [docs/northbound-output-config.md](docs/northbound-output-config.md),2026-08-17)
 - [x] **断网本地补传**:网络中断/上送失败/缓冲满时数据持久化到 SQLite,恢复后按序重放,保证数据不丢(ThingsBoard/TDengine/smardaten 全覆盖,设计见 [docs/offline-backfill-design.md](docs/offline-backfill-design.md),2026-08-18)
 - [x] **增量热加载**:配置变更时 scheduler 对设备/点位 diff,只增删改受影响部分;未变设备连接与采集零打扰,轮询点位/间隔原地更新,订阅监听组增删整组重开(设计见 [docs/incremental-hot-reload-design.md](docs/incremental-hot-reload-design.md),2026-08-18)
+- [x] **MQTT 批量发布**:默认即时单条(向后兼容);配置 `flushInterval` 启用批量——同设备窗口内多点聚合为一条(数组 payload),`batchMax` 拆条,减少高频发布次数(设计见 [docs/mqtt-batch-publish-design.md](docs/mqtt-batch-publish-design.md),2026-08-18)
 - [ ] **边缘计算**:规则 / 过滤 / 聚合,插入 pipeline 处理层(目前直通)
 - [ ] **云 IoT 平台对接**:阿里云 / 华为云 / AWS IoT 输出插件(ThingsBoard 已作为 P2 验证完成)
 - [ ] **增量热加载**:scheduler 对设备/点位做 diff,增删改而非全量重启
