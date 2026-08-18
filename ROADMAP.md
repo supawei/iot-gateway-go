@@ -10,7 +10,7 @@
 |---|---|---|
 | **P1** | MVP:Modbus→MQTT 端到端链路 + REST 配置 + SQLite | ✅ 已完成 (2026-08-13) |
 | **P2** | 验证扩展性:第二协议 / 第二北向输出 / 能力接口 | ✅ 已完成 (2026-08-16) |
-| **P3** | 增强:边缘计算、断网补传、更多云平台、增量热加载、API 鉴权 | 🔶 进行中(鉴权/输出SQLite/断网补传已完成) |
+| **P3** | 增强:边缘计算、断网补传、更多云平台、增量热加载、API 鉴权 | 🔶 进行中(鉴权/输出SQLite/断网补传/增量热加载已完成) |
 | **P4** | 产品化:更多协议、Sparkplug B、运维监控、物模型映射 | ⬜ 待开始 |
 
 ---
@@ -87,6 +87,7 @@
 - [x] **API 鉴权**:scope/RBAC + 三方 API Key + 强制改密(设计见 [docs/authz.md](docs/authz.md),2026-08-16)
 - [x] **北向输出迁移 SQLite + Web UI**:输出注册表 + OutputManager 热重载(见 [docs/northbound-output-config.md](docs/northbound-output-config.md),2026-08-17)
 - [x] **断网本地补传**:网络中断/上送失败/缓冲满时数据持久化到 SQLite,恢复后按序重放,保证数据不丢(ThingsBoard/TDengine/smardaten 全覆盖,设计见 [docs/offline-backfill-design.md](docs/offline-backfill-design.md),2026-08-18)
+- [x] **增量热加载**:配置变更时 scheduler 对设备/点位 diff,只增删改受影响部分;未变设备连接与采集零打扰,轮询点位/间隔原地更新,订阅监听组增删整组重开(设计见 [docs/incremental-hot-reload-design.md](docs/incremental-hot-reload-design.md),2026-08-18)
 - [ ] **边缘计算**:规则 / 过滤 / 聚合,插入 pipeline 处理层(目前直通)
 - [ ] **云 IoT 平台对接**:阿里云 / 华为云 / AWS IoT 输出插件(ThingsBoard 已作为 P2 验证完成)
 - [ ] **增量热加载**:scheduler 对设备/点位做 diff,增删改而非全量重启
@@ -125,12 +126,12 @@
 | SQLite 驱动 | `modernc.org/sqlite` | 纯 Go 无 CGO,工控机交叉编译友好 |
 | REST 框架 | 标准库 `net/http` | 反过度工程,Go 1.25 ServeMux 够用 |
 | output registry | 去掉,main 直接构造 | 网关级单例无需注册表,更克制 |
-| 热加载 | 全量重载 | MVP 简化,增量 diff 留 P3 |
+| 热加载 | 全量重载 | MVP 简化,增量 diff 已于 P3 完成(2026-08-18) |
 | Read 语义 | error 表配置级错误,Quality 表数据质量 | 让北向能感知设备异常(bad/uncertain) |
 | Modbus 库 | grid-x/modbus | 原生 RTU over TCP;Client/Connect 带 ctx;纯 Go 不影响交叉编译 |
 | 连接实体化 | Connection 与 Device 分离 | 同串口/DTU 多从机共享传输配置不冗余;连接复用以 ConnectionID 为 key |
 | OPC UA 库 | gopcua/opcua | 纯 Go 无 CGO,符合交叉编译;轮询复用 scheduler 模型;订阅经 `Subscriber` 推送 |
-| 调度模型 | cron 统一调度 + worker pool | 常驻 goroutine 与设备数解耦;pool 限流保护下游;reload 全量重建(增量留 P3) |
+| 调度模型 | cron 统一调度 + worker pool | 常驻 goroutine 与设备数解耦;pool 限流保护下游;reload 增量 reconcile(2026-08-18) |
 | 可选能力接口 | `Writer`/`Subscriber`/`Listener`/`SchemaProvider`/`DeviceNotifier` 经类型断言叠加 | 核心接口(Driver/Conn/Output)保持最小,能力按需声明,不强制所有驱动/输出实现 |
 | 设备写链路 | `core.WritePoint` 单点复用 | REST 写接口与 ThingsBoard 下行共用同一"查点位→开连接→Writer.Write"链路,消除重复 |
 | 运行时状态 | `status.Registry` + `values.Registry`(内存态) | 可观测性信息不持久化,与 SQLite 配置分离;实时值只记"最新一帧",供界面展示 |
