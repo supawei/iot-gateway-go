@@ -100,6 +100,14 @@ func TestDecodeValue(t *testing.T) {
 	if floatValue, _ := got.(float64); math.Abs(floatValue-4.2) > 1e-9 {
 		t.Fatalf("int32 scaled value: %v want 4.2", got)
 	}
+
+	// 未识别的 dataType 必须 ok=false(uncertain),不得放行 "good + nil 值"
+	if _, ok := decodeValue("anything", model.DataType("unknown"), 0); ok {
+		t.Fatalf("unknown dataType should fail")
+	}
+	if _, ok := decodeValue(nil, model.DataType("unknown"), 0); ok {
+		t.Fatalf("unknown dataType with nil should fail")
+	}
 }
 
 func TestParseConnConfigSubscribe(t *testing.T) {

@@ -83,6 +83,11 @@ type sharedSession struct {
 	subCancel  context.CancelFunc
 	targets    map[uint32]subTarget
 	nextHandle uint32
+
+	// dispatchDone 在订阅分发 goroutine 退出(含 defer 里的 sub.Cancel 完成)后关闭;
+	// release 据此等待删除订阅请求落地再关 client,避免 DeleteSubscriptions 晚于
+	// CloseSession 到达服务端(gopcua server 对已关闭会话的删除请求会 panic)。
+	dispatchDone chan struct{}
 }
 
 // subTarget 是订阅分派目标:ClientHandle 反查到的设备点位及其回调。
@@ -140,6 +145,7 @@ func (d *opcuaDriver) acquire(ctx context.Context, connectionID string, cfg conn
 		refCount:     1,
 		subCancel:    subCancel,
 		subCtx:       subCtx,
+		dispatchDone: make(chan struct{}),
 	}
 	d.pool[connectionID] = shared
 	return shared, nil
@@ -153,10 +159,17 @@ func (d *opcuaDriver) release(shared *sharedSession) error {
 		return nil
 	}
 	delete(d.pool, shared.connectionID)
-	// 先撤销订阅分发 goroutine(subCancel 触发其 defer 里 sub.Cancel),再关 client;
-	// 顺序保证撤销订阅时 client 尚可用。
+	// 先撤销订阅分发 goroutine(subCancel 触发其 defer 里 sub.Cancel),再关 client。
+	// 若创建过订阅,须等分发 goroutine 的 DeleteSubscriptions 落地(dispatchDone 关闭)
+	// 再 CloseSession,否则删除订阅请求可能晚于会话关闭到达服务端而 panic。
 	if shared.subCancel != nil {
 		shared.subCancel()
+	}
+	shared.subMu.Lock()
+	hasSub := shared.sub != nil
+	shared.subMu.Unlock()
+	if hasSub {
+		<-shared.dispatchDone
 	}
 	return shared.client.Close(context.Background())
 }
@@ -296,6 +309,7 @@ func applyReadResults(results []model.DataPoint, indices []int, readResults []*u
 
 // decodeValue 把 OPC UA variant 返回的 Go 原生值按声明类型校验,并应用缩放。
 // 类型不匹配返回 ok=false(标记 uncertain),而非整批失败。
+// 未识别的 dataType 一律 ok=false——避免"good + nil 值"等异常数据组合污染北向输出。
 func decodeValue(raw interface{}, dataType model.DataType, scale float64) (interface{}, bool) {
 	switch dataType {
 	case model.DataTypeBool:
@@ -323,7 +337,7 @@ func decodeValue(raw interface{}, dataType model.DataType, scale float64) (inter
 		}
 		return value, true
 	default:
-		return raw, true
+		return nil, false
 	}
 }
 
@@ -457,7 +471,10 @@ func (s *sharedSession) subscribe(ctx context.Context, deviceID string, cfg conn
 		}
 		s.sub = sub
 		s.targets = make(map[uint32]subTarget)
-		go s.dispatch(sub, notifyCh)
+		go func() {
+			defer close(s.dispatchDone)
+			s.dispatch(sub, notifyCh)
+		}()
 	}
 
 	resp, err := s.sub.Monitor(ctx, ua.TimestampsToReturnBoth, items...)
@@ -467,9 +484,13 @@ func (s *sharedSession) subscribe(ctx context.Context, deviceID string, cfg conn
 	for row := range items {
 		handle := handles[row]
 		pointIndex := indices[row]
-		// Monitor 不因单点失败而报错:结果中的 bad status 记日志且不登记 target,
+		// Monitor 不因单点失败而报错:结果缺失或 bad status 记日志且不登记 target,
 		// 该点后续不会被推送,语义对齐 Read(单点失败不阻断同批)。
-		if row < len(resp.Results) && resp.Results[row].StatusCode != ua.StatusOK {
+		if row >= len(resp.Results) {
+			slog.Warn("opcua monitored item missing result", "device", deviceID, "point", points[pointIndex].Name, "requested", len(items), "results", len(resp.Results))
+			continue
+		}
+		if resp.Results[row].StatusCode != ua.StatusOK {
 			slog.Warn("opcua monitored item rejected", "device", deviceID, "point", points[pointIndex].Name, "status", resp.Results[row].StatusCode)
 			continue
 		}

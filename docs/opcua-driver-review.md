@@ -30,10 +30,10 @@ OPC UA 驱动实现了框架定义的全部可选能力接口,是当前项目里
 
 ## 2. 已实现能力核验
 
-### 2.1 连接复用与生命周期(正确)
+### 2.1 连接复用与生命周期(正确,已补一处竞态修复)
 
 - `acquire`/`release` 用引用计数管理 `sharedSession`,同 endpoint 多设备共享一个 TCP 连接与会话,最后引用释放时撤销订阅并 `client.Close()`。
-- 释放顺序正确:先 `subCancel()` 撤销订阅分发 goroutine(其 defer 里 `sub.Cancel`),再关 client,保证撤销订阅时 client 仍可用。
+- 释放顺序:先 `subCancel()` 撤销订阅分发 goroutine(其 defer 里 `sub.Cancel`),**等待 `DeleteSubscriptions` 落地(`dispatchDone` 关闭)后再 `client.Close`**——既保证撤销订阅时 client 尚可用,也避免删除订阅请求晚于会话关闭到达服务端触发 gopcua server panic(详见 [3.3](#33-健壮性工程性低危))。
 - 配置变更触发 scheduler 全量 reload → 所有 conn `Close` → 引用归零 → session 拆除重建,**配置更新后会话不会残留旧状态**。
 
 ### 2.2 轮询读取 Read(正确,含语义对齐)
@@ -97,16 +97,17 @@ gopcua v0.9.1 的重连状态机在断线后:
 1. **时间戳来源不一致**:订阅模式 `notificationToDataPoint` 取服务端 `SourceTimestamp`(缺失时退回 `ServerTimestamp`/本地时间),而轮询模式 `Read` 一律用本地 `time.Now()`。同一设备切换模式后时间戳语义会变,北向按时间戳做时序判断时需注意。
 2. **Read 通信失败吞错误**:`client.Read` 出错仅 `slog.Error`,整批返回 bad;scheduler 侧最终以 `"all points bad"` 标记离线,**丢失真实错误原因**(不如把通信错误升级为带原因的离线)。属设计取舍,可改进。
 3. **`encodeValue` 经 `toFloat64` 转 `int64`**:超过 2^53 的 int64 写入会丢精度(OPC UA int64 常规场景罕见,低危)。
-4. **`decodeValue` 未知 dataType 分支**:`default: return raw, true`——若服务器返回 nil 值且 dataType 未识别,会出现 `Quality=good` + `Value=nil` 的异常组合。建议未知类型一律 `ok=false`(uncertain)。
-5. **Monitor 结果长度不匹配静默**:`subscribe` 里 `if row < len(resp.Results)` 对缺失结果行静默跳过(不登记 target 也不记日志),建议补 warn 日志。
+4. **~~`decodeValue` 未知 dataType 分支~~(已修复)**:原 `default: return raw, true` 在未知类型 + nil 值时会产生 `Quality=good` + `Value=nil` 的异常组合。已改为未知类型一律 `ok=false`(uncertain),并加单测(`TestDecodeValue`)。
+5. **~~Monitor 结果长度不匹配静默~~(已修复)**:原 `if row < len(resp.Results)` 对缺失结果行静默跳过;已改为缺失行显式 `slog.Warn`。
 6. **订阅失效不可见**:分发 goroutine 忽略 `StatusChangeNotification`(订阅丢失/重建事件),断线恢复靠库内重建,但**重建失败时设备不会转为离线**,运维无感知。建议把订阅状态变化透出到日志/设备状态。
 
 ### 3.3 健壮性/工程性(低危)
 
-1. **`stateCh` 满 + 取消后 `Close` 可能阻塞**:`monitorConnState` 在 `ctx.Done` 即退出且不再消费 `stateCh`(缓冲 8);若此刻缓冲恰好满,`release → client.Close → setState(Closed)` 会因发送阻塞(传入 `context.Background`)而卡住。概率极低(需取消瞬间恰逢状态突发),建议 stateCh 缓冲加大或 monitor 退出前排空。
-2. **订阅通知背压**:gopcua `notify` 在缓冲满时阻塞其 publish 循环;驱动用 128 缓冲吸收,但若北向输出慢导致 `emit` 阻塞 → `dispatch` 阻塞 → 缓冲满,会一路背压到客户端 publish 处理(注释已说明,属取舍)。
-3. **无 per-device 退订**:`driver.Subscriber` 无 Unsubscribe,点位/设备删除的清理依赖 reload 全量拆除 session(当前 scheduler 每次配置变更都全量 reload,实际可自愈;仅热更改为增量时才会暴露)。
-4. **测试缺口(部分补齐)**:原测试覆盖配置解析、NodeID 解析、值编解码、监控项构造、通知转 DataPoint、池引用计数、EndpointKey,**无真实 server 集成往返测试**。修复写值 Bug 时已新增 `TestWriteE2E`(进程内 gopcua server,覆盖 Write 端到端)与 `TestBuildWriteValue`;**Read/Probe/Subscribe 与服务器的集成测试仍未补**,可沿用同套 gopcua server 补齐。
+1. **~~release 顺序竞态~~(已修复)**:原 `release` 里 `subCancel()` 后不等分发 goroutine 的 `sub.Cancel`(DeleteSubscriptions)落地就 `client.Close`(CloseSession),删除订阅请求可能晚于会话关闭到达服务端——真实 server 下会触发 gopcua server 对已关闭会话的 nil 解引用 panic。已新增 `dispatchDone` 通道,release 在关闭 client 前等待订阅删除落地。`TestSubscribeE2E` 覆盖该路径(修复前收尾即 panic)。
+2. **`stateCh` 满 + 取消后 `Close` 可能阻塞**:`monitorConnState` 在 `ctx.Done` 即退出且不再消费 `stateCh`(缓冲 8);若此刻缓冲恰好满,`release → client.Close → setState(Closed)` 会因发送阻塞(传入 `context.Background`)而卡住。概率极低(需取消瞬间恰逢状态突发),建议 stateCh 缓冲加大或 monitor 退出前排空。
+3. **订阅通知背压**:gopcua `notify` 在缓冲满时阻塞其 publish 循环;驱动用 128 缓冲吸收,但若北向输出慢导致 `emit` 阻塞 → `dispatch` 阻塞 → 缓冲满,会一路背压到客户端 publish 处理(注释已说明,属取舍)。
+4. **无 per-device 退订**:`driver.Subscriber` 无 Unsubscribe,点位/设备删除的清理依赖 reload 全量拆除 session(当前 scheduler 每次配置变更都全量 reload,实际可自愈;仅热更改为增量时才会暴露)。
+5. **测试缺口(已补齐)**:原测试无真实 server 集成往返测试。现基于 gopcua 进程内 server(包级共享单例摊薄 ~13s 标准 nodeset 导入成本)补齐:**`TestWriteE2E`、`TestReadE2E`、`TestProbeE2E`、`TestSubscribeE2E`**,覆盖读写/探测/订阅推送四类端到端往返,均通过。
 
 ---
 
@@ -134,22 +135,27 @@ gopcua v0.9.1 的重连状态机在断线后:
 
 | 优先级 | 事项 |
 |---|---|
-| P0(建议尽快) | ① `decodeValue` 未知类型改为 `ok=false`;② Monitor 结果缺失补日志;③ README 补充 NodeID 裸字符串陷阱 |
+| ~~P0~~(已完成) | ① `decodeValue` 未知类型 `ok=false` ✅;② Monitor 结果缺失补日志 ✅;③ README NodeID 裸字符串陷阱 ✅ |
 | P1(生产化前) | ① 安全模式 `Sign`/`SignAndEncrypt` + 证书配置;② 节点浏览/发现(Web UI 选择器);③ Read 通信失败保留真实错误原因 |
-| P2(按需) | 方法调用、历史数据、数组/扩展类型、订阅状态透出、Read/Probe/Subscribe 集成测试补齐、订阅背压与 stateCh 健壮性 |
+| P2(按需) | 方法调用、历史数据、数组/扩展类型、订阅状态透出、订阅背压、stateCh 健壮性、Read 通信错误透出 |
+
+> 集成测试(原 P2)已随本轮补齐:基于 gopcua 进程内 server 的 `TestReadE2E`/`TestProbeE2E`/`TestSubscribeE2E` 均已通过。
 
 ---
 
 ## 附:测试覆盖清单
 
-`go test ./internal/driver/opcua/ -v` 全部通过:
+`go test ./internal/driver/opcua/ -v` 全部通过(共享单例 server 启动约 13s 一次,包内测试总计约 1s):
 
 - `TestParseConnConfig` / `TestParseConnConfigDefaults` / `TestParseConnConfigSubscribe` / `TestParseConnConfigSubscribeErrors`
 - `TestParseNodeIDAddress`
 - `TestDecodeValue` / `TestEncodeValue`
 - `TestBuildWriteValue`(写值回归:DataValue 编码必须携带值内容,防 `EncodingMask` 缺失复发)
-- `TestWriteE2E`(进程内 gopcua server 端到端:写 int32/float64/bool/string 并核对 server 节点值;启动约 13s)
 - `TestBuildMonitoredItems`
 - `TestNotificationToDataPoint`
 - `TestConnectionPoolAcquireRelease`
 - `TestEndpointKey`
+- `TestWriteE2E`(写 int32/float64/bool/string 并核对 server 节点值)
+- `TestReadE2E`(写已知值→批量读回,含无效地址点位保持 bad 不阻断同批)
+- `TestProbeE2E`(可达/无可解析点位/未监听端口不可达)
+- `TestSubscribeE2E`(订阅后从另一连接写值,onData 推送目标值;覆盖 release 顺序修复)
