@@ -17,6 +17,7 @@ import (
 	"github.com/grid-x/modbus"
 
 	"iot-gateway-go/internal/driver"
+	"iot-gateway-go/internal/driver/byteorder"
 	"iot-gateway-go/internal/model"
 )
 
@@ -75,6 +76,8 @@ func (*modbusDriver) ConfigSchema() []driver.Field {
 func (*modbusDriver) ParamSchema() []driver.Field {
 	return []driver.Field{
 		{Name: "slaveId", Label: "从机地址", Type: driver.FieldInt, Default: 1, Hint: "0-255"},
+		{Name: "byteOrder", Label: "字节序", Type: driver.FieldEnum, Default: "ABCD", Options: []string{"ABCD", "BADC", "CDAB", "DCBA"},
+			Hint: "32 位值(int32/uint32/float32)的多寄存器字节序;ABCD=大端(默认),CDAB=字交换, BADC=字节交换, DCBA=字节+字交换;16 位/线圈不受影响"},
 		{Name: "pollBlocks", Label: "固定读取块", Type: driver.FieldJSON, Hint: `[{"function":"holding","start":0,"count":12}]`},
 	}
 }
@@ -113,6 +116,7 @@ func (d *modbusDriver) Open(ctx context.Context, req driver.OpenRequest) (driver
 	return &modbusConn{
 		deviceID:   req.DeviceID,
 		slaveID:    params.SlaveID,
+		byteOrder:  byteorder.Order(params.ByteOrder),
 		shared:     shared,
 		driver:     d,
 		pollBlocks: indexPollBlocks(params.PollBlocks),
@@ -165,6 +169,7 @@ type sharedConn struct {
 type modbusConn struct {
 	deviceID   string
 	slaveID    byte
+	byteOrder  byteorder.Order
 	shared     *sharedConn
 	driver     *modbusDriver
 	pollBlocks map[string][]pollBlock
@@ -192,11 +197,12 @@ func (c *modbusConn) Read(ctx context.Context, points []model.Point) ([]model.Da
 			continue // 解析失败:该点保持 bad,跳过不阻断
 		}
 		itemsByFunction[function] = append(itemsByFunction[function], pointItem{
-			index:    index,
-			point:    point,
-			function: function,
-			register: register,
-			quantity: quantityOf(point.DataType),
+			index:     index,
+			point:     point,
+			function:  function,
+			register:  register,
+			quantity:  quantityOf(point.DataType),
+			byteOrder: c.byteOrder,
 		})
 	}
 	for function, items := range itemsByFunction {
@@ -298,7 +304,7 @@ func (c *modbusConn) writeCoil(ctx context.Context, register uint16, value inter
 }
 
 func (c *modbusConn) writeHolding(ctx context.Context, register uint16, point model.Point, value interface{}) error {
-	raw, ok := encodeWriteValue(value, point.DataType, point.Scale)
+	raw, ok := encodeWriteValue(value, point.DataType, point.Scale, c.byteOrder)
 	if !ok {
 		return fmt.Errorf("cannot encode %v as %s", value, point.DataType)
 	}
@@ -311,13 +317,15 @@ func (c *modbusConn) writeHolding(ctx context.Context, register uint16, point mo
 	return err
 }
 
-// pointItem 关联点位与其解析后的地址信息,供连读分组与结果回填。
+// pointItem 关联点位与其解析后的地址信息,供连读分组与结果回填。byteOrder 为设备级
+// 字节序,决定多寄存器(32 位)值的解码方式。
 type pointItem struct {
-	index    int
-	point    model.Point
-	function string
-	register uint16
-	quantity uint16
+	index     int
+	point     model.Point
+	function  string
+	register  uint16
+	quantity  uint16
+	byteOrder byteorder.Order
 }
 
 // readGroup 按 planBlocks 划分的合并块逐块请求,读回后按偏移解码回填 results。
@@ -461,7 +469,8 @@ func (c *modbusConn) readRaw(ctx context.Context, function string, register, qua
 }
 
 // decodePoint 从连读块 raw 中按点位偏移解码单个值。
-// holding/input 按寄存器(2 字节)切片;coil/discrete 按位取。
+// holding/input 按寄存器(2 字节)切片;coil/discrete 按位取。多寄存器(32 位)值
+// 按 item.byteOrder 字节序解码,16 位/线圈不受字节序影响(单寄存器恒为大端)。
 func decodePoint(item pointItem, raw []byte, blockStart uint16) (interface{}, error) {
 	if item.function == "coil" || item.function == "discrete" {
 		bitIndex := int(item.register - blockStart)
@@ -476,7 +485,7 @@ func decodePoint(item pointItem, raw []byte, blockStart uint16) (interface{}, er
 	if endByte > len(raw) {
 		return nil, errShortResponse
 	}
-	return decodeValue(item.point.DataType, raw[offset:endByte])
+	return decodeValue(item.point.DataType, raw[offset:endByte], item.byteOrder)
 }
 
 func maxQuantity(function string) int {
@@ -510,7 +519,7 @@ func quantityOf(dt model.DataType) uint16 {
 	}
 }
 
-func decodeValue(dt model.DataType, raw []byte) (interface{}, error) {
+func decodeValue(dt model.DataType, raw []byte, order byteorder.Order) (interface{}, error) {
 	switch dt {
 	case model.DataTypeBool:
 		if len(raw) < 1 {
@@ -531,17 +540,17 @@ func decodeValue(dt model.DataType, raw []byte) (interface{}, error) {
 		if len(raw) < 4 {
 			return nil, errShortResponse
 		}
-		return int32(binary.BigEndian.Uint32(raw)), nil
+		return int32(byteorder.Uint32(order, raw)), nil
 	case model.DataTypeUInt32:
 		if len(raw) < 4 {
 			return nil, errShortResponse
 		}
-		return binary.BigEndian.Uint32(raw), nil
+		return byteorder.Uint32(order, raw), nil
 	case model.DataTypeFloat:
 		if len(raw) < 4 {
 			return nil, errShortResponse
 		}
-		return math.Float32frombits(binary.BigEndian.Uint32(raw)), nil
+		return math.Float32frombits(byteorder.Uint32(order, raw)), nil
 	default:
 		return nil, fmt.Errorf("unsupported dataType %s", dt)
 	}
@@ -568,9 +577,10 @@ func applyScale(value interface{}, scale float64, dt model.DataType) interface{}
 	}
 }
 
-// encodeWriteValue 把工程值按 dataType 编码为 Modbus 大端字节序(寄存器写)。
-// scale 非零时反向:rawValue = value / scale。不支持 bool/int64/double/string(返回 ok=false)。
-func encodeWriteValue(value interface{}, dataType model.DataType, scale float64) ([]byte, bool) {
+// encodeWriteValue 把工程值按 dataType 编码为 Modbus 寄存器字节(单寄存器恒为大端,
+// 多寄存器 32 位值按 order 字节序编码)。scale 非零时反向:rawValue = value / scale。
+// 不支持 bool/int64/double/string(返回 ok=false)。
+func encodeWriteValue(value interface{}, dataType model.DataType, scale float64, order byteorder.Order) ([]byte, bool) {
 	raw, ok := unscaleValue(value, scale)
 	if !ok {
 		return nil, false
@@ -586,15 +596,15 @@ func encodeWriteValue(value interface{}, dataType model.DataType, scale float64)
 		return b, true
 	case model.DataTypeInt32:
 		b := make([]byte, 4)
-		binary.BigEndian.PutUint32(b, uint32(int32(raw)))
+		byteorder.PutUint32(order, b, uint32(int32(raw)))
 		return b, true
 	case model.DataTypeUInt32:
 		b := make([]byte, 4)
-		binary.BigEndian.PutUint32(b, uint32(raw))
+		byteorder.PutUint32(order, b, uint32(raw))
 		return b, true
 	case model.DataTypeFloat:
 		b := make([]byte, 4)
-		binary.BigEndian.PutUint32(b, math.Float32bits(float32(raw)))
+		byteorder.PutUint32(order, b, math.Float32bits(float32(raw)))
 		return b, true
 	default:
 		return nil, false
@@ -668,9 +678,10 @@ func parseConnConfig(connection json.RawMessage) (connConfig, error) {
 	return cfg, nil
 }
 
-// deviceParams 是设备级协议参数(总线上怎么寻址该设备)。
+// deviceParams 是设备级协议参数(总线上怎么寻址该设备、怎么解释其数据)。
 type deviceParams struct {
 	SlaveID    byte        `json:"slaveId"`
+	ByteOrder  string      `json:"byteOrder"`
 	PollBlocks []pollBlock `json:"pollBlocks"`
 }
 
@@ -682,13 +693,18 @@ type pollBlock struct {
 }
 
 func parseDeviceParams(raw json.RawMessage) (deviceParams, error) {
-	params := deviceParams{}
+	params := deviceParams{ByteOrder: string(byteorder.ABCD)}
 	if len(raw) == 0 {
 		return params, nil
 	}
 	if err := json.Unmarshal(raw, &params); err != nil {
 		return deviceParams{}, fmt.Errorf("parse modbus device params: %w", err)
 	}
+	order, err := byteorder.Parse(params.ByteOrder)
+	if err != nil {
+		return deviceParams{}, err
+	}
+	params.ByteOrder = string(order)
 	return params, nil
 }
 

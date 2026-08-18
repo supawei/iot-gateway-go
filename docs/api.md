@@ -111,6 +111,7 @@
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `slaveId` | int | `0` | Modbus 从机地址 |
+| `byteOrder` | string | `ABCD` | 32 位值(`int32`/`uint32`/`float32`)的多寄存器字节序:`ABCD` 大端(默认)/ `CDAB` 字交换(小端)/ `BADC` 字节交换 / `DCBA` 字节+字交换;16 位与线圈恒为大端,不受影响 |
 | `pollBlocks` | PollBlock[] | `[]` | 固定读取块;配了块的 function 按块读,未配的自动连读 |
 
 PollBlock:

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"iot-gateway-go/internal/driver"
+	"iot-gateway-go/internal/driver/byteorder"
 	"iot-gateway-go/internal/model"
 )
 
@@ -54,33 +55,75 @@ func TestParseDeviceParams(t *testing.T) {
 	if params.SlaveID != 1 {
 		t.Fatalf("slaveId=%d", params.SlaveID)
 	}
+	// 未配置字节序默认 ABCD
+	if params.ByteOrder != string(byteorder.ABCD) {
+		t.Fatalf("default byte order: %q want ABCD", params.ByteOrder)
+	}
+	// 显式配置被规范化
+	params, err = parseDeviceParams(json.RawMessage(`{"slaveId":1,"byteOrder":"dcba"}`))
+	if err != nil || params.ByteOrder != string(byteorder.DCBA) {
+		t.Fatalf("normalized byte order: %+v err=%v", params, err)
+	}
+	// 非法字节序报错
+	if _, err := parseDeviceParams(json.RawMessage(`{"byteOrder":"XYZ"}`)); err == nil {
+		t.Fatal("invalid byte order should error")
+	}
 }
 
 func TestDecodePoint(t *testing.T) {
 	regs := []uint16{0x1234, 0xABCD, 0x3F80, 0x0000}
 	// int16 大端
-	if v, ok := decodePoint(model.Point{Address: "0", DataType: model.DataTypeInt16}, regs); !ok || v != int16(0x1234) {
+	if v, ok := decodePoint(model.Point{Address: "0", DataType: model.DataTypeInt16}, byteorder.ABCD, regs); !ok || v != int16(0x1234) {
 		t.Fatalf("int16: %v ok=%v", v, ok)
 	}
 	// uint16
-	if v, ok := decodePoint(model.Point{Address: "1", DataType: model.DataTypeUInt16}, regs); !ok || v != uint16(0xABCD) {
+	if v, ok := decodePoint(model.Point{Address: "1", DataType: model.DataTypeUInt16}, byteorder.ABCD, regs); !ok || v != uint16(0xABCD) {
 		t.Fatalf("uint16: %v ok=%v", v, ok)
 	}
 	// int32 占 2 寄存器:0x3F80 << 16 | 0x0000 = 0x3F800000 = 1.0 float,但这里按 int32
-	if v, ok := decodePoint(model.Point{Address: "2", DataType: model.DataTypeInt32}, regs); !ok || v != int32(0x3F800000) {
+	if v, ok := decodePoint(model.Point{Address: "2", DataType: model.DataTypeInt32}, byteorder.ABCD, regs); !ok || v != int32(0x3F800000) {
 		t.Fatalf("int32: %v ok=%v", v, ok)
 	}
 	// float32 占 2 寄存器:0x3F800000 = 1.0
-	if v, ok := decodePoint(model.Point{Address: "2", DataType: model.DataTypeFloat}, regs); !ok || v != float32(1.0) {
+	if v, ok := decodePoint(model.Point{Address: "2", DataType: model.DataTypeFloat}, byteorder.ABCD, regs); !ok || v != float32(1.0) {
 		t.Fatalf("float32: %v ok=%v", v, ok)
 	}
 	// 越界
-	if _, ok := decodePoint(model.Point{Address: "3", DataType: model.DataTypeInt32}, regs); ok {
+	if _, ok := decodePoint(model.Point{Address: "3", DataType: model.DataTypeInt32}, byteorder.ABCD, regs); ok {
 		t.Fatal("out of range should fail")
 	}
 	// 非法地址
-	if _, ok := decodePoint(model.Point{Address: "abc", DataType: model.DataTypeInt16}, regs); ok {
+	if _, ok := decodePoint(model.Point{Address: "abc", DataType: model.DataTypeInt16}, byteorder.ABCD, regs); ok {
 		t.Fatal("bad address should fail")
+	}
+}
+
+func TestDecodePointByteOrder(t *testing.T) {
+	// 相邻两寄存器 [0x0102][0x0304],各字节序组合的 uint32 值
+	regs := []uint16{0x0102, 0x0304}
+	tests := []struct {
+		order byteorder.Order
+		want  uint32
+	}{
+		{byteorder.ABCD, 0x01020304},
+		{byteorder.CDAB, 0x03040102},
+		{byteorder.BADC, 0x02010403},
+		{byteorder.DCBA, 0x04030201},
+	}
+	for _, tc := range tests {
+		v, ok := decodePoint(model.Point{Address: "0", DataType: model.DataTypeUInt32}, tc.order, regs)
+		if !ok || v != tc.want {
+			t.Fatalf("decode uint32 %s: %v ok=%v want %#x", tc.order, v, ok, tc.want)
+		}
+	}
+	// float 按 CDAB 字交换:0x3F80 0x0000 -> 0x00003F80(极小值),非 1.0
+	regs2 := []uint16{0x3F80, 0x0000}
+	if v, ok := decodePoint(model.Point{Address: "0", DataType: model.DataTypeFloat}, byteorder.CDAB, regs2); !ok || v == float32(1.0) {
+		t.Fatalf("float CDAB should not equal 1.0: %v ok=%v", v, ok)
+	}
+	// 16 位不受字节序影响
+	if v, ok := decodePoint(model.Point{Address: "0", DataType: model.DataTypeUInt16}, byteorder.DCBA, regs); !ok || v != uint16(0x0102) {
+		t.Fatalf("uint16 should ignore byte order: %v ok=%v", v, ok)
 	}
 }
 

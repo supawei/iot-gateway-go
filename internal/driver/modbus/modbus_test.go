@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"iot-gateway-go/internal/driver/byteorder"
 	"iot-gateway-go/internal/model"
 )
 
@@ -51,23 +52,51 @@ func TestQuantityOf(t *testing.T) {
 }
 
 func TestDecodeValue(t *testing.T) {
-	if v, err := decodeValue(model.DataTypeBool, []byte{1}); err != nil || v != true {
+	if v, err := decodeValue(model.DataTypeBool, []byte{1}, byteorder.ABCD); err != nil || v != true {
 		t.Fatalf("bool decode: %v err=%v", v, err)
 	}
-	if v, err := decodeValue(model.DataTypeInt16, []byte{0x01, 0x02}); err != nil || v != int16(258) {
+	if v, err := decodeValue(model.DataTypeInt16, []byte{0x01, 0x02}, byteorder.ABCD); err != nil || v != int16(258) {
 		t.Fatalf("int16 decode: %v err=%v", v, err)
 	}
-	if v, err := decodeValue(model.DataTypeUInt16, []byte{0x01, 0x02}); err != nil || v != uint16(258) {
+	if v, err := decodeValue(model.DataTypeUInt16, []byte{0x01, 0x02}, byteorder.ABCD); err != nil || v != uint16(258) {
 		t.Fatalf("uint16 decode: %v err=%v", v, err)
 	}
-	if v, err := decodeValue(model.DataTypeInt32, []byte{0x00, 0x00, 0x01, 0x02}); err != nil || v != int32(258) {
+	if v, err := decodeValue(model.DataTypeInt32, []byte{0x00, 0x00, 0x01, 0x02}, byteorder.ABCD); err != nil || v != int32(258) {
 		t.Fatalf("int32 decode: %v err=%v", v, err)
 	}
-	if v, err := decodeValue(model.DataTypeFloat, []byte{0x43, 0x7A, 0x00, 0x00}); err != nil || v != float32(250.0) {
+	if v, err := decodeValue(model.DataTypeFloat, []byte{0x43, 0x7A, 0x00, 0x00}, byteorder.ABCD); err != nil || v != float32(250.0) {
 		t.Fatalf("float decode: %v err=%v", v, err)
 	}
-	if _, err := decodeValue(model.DataTypeInt16, []byte{0x01}); err == nil {
+	if _, err := decodeValue(model.DataTypeInt16, []byte{0x01}, byteorder.ABCD); err == nil {
 		t.Fatal("expected error for short response")
+	}
+}
+
+func TestDecodeValueByteOrder(t *testing.T) {
+	// 原值 0x01020304 跨两寄存器(大端 wire):[0x01 0x02][0x03 0x04]
+	raw := []byte{0x01, 0x02, 0x03, 0x04}
+	tests := []struct {
+		order byteorder.Order
+		want  uint32
+	}{
+		{byteorder.ABCD, 0x01020304},
+		{byteorder.CDAB, 0x03040102}, // 字交换:低字在前
+		{byteorder.BADC, 0x02010403}, // 字节交换
+		{byteorder.DCBA, 0x04030201}, // 字交换 + 字节交换
+	}
+	for _, tc := range tests {
+		got, err := decodeValue(model.DataTypeUInt32, raw, tc.order)
+		if err != nil || got != tc.want {
+			t.Fatalf("decodeValue(uint32,%s)=%v err=%v want %#x", tc.order, got, err, tc.want)
+		}
+	}
+	// 同一原值按不同字节序解释为不同 float
+	if v, err := decodeValue(model.DataTypeFloat, []byte{0x43, 0x7A, 0x00, 0x00}, byteorder.CDAB); err != nil {
+		t.Fatalf("float CDAB decode: %v err=%v", v, err)
+	}
+	// 16 位不受字节序影响(单寄存器恒为大端)
+	if v, err := decodeValue(model.DataTypeInt16, []byte{0x01, 0x02}, byteorder.DCBA); err != nil || v != int16(258) {
+		t.Fatalf("int16 should ignore byte order: %v err=%v", v, err)
 	}
 }
 
@@ -114,8 +143,21 @@ func TestParseDeviceParams(t *testing.T) {
 	if err != nil || params.SlaveID != 3 {
 		t.Fatalf("parse device params: %+v err=%v", params, err)
 	}
+	// 未配置字节序默认 ABCD
+	if params.ByteOrder != string(byteorder.ABCD) {
+		t.Fatalf("default byte order: %q want ABCD", params.ByteOrder)
+	}
+	// 显式配置小写/空白字节序被规范化
+	params, err = parseDeviceParams(json.RawMessage(`{"slaveId":3,"byteOrder":" cdab "}`))
+	if err != nil || params.ByteOrder != string(byteorder.CDAB) {
+		t.Fatalf("normalized byte order: %+v err=%v", params, err)
+	}
+	// 非法字节序报错
+	if _, err := parseDeviceParams(json.RawMessage(`{"byteOrder":"XYZ"}`)); err == nil {
+		t.Fatal("invalid byte order should error")
+	}
 	empty, err := parseDeviceParams(nil)
-	if err != nil || empty.SlaveID != 0 {
+	if err != nil || empty.SlaveID != 0 || empty.ByteOrder != string(byteorder.ABCD) {
 		t.Fatalf("empty params: %+v err=%v", empty, err)
 	}
 }
@@ -162,10 +204,26 @@ func TestPlanBlocks(t *testing.T) {
 func TestDecodePointHolding(t *testing.T) {
 	// 块从寄存器 0 读回 4 字节:0x0001 0x0002,寄存器 1 = 2
 	raw := []byte{0x00, 0x01, 0x00, 0x02}
-	item := pointItem{register: 1, quantity: 1, function: "holding", point: model.Point{DataType: model.DataTypeInt16}}
+	item := pointItem{register: 1, quantity: 1, function: "holding", byteOrder: byteorder.ABCD, point: model.Point{DataType: model.DataTypeInt16}}
 	v, err := decodePoint(item, raw, 0)
 	if err != nil || v != int16(2) {
 		t.Fatalf("holding offset decode: %v err=%v", v, err)
+	}
+}
+
+func TestDecodePointByteOrder(t *testing.T) {
+	// 块从寄存器 0 读回 6 字节 = 寄存器 [0x0000][0x0001][0x0002],从寄存器 1 起读 uint32。
+	// 该点取到的 wire 字节为 [0x00 0x01][0x00 0x02]。
+	raw := []byte{0x00, 0x00, 0x00, 0x01, 0x00, 0x02}
+	// ABCD 大端:0x00010002
+	v, err := decodePoint(pointItem{register: 1, quantity: 2, function: "holding", byteOrder: byteorder.ABCD, point: model.Point{DataType: model.DataTypeUInt32}}, raw, 0)
+	if err != nil || v != uint32(0x00010002) {
+		t.Fatalf("ABCD decode: %v err=%v", v, err)
+	}
+	// CDAB 字交换:0x00020001
+	v, err = decodePoint(pointItem{register: 1, quantity: 2, function: "holding", byteOrder: byteorder.CDAB, point: model.Point{DataType: model.DataTypeUInt32}}, raw, 0)
+	if err != nil || v != uint32(0x00020001) {
+		t.Fatalf("CDAB decode: %v err=%v", v, err)
 	}
 }
 
@@ -235,36 +293,65 @@ func TestIndexPollBlocks(t *testing.T) {
 
 func TestEncodeWriteValue(t *testing.T) {
 	// int16: 258 -> 0x0102
-	b, ok := encodeWriteValue(float64(258), model.DataTypeInt16, 0)
+	b, ok := encodeWriteValue(float64(258), model.DataTypeInt16, 0, byteorder.ABCD)
 	if !ok || !bytes.Equal(b, []byte{0x01, 0x02}) {
 		t.Fatalf("int16 encode: %x ok=%v", b, ok)
 	}
 	// uint16
-	b, ok = encodeWriteValue(float64(258), model.DataTypeUInt16, 0)
+	b, ok = encodeWriteValue(float64(258), model.DataTypeUInt16, 0, byteorder.ABCD)
 	if !ok || !bytes.Equal(b, []byte{0x01, 0x02}) {
 		t.Fatalf("uint16 encode: %x ok=%v", b, ok)
 	}
 	// int32: 258 -> 0x00000102
-	b, ok = encodeWriteValue(float64(258), model.DataTypeInt32, 0)
+	b, ok = encodeWriteValue(float64(258), model.DataTypeInt32, 0, byteorder.ABCD)
 	if !ok || !bytes.Equal(b, []byte{0x00, 0x00, 0x01, 0x02}) {
 		t.Fatalf("int32 encode: %x ok=%v", b, ok)
 	}
 	// float32: 250.0 -> 0x437A0000
-	b, ok = encodeWriteValue(float64(250), model.DataTypeFloat, 0)
+	b, ok = encodeWriteValue(float64(250), model.DataTypeFloat, 0, byteorder.ABCD)
 	if !ok || !bytes.Equal(b, []byte{0x43, 0x7A, 0x00, 0x00}) {
 		t.Fatalf("float32 encode: %x ok=%v", b, ok)
 	}
 	// scale 反向:工程值 25.0,scale 0.1 -> 原始 250 -> float32 0x437A0000
-	b, ok = encodeWriteValue(float64(25), model.DataTypeFloat, 0.1)
+	b, ok = encodeWriteValue(float64(25), model.DataTypeFloat, 0.1, byteorder.ABCD)
 	if !ok || !bytes.Equal(b, []byte{0x43, 0x7A, 0x00, 0x00}) {
 		t.Fatalf("scale reverse encode: %x ok=%v", b, ok)
 	}
 	// 不支持的类型
-	if _, ok := encodeWriteValue(float64(1), model.DataTypeDouble, 0); ok {
+	if _, ok := encodeWriteValue(float64(1), model.DataTypeDouble, 0, byteorder.ABCD); ok {
 		t.Fatal("double should not be encodable")
 	}
-	if _, ok := encodeWriteValue("str", model.DataTypeInt16, 0); ok {
+	if _, ok := encodeWriteValue("str", model.DataTypeInt16, 0, byteorder.ABCD); ok {
 		t.Fatal("string value for int16 should fail")
+	}
+}
+
+func TestEncodeWriteValueByteOrder(t *testing.T) {
+	// 原值 0x01020304 编码为不同 wire 字节序(与解码互为逆运算)
+	tests := []struct {
+		order byteorder.Order
+		want  []byte
+	}{
+		{byteorder.ABCD, []byte{0x01, 0x02, 0x03, 0x04}},
+		{byteorder.CDAB, []byte{0x03, 0x04, 0x01, 0x02}},
+		{byteorder.BADC, []byte{0x02, 0x01, 0x04, 0x03}},
+		{byteorder.DCBA, []byte{0x04, 0x03, 0x02, 0x01}},
+	}
+	for _, tc := range tests {
+		b, ok := encodeWriteValue(float64(0x01020304), model.DataTypeUInt32, 0, tc.order)
+		if !ok || !bytes.Equal(b, tc.want) {
+			t.Fatalf("encode uint32 %s: %x ok=%v want %x", tc.order, b, ok, tc.want)
+		}
+		// 逆运算:按同字节序解回原值
+		v, err := decodeValue(model.DataTypeUInt32, b, tc.order)
+		if err != nil || v != uint32(0x01020304) {
+			t.Fatalf("roundtrip uint32 %s: %v err=%v", tc.order, v, err)
+		}
+	}
+	// 16 位编码不受字节序影响
+	b, ok := encodeWriteValue(float64(258), model.DataTypeInt16, 0, byteorder.DCBA)
+	if !ok || !bytes.Equal(b, []byte{0x01, 0x02}) {
+		t.Fatalf("int16 should ignore byte order: %x ok=%v", b, ok)
 	}
 }
 

@@ -94,7 +94,9 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 
 **点位地址** (`address` 字段):`function:register`,function 为 `holding`/`input`/`coil`/`discrete`。
 
-**数据类型**:`bool` `int16` `uint16` `int32` `uint32` `float32`。`scale` 非零时数值类型按系数缩放为 float64。
+**设备参数** (`Device.params`):`slaveId`(从机地址)、`byteOrder`(32 位值字节序,默认 `ABCD`)、`pollBlocks`(固定读取块)。
+
+**数据类型**:`bool` `int16` `uint16` `int32` `uint32` `float32`。`scale` 非零时数值类型按系数缩放为 float64。`int32`/`uint32`/`float32` 跨 2 个寄存器,字节序由设备参数 `byteOrder` 控制,支持全部四种:`ABCD`(大端,默认)、`CDAB`(字交换/小端)、`BADC`(字节交换)、`DCBA`(字节+字交换);16 位与线圈恒为大端,不受影响。
 
 ## OPC UA 驱动
 
@@ -138,20 +140,20 @@ curl -X POST http://localhost:8080/api/v1/devices -H 'Content-Type: application/
 | `listen` | 本地监听地址,如 `:502` 或 `0.0.0.0:502` |
 | `timeout` | 设备连接的空闲读超时(超时断开,设备需重连),默认 `60s` |
 
-**设备参数** (`Device.params`):`{ "slaveId": 1 }` —— Modbus 从机地址(UnitID),用于把上报帧路由到对应设备。
+**设备参数** (`Device.params`):`{ "slaveId": 1, "byteOrder": "ABCD" }` —— `slaveId` 为 Modbus 从机地址(UnitID),用于把上报帧路由到对应设备;`byteOrder` 为 32 位值字节序(默认 `ABCD`,支持 `ABCD`/`BADC`/`CDAB`/`DCBA`)。
 
-**点位地址** (`address` 字段):寄存器偏移(十进制),`int32`/`uint32`/`float32` 占 2 个寄存器(大端)。
+**点位地址** (`address` 字段):寄存器偏移(十进制),`int32`/`uint32`/`float32` 占 2 个寄存器,字节序由设备参数 `byteOrder` 控制;16 位恒为大端。
 
 ```jsonc
 // Connection
 { "listen": ":502", "timeout": "60s" }
 // Device.params
-{ "slaveId": 1 }
+{ "slaveId": 1, "byteOrder": "CDAB" }
 // Point: address 为寄存器偏移
 { "name": "level", "address": "0", "dataType": "float32", "scale": 0.1 }
 ```
 
-> 已知缺口:加性校准(`value = raw*multiple + calibration` 中的 `calibration`)、float 多字节序(ABCD/BADC/CDAB/DCBA)暂未实现,详见 listener 设计文档。
+> 已知缺口:加性校准(`value = raw*multiple + calibration` 中的 `calibration`)暂未实现,详见 listener 设计文档。
 
 ## ThingsBoard 输出
 

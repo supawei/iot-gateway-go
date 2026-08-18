@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"iot-gateway-go/internal/driver"
+	"iot-gateway-go/internal/driver/byteorder"
 	"iot-gateway-go/internal/model"
 )
 
@@ -63,6 +64,8 @@ func (*modbusListenDriver) ConfigSchema() []driver.Field {
 func (*modbusListenDriver) ParamSchema() []driver.Field {
 	return []driver.Field{
 		{Name: "slaveId", Label: "从机地址", Type: driver.FieldInt, Default: 1, Hint: "上报帧的 UnitID,用于路由到本设备"},
+		{Name: "byteOrder", Label: "字节序", Type: driver.FieldEnum, Default: "ABCD", Options: []string{"ABCD", "BADC", "CDAB", "DCBA"},
+			Hint: "32 位值(int32/uint32/float32)的多寄存器字节序;ABCD=大端(默认),CDAB=字交换, BADC=字节交换, DCBA=字节+字交换;16 位不受影响"},
 	}
 }
 
@@ -83,21 +86,24 @@ type sharedListener struct {
 }
 
 // listenDevice 是监听 socket 上一个已注册的从机设备:帧头 UnitID 命中后,按其
-// 点位表解码并回调 onData 推送 DataPoint。
+// 点位表解码并回调 onData 推送 DataPoint。byteOrder 为该设备多寄存器(32 位)值的
+// 字节序,解码时逐点应用。
 type listenDevice struct {
-	deviceID string
-	slaveID  byte
-	points   []model.Point
-	onData   func(model.DataPoint)
+	deviceID  string
+	slaveID   byte
+	byteOrder byteorder.Order
+	points    []model.Point
+	onData    func(model.DataPoint)
 }
 
 // listenConn 是监听模式下的设备连接:内嵌 Read/Close 以满足 Conn 接口,额外实现
 // driver.Listener。Open 仅在驱动为 modbus_listen 时返回此类型。
 type listenConn struct {
-	deviceID string
-	slaveID  byte
-	shared   *sharedListener
-	driver   *modbusListenDriver
+	deviceID  string
+	slaveID   byte
+	byteOrder byteorder.Order
+	shared    *sharedListener
+	driver    *modbusListenDriver
 }
 
 // Open 解析监听地址(ConnConfig)与从机地址(DeviceParams),按 ConnectionID 取得
@@ -116,10 +122,11 @@ func (d *modbusListenDriver) Open(ctx context.Context, req driver.OpenRequest) (
 		return nil, err
 	}
 	return &listenConn{
-		deviceID: req.DeviceID,
-		slaveID:  params.SlaveID,
-		shared:   shared,
-		driver:   d,
+		deviceID:  req.DeviceID,
+		slaveID:   params.SlaveID,
+		byteOrder: byteorder.Order(params.ByteOrder),
+		shared:    shared,
+		driver:    d,
 	}, nil
 }
 
@@ -176,10 +183,11 @@ func (c *listenConn) Close() error {
 // 监听 socket 并启动 accept 循环。
 func (c *listenConn) Listen(ctx context.Context, points []model.Point, onData func(model.DataPoint)) error {
 	return c.shared.register(c.slaveID, &listenDevice{
-		deviceID: c.deviceID,
-		slaveID:  c.slaveID,
-		points:   points,
-		onData:   onData,
+		deviceID:  c.deviceID,
+		slaveID:   c.slaveID,
+		byteOrder: c.byteOrder,
+		points:    points,
+		onData:    onData,
 	})
 }
 
@@ -293,7 +301,7 @@ func (d *listenDevice) deliver(regs []uint16) {
 			DeviceID: d.deviceID, Point: point.Name,
 			Timestamp: now, Quality: model.QualityBad,
 		}
-		value, ok := decodePoint(point, regs)
+		value, ok := decodePoint(point, d.byteOrder, regs)
 		if !ok {
 			dp.Quality = model.QualityUncertain
 		} else {
@@ -304,9 +312,10 @@ func (d *listenDevice) deliver(regs []uint16) {
 	}
 }
 
-// decodePoint 按点位地址(寄存器偏移)与类型从寄存器数组解码。int32/uint32/float32
-// 占 2 个寄存器(大端,与 modbus 轮询驱动一致)。越界返回 ok=false。
-func decodePoint(point model.Point, regs []uint16) (interface{}, bool) {
+// decodePoint 按点位地址(寄存器偏移)、字节序与类型从寄存器数组解码。int32/uint32/
+// float32 占 2 个寄存器,按 order 字节序组合;16 位/布尔单寄存器恒为大端,不受影响。
+// 越界返回 ok=false。
+func decodePoint(point model.Point, order byteorder.Order, regs []uint16) (interface{}, bool) {
 	offset, err := strconv.Atoi(point.Address)
 	if err != nil || offset < 0 {
 		return nil, false
@@ -323,11 +332,11 @@ func decodePoint(point model.Point, regs []uint16) (interface{}, bool) {
 	case model.DataTypeUInt16:
 		return regs[offset], true
 	case model.DataTypeInt32:
-		return int32(uint32(regs[offset])<<16 | uint32(regs[offset+1])), true
+		return int32(byteorder.RegistersUint32(order, regs[offset], regs[offset+1])), true
 	case model.DataTypeUInt32:
-		return uint32(regs[offset])<<16 | uint32(regs[offset+1]), true
+		return byteorder.RegistersUint32(order, regs[offset], regs[offset+1]), true
 	case model.DataTypeFloat:
-		return math.Float32frombits(uint32(regs[offset])<<16 | uint32(regs[offset+1])), true
+		return math.Float32frombits(byteorder.RegistersUint32(order, regs[offset], regs[offset+1])), true
 	default:
 		return nil, false
 	}
@@ -391,19 +400,25 @@ func parseConnConfig(raw json.RawMessage) (connConfig, error) {
 	return cfg, nil
 }
 
-// deviceParams 是设备级路由参数:slaveId 为 Modbus 从机地址(UnitID),用于把上报帧
-// 路由到对应设备。
+// deviceParams 是设备级路由/解码参数:slaveId 为 Modbus 从机地址(UnitID),用于把
+// 上报帧路由到对应设备;byteOrder 为该设备多寄存器(32 位)值的字节序。
 type deviceParams struct {
-	SlaveID byte `json:"slaveId"`
+	SlaveID   byte   `json:"slaveId"`
+	ByteOrder string `json:"byteOrder"`
 }
 
 func parseDeviceParams(raw json.RawMessage) (deviceParams, error) {
-	params := deviceParams{}
+	params := deviceParams{ByteOrder: string(byteorder.ABCD)}
 	if len(raw) == 0 {
 		return params, nil
 	}
 	if err := json.Unmarshal(raw, &params); err != nil {
 		return deviceParams{}, fmt.Errorf("parse modbus_listen device params: %w", err)
 	}
+	order, err := byteorder.Parse(params.ByteOrder)
+	if err != nil {
+		return deviceParams{}, err
+	}
+	params.ByteOrder = string(order)
 	return params, nil
 }

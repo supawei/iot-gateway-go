@@ -39,7 +39,7 @@ type Listener interface {
 | Controller 的 `tcp_ip/tcp_port`(监听地址) | `Connection.config.listen` |
 | Reg 的 `acAddr`(从机地址) | `Device.params.slaveId` |
 | Reg 的 `iOffset`(寄存器偏移) | `Point.address`(十进制偏移) |
-| Reg 的 `iDataType`(float 字节序) | `Point.dataType`(暂只支持大端 ABCD) |
+| Reg 的 `iDataType`(float 字节序) | `Device.params.byteOrder`(支持 ABCD/BADC/CDAB/DCBA,默认 ABCD) |
 | Reg 的 `multiple`(系数) | `Point.scale` |
 | Reg 的 `calibration`(加性校准) | ⚠️ 当前 `Point` 无此字段,见下方缺口 |
 | `ctrler_listen_unpack(buffer, len, callback)` | 驱动内部 `dispatch(frame)` → `listenDevice.deliver(regs)` |
@@ -51,7 +51,7 @@ type Listener interface {
 1. `Open`:解析 `listen` 地址与 `slaveId`,按 `ConnectionID` 取得共享监听器(引用计数)。
 2. `Listen`:把该设备点位注册进共享监听器的 `devices[slaveId]`,首次调用惰性 `net.Listen` 并启动 accept 循环。
 3. accept 到连接后逐帧读取(MBAP 6 字节头 + length 字节),按帧头 `UnitID` 路由到设备。
-4. `listenDevice.deliver`:按点位地址(寄存器偏移)与 `dataType` 解码(大端,`int16/uint16/int32/uint32/float32`),应用 `scale`,回调 `onData` 推送 `DataPoint`。
+4. `listenDevice.deliver`:按点位地址(寄存器偏移)、设备字节序与 `dataType` 解码(`int16/uint16` 单寄存器恒为大端,`int32/uint32/float32` 跨 2 寄存器按 `byteOrder` 组合),应用 `scale`,回调 `onData` 推送 `DataPoint`。
 
 配置示例:
 
@@ -60,7 +60,7 @@ type Listener interface {
 { "listen": ":502", "timeout": "60s" }
 
 // Device.params
-{ "slaveId": 1 }
+{ "slaveId": 1, "byteOrder": "ABCD" }
 
 // Point: address 为寄存器偏移(十进制),int32/uint32/float32 占 2 个寄存器
 { "name": "level", "address": "0", "dataType": "float32", "scale": 0.1 }
@@ -69,5 +69,4 @@ type Listener interface {
 ## 已知缺口(留待后续)
 
 - **加性校准**:参考工程的 reg 有 `value = raw * multiple + calibration`,本工程 `Point` 只有乘性 `scale`,缺加性 `calibration`。落地真实协议时需给 `Point` 加字段(涉及 SQLite 列与 API),或把校准值编码进 `address`/`params`。
-- **float 字节序**:参考工程支持 ABCD/BADC/CDAB/DCBA 四种 float 字节序,当前 `modbus_listen` 只做与轮询 Modbus 一致的大端(ABCD)。
 - **监听连接回收**:设备连接的 goroutine 靠读超时回收;reload 时旧监听 socket 关闭,但已建立的连接要等到超时才释放(进程内短暂残留,可接受)。
