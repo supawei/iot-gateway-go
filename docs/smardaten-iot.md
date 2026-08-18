@@ -305,7 +305,7 @@ internal/output/smardaten/
 ├── smardaten.go        # 主文件：Output 实现、MQTT 连接、数据缓冲、下行处理
 ├── application.go      # application.json 解析与 topic 映射
 ├── http.go             # RSA 鉴权 HTTP 下载
-├── sync.go             # application.json → 网关配置自动同步（类型感知转换）
+├── sync.go             # application.json → 网关配置自动同步（类型感知转换 + 孤儿清理）
 └── smardaten_test.go   # 配置解析回归测试
 
 cmd/gateway/main.go     # 新增 import: _ "iot-gateway-go/internal/output/smardaten"
@@ -366,12 +366,18 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
             ▼ Device{ID, Name, ConnectionID, Params, Points} → store.SaveDevice()
 ```
 
-### 写入策略(增量跳过)
+### 写入策略(增量跳过 + 孤儿清理)
 
 同步前先读取当前存储内容对比:**内容未变则跳过 Save**(避免无谓的 SQLite 写与
 调度器热加载通知;启动/重复下发同配置不再触发采集重载)。对比为语义级
 (JSON 键序/格式差异不算变化);设备点位按序比对,平台调整顺序也会触发更新。
-只增改、不删除:平台移除的控制器/设备不自动从网关删除,防误删本地手工配置。
+
+**增改**：以 `controllerId`/`deviceId` 为 key 做 upsert，平台配置里仍存在的实体只增改、不删除。
+
+**删（孤儿清理）**：平台**已移除**的实体（曾由本插件同步、本次 application.json 中已不存在）会自动删除——
+管理集合（同步过的 controllerId/deviceId）持久化在 SQLite `settings` 表（按输出实例隔离，重启后依然有效），
+天然区分"平台同步创建"与"Web UI 手工配置"——**只清理前者，不误删本地手工配置**。
+删除顺序先设备后连接；连接仍被设备引用时删除失败（`ErrConnectionInUse`），保留管理跟踪，引用解除后下次同步重试。
 
 ### 关键转换
 
@@ -395,6 +401,7 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
 - 以 `controllerId`/`deviceId` 为 key 做 upsert，不覆盖网关本地独有的配置
 - 平台下发的配置更新（通道 1）触发重新同步，scheduler 经 `store.OnChange` 自动热加载
 - 用户在 Web UI 手动修改后，下次平台下发会覆盖（平台为权威源）
+- 平台移除的控制器/设备在下次同步时自动删除（仅限平台同步创建的实体，见上"孤儿清理"）
 
 ---
 
@@ -425,7 +432,7 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
 
 5. **多平台连接**：若同一网关需同时对接多个 smardaten-iot 平台实例，当前每个插件实例维护一个 MQTT 连接的设计可以支持（创建多个 output 配置即可），但 application.json 的隔离需要确认。
 
-6. **自动同步的覆盖语义**：平台下发配置时会 upsert 覆盖同名 Connection/Device。若网关本地设备与平台设备 ID 冲突，会被平台配置覆盖（预期行为，平台为权威源）。若需保留本地设备，需引入"本地优先"标志或命名空间隔离。
+6. **自动同步的覆盖语义**：平台下发配置时会 upsert 覆盖同名 Connection/Device。若网关本地设备与平台设备 ID 冲突，会被平台配置覆盖（预期行为，平台为权威源）。若需保留本地设备，需引入"本地优先"标志或命名空间隔离。**✅ 平台移除的实体（孤儿）已实现自动删除**：仅删平台同步创建、本次配置中已不存在的实体，管理集合持久化在 `settings` 表（按输出实例隔离），不误删 Web UI 手工配置（见 §8.5）。
 
 ---
 
@@ -486,7 +493,7 @@ application.json（本地启动加载 / 平台 configUpdate 下发）
 |---|---|---|
 | `internal/output/smardaten/smardaten.go` | ~855 | 插件注册、MQTT 连接、数据缓冲、上下行处理、flush、设备诊断判定 |
 | `internal/output/smardaten/application.go` | ~372 | application.json 解析、平台消息类型、topic 映射 |
-| `internal/output/smardaten/sync.go` | ~330 | application.json → 网关配置自动同步 |
+| `internal/output/smardaten/sync.go` | ~830 | application.json → 网关配置自动同步（类型感知转换 + 孤儿清理） |
 | `internal/output/smardaten/http.go` | ~199 | RSA 加密、HTTP 下载、TLS 跳过校验 |
 | `internal/output/smardaten/smardaten_test.go` | ~590 | 配置解析/缓冲/非阻塞连接/服务调用/设备诊断测试 |
 | `internal/output/registry.go` | +12 | BuildContext.Store 注入（+ Probe 注入） |

@@ -465,3 +465,184 @@ func TestJsonEqual(t *testing.T) {
 		}
 	}
 }
+
+// ---- 孤儿清理(平台已移除的实体删除) ----
+
+// syncConfigWith 构造含指定控制器的同步配置(每个控制器一个设备,一一对应)。
+func syncConfigWith(ctrlIDs []string) *ApplicationConfig {
+	cfg := &ApplicationConfig{}
+	for _, cid := range ctrlIDs {
+		cfg.Controllers = append(cfg.Controllers, PlatformController{
+			ControllerID: cid,
+			Type:         "2", // modbus-tcp
+			Specs: PlatformControllerSpecs{
+				Enable: 1,
+				Name:   cid,
+				Period: 2,
+				Configuration: json.RawMessage(
+					`{"ip":"192.168.1.10","port":502,"slaveId":1,"functionCode":3}`),
+			},
+			SensorList: []PlatformSensor{
+				{PointID: "p1", ItemName: "0", DataType: 2},
+			},
+		})
+		cfg.Devices = append(cfg.Devices, PlatformDevice{
+			DeviceID:     "dev-" + cid,
+			ControllerID: cid,
+			Properties:   []PlatformProperty{{Identifier: "temp", PointID: "p1"}},
+		})
+	}
+	return cfg
+}
+
+// TestSyncDeletesOrphanEntities 平台移除控制器/设备后,同步应删除曾同步过的对应实体。
+func TestSyncDeletesOrphanEntities(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	o := &platformOutput{store: st, outputID: "out-1"}
+
+	// 首次同步:c1、c2 及各自设备
+	o.syncToGateway(syncConfigWith([]string{"c1", "c2"}))
+	if _, err := st.GetConnection("c1"); err != nil {
+		t.Fatalf("c1 not synced: %v", err)
+	}
+	if _, err := st.GetDevice("dev-c2"); err != nil {
+		t.Fatalf("dev-c2 not synced: %v", err)
+	}
+
+	// 平台移除 c2(及其设备)
+	o.syncToGateway(syncConfigWith([]string{"c1"}))
+
+	// c2 与其设备应被删除
+	if _, err := st.GetConnection("c2"); err == nil {
+		t.Fatal("orphan connection c2 should be deleted")
+	}
+	if _, err := st.GetDevice("dev-c2"); err == nil {
+		t.Fatal("orphan device dev-c2 should be deleted")
+	}
+	// c1 保留
+	if _, err := st.GetConnection("c1"); err != nil {
+		t.Fatalf("c1 should remain: %v", err)
+	}
+	if _, err := st.GetDevice("dev-c1"); err != nil {
+		t.Fatalf("dev-c1 should remain: %v", err)
+	}
+}
+
+// TestSyncKeepsManualEntities 孤儿清理只删"平台同步创建"的实体,不误删 Web UI 手工配置。
+func TestSyncKeepsManualEntities(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	o := &platformOutput{store: st, outputID: "out-1"}
+
+	o.syncToGateway(syncConfigWith([]string{"c1"}))
+
+	// 手工创建连接与设备(不经平台同步,不在管理集合内)
+	manualConn := model.Connection{ID: "manual-conn", Name: "manual", Driver: "modbus", Config: json.RawMessage(`{"mode":"tcp"}`)}
+	if err := st.SaveConnection(manualConn); err != nil {
+		t.Fatal(err)
+	}
+	manualDev := model.Device{ID: "manual-dev", Name: "manual-dev", ConnectionID: "manual-conn", Params: json.RawMessage(`{}`), IntervalMs: 5000, Enabled: true}
+	if err := st.SaveDevice(manualDev); err != nil {
+		t.Fatal(err)
+	}
+
+	// 平台移除 c1
+	o.syncToGateway(syncConfigWith(nil))
+
+	if _, err := st.GetConnection("c1"); err == nil {
+		t.Fatal("orphan c1 should be deleted")
+	}
+	if _, err := st.GetConnection("manual-conn"); err != nil {
+		t.Fatalf("manual connection should remain: %v", err)
+	}
+	if _, err := st.GetDevice("manual-dev"); err != nil {
+		t.Fatalf("manual device should remain: %v", err)
+	}
+}
+
+// TestSyncOrphanPersistentAcrossRestart 管理集合持久化在 settings,新实例(同 outputID,
+// 模拟重启)仍能据此清理孤儿。
+func TestSyncOrphanPersistentAcrossRestart(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+
+	// 第一"进程"实例
+	o1 := &platformOutput{store: st, outputID: "out-1"}
+	o1.syncToGateway(syncConfigWith([]string{"c1"}))
+	if _, err := st.GetConnection("c1"); err != nil {
+		t.Fatalf("c1 not synced: %v", err)
+	}
+
+	// 第二"进程"实例(同 outputID,读到持久化管理集合)
+	o2 := &platformOutput{store: st, outputID: "out-1"}
+	o2.syncToGateway(syncConfigWith(nil))
+
+	if _, err := st.GetConnection("c1"); err == nil {
+		t.Fatal("orphan c1 should be deleted after restart-like sync")
+	}
+}
+
+// TestSyncOrphanPerInstanceIsolation 不同 output 实例的管理集合互不干扰。
+func TestSyncOrphanPerInstanceIsolation(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+
+	oA := &platformOutput{store: st, outputID: "out-A"}
+	oA.syncToGateway(syncConfigWith([]string{"c1"}))
+
+	// B 实例配置里没有 c1,但不应删除 A 同步创建的 c1
+	oB := &platformOutput{store: st, outputID: "out-B"}
+	oB.syncToGateway(syncConfigWith([]string{"cB"}))
+	if _, err := st.GetConnection("c1"); err != nil {
+		t.Fatalf("out-B should not delete out-A's c1: %v", err)
+	}
+	if _, err := st.GetConnection("cB"); err != nil {
+		t.Fatalf("cB not synced: %v", err)
+	}
+
+	// A 实例随后移除 cA2,应由 A 自己清理
+	oA.syncToGateway(syncConfigWith([]string{"c1", "cA2"}))
+	oA.syncToGateway(syncConfigWith([]string{"c1"}))
+	if _, err := st.GetConnection("cA2"); err == nil {
+		t.Fatal("out-A orphan cA2 should be deleted by out-A")
+	}
+}
+
+// TestSyncOrphanConnectionInUseRetained 连接仍被手工设备引用时删除失败,
+// 管理集合保留该连接,引用解除后下次同步重试清理。
+func TestSyncOrphanConnectionInUseRetained(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	o := &platformOutput{store: st, outputID: "out-1"}
+
+	o.syncToGateway(syncConfigWith([]string{"c1"}))
+
+	// 手工设备仍引用 c1(连接被占用,删除应失败)
+	manualDev := model.Device{ID: "manual-dev", Name: "manual-dev", ConnectionID: "c1", Params: json.RawMessage(`{}`), IntervalMs: 5000, Enabled: true}
+	if err := st.SaveDevice(manualDev); err != nil {
+		t.Fatal(err)
+	}
+
+	o.syncToGateway(syncConfigWith(nil))
+
+	// 平台设备 dev-c1 被删;c1 因被引用而保留
+	if _, err := st.GetDevice("dev-c1"); err == nil {
+		t.Fatal("dev-c1 should be deleted")
+	}
+	if _, err := st.GetConnection("c1"); err != nil {
+		t.Fatalf("in-use connection c1 should be retained: %v", err)
+	}
+
+	// 手工设备删除后,下次同步应清理 c1(管理集合仍跟踪它)
+	if err := st.DeleteDevice("manual-dev"); err != nil {
+		t.Fatal(err)
+	}
+	o.syncToGateway(syncConfigWith(nil))
+	if _, err := st.GetConnection("c1"); err == nil {
+		t.Fatal("c1 should be deleted once no longer in use")
+	}
+}

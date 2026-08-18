@@ -145,7 +145,9 @@ func dataTypeWidth(dt int) int {
 // syncToGateway 将 application.json 中的控制器和设备同步到网关 SQLite。
 // 以 controllerId/deviceId 为 key 做 upsert,不覆盖网关本地独有的配置。
 // 同步前先与当前存储内容对比:**内容未变则跳过写入**(避免无谓的 SQLite 写与
-// 调度器热加载通知);只增改、不删除(平台移除的实体不自动删,防误删本地配置)。
+// 调度器热加载通知)。只增改、不删除平台配置里仍然存在的实体;
+// 对**平台已移除**的实体(曾由本插件同步、本次配置中已不存在)执行删除清理,
+// 见 deleteOrphanSynced——仅清理平台同步创建的实体,不误删 Web UI 手工配置。
 func (o *platformOutput) syncToGateway(cfg *ApplicationConfig) {
 	if o.store == nil {
 		return
@@ -200,6 +202,133 @@ func (o *platformOutput) syncToGateway(cfg *ApplicationConfig) {
 		} else {
 			slog.Debug("device unchanged, skip", "id", device.ID)
 		}
+	}
+
+	// 清理孤儿实体:删除此前由平台同步管理、但本次 application.json 中已不存在的
+	// 连接与设备(平台为权威源;只删平台同步创建的实体,不误删 Web UI 手工配置)。
+	o.deleteOrphanSynced(cfg)
+}
+
+// deleteOrphanSynced 删除此前由平台同步管理、但本次配置中已不存在的连接与设备。
+//
+// 管理集合(controllerId/deviceId)持久化在 store 的 settings 表(按 output 实例隔离),
+// 重启后依然有效,天然区分"平台同步创建"与"Web UI 手工配置"——只清理前者。
+// 删除顺序:先设备后连接(连接被设备引用时删除会失败)。删除失败的孤儿保留在
+// 管理集合中,待引用解除后下次同步重试。
+func (o *platformOutput) deleteOrphanSynced(cfg *ApplicationConfig) {
+	if o.store == nil {
+		return
+	}
+
+	// 本次配置中存在的 controller/device ID 集合(以此为"应保留"的权威集)。
+	presentConns := make(map[string]bool)
+	for _, ctrl := range cfg.Controllers {
+		presentConns[ctrl.ControllerID] = true
+	}
+	presentDevs := make(map[string]bool)
+	for _, dev := range cfg.Devices {
+		presentDevs[dev.DeviceID] = true
+	}
+
+	connKey, devKey := o.managedConnectionKey(), o.managedDeviceKey()
+	prevConns := o.loadManagedIDs(connKey)
+	prevDevs := o.loadManagedIDs(devKey)
+
+	// 先删设备:平台已移除的设备
+	persistDevs := make(map[string]bool, len(presentDevs))
+	for id := range presentDevs {
+		persistDevs[id] = true
+	}
+	for id := range prevDevs {
+		if presentDevs[id] {
+			continue
+		}
+		if err := o.store.DeleteDevice(id); err != nil {
+			slog.Warn("delete orphan device failed, keep tracked for retry", "deviceId", id, "err", err)
+			persistDevs[id] = true
+			continue
+		}
+		slog.Info("deleted orphan device (removed from platform config)", "deviceId", id)
+	}
+
+	// 再删连接:平台已移除的控制器
+	persistConns := make(map[string]bool, len(presentConns))
+	for id := range presentConns {
+		persistConns[id] = true
+	}
+	for id := range prevConns {
+		if presentConns[id] {
+			continue
+		}
+		if err := o.store.DeleteConnection(id); err != nil {
+			slog.Warn("delete orphan connection failed, keep tracked for retry", "connectionId", id, "err", err)
+			persistConns[id] = true
+			continue
+		}
+		slog.Info("deleted orphan connection (removed from platform config)", "connectionId", id)
+	}
+
+	// 持久化当前管理集合(供下次同步判断删除;删除失败的孤儿保留跟踪以重试)。
+	o.saveManagedIDs(connKey, persistConns)
+	o.saveManagedIDs(devKey, persistDevs)
+}
+
+// ---------- 孤儿清理:平台同步管理集合 ----------
+
+// managedConnectionKey / managedDeviceKey 返回本输出实例的连接/设备管理集合在
+// settings 表中的键。按 output 实例隔离,避免多个 smardaten 输出实例互相干扰。
+func (o *platformOutput) managedConnectionKey() string {
+	return "smardaten.sync.managed.connections." + o.managedScope()
+}
+
+func (o *platformOutput) managedDeviceKey() string {
+	return "smardaten.sync.managed.devices." + o.managedScope()
+}
+
+// managedScope 返回本输出实例的管理集合隔离键(outputID;直接构造时回退 default)。
+func (o *platformOutput) managedScope() string {
+	if o.outputID != "" {
+		return o.outputID
+	}
+	return "default"
+}
+
+// loadManagedIDs 读取此前由平台同步管理的 ID 集合。
+func (o *platformOutput) loadManagedIDs(key string) map[string]bool {
+	set := make(map[string]bool)
+	if o.store == nil {
+		return set
+	}
+	raw, ok, err := o.store.GetSetting(key)
+	if err != nil || !ok || raw == "" {
+		return set
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		return set
+	}
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set
+}
+
+// saveManagedIDs 持久化当前由平台同步管理的 ID 集合。
+func (o *platformOutput) saveManagedIDs(key string, set map[string]bool) {
+	if o.store == nil {
+		return
+	}
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	raw, err := json.Marshal(ids)
+	if err != nil {
+		return
+	}
+	if err := o.store.SetSetting(key, string(raw)); err != nil {
+		slog.Error("persist managed ids failed", "key", key, "err", err)
 	}
 }
 
