@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import api from '../api'
@@ -13,11 +13,11 @@ const editingId = ref('')
 
 const form = reactive({
   name: '', enabled: true, severity: 'warning',
-  expr: '', refKeys: [], outputIds: [],
+  refKeys: [], conds: [], joinOps: [], outputIds: [],
   freshnessSeconds: 300, cooldownSeconds: 0,
+  expr: '', advanced: false,
 })
 
-// 所有设备点位展开为选项(key="devId|point")
 const pointOptions = computed(() => {
   const opts = []
   for (const d of devices.value) {
@@ -38,13 +38,58 @@ const severityOptions = [
 ]
 
 function keyOf(rp) { return `${rp.deviceId}|${rp.point}` }
-function fromKeys(keys) {
-  return keys.map((k) => {
-    const idx = k.indexOf('|')
-    return { deviceId: k.slice(0, idx), point: k.slice(idx + 1) }
-  })
+function fromKey(k) {
+  const idx = k.indexOf('|')
+  return { deviceId: k.slice(0, idx), point: k.slice(idx + 1) }
 }
+function fromKeys(keys) { return keys.map(fromKey) }
 function toKeys(refs) { return (refs || []).map(keyOf) }
+function pointLabel(k) {
+  const { deviceId, point } = fromKey(k)
+  return `point("${deviceId}","${point}")`
+}
+
+const compiledExpr = computed(() => {
+  if (form.advanced) return (form.expr || '').trim()
+  const segments = form.refKeys.map((k, i) => {
+    const cond = (form.conds[i] || '').trim()
+    return `${pointLabel(k)}${cond}`
+  })
+  return segments.map((seg, i) => {
+    if (i >= segments.length - 1) return seg
+    const op = form.joinOps[i] || '&&'
+    return `${seg} ${op}`
+  }).join(' ')
+})
+
+// 顶层按 && / || 分段反解;含括号(嵌套)或段非 point() 开头则判为复杂表达式,回退高级模式
+function parseExpr(expr) {
+  const trimmed = (expr || '').trim()
+  if (!trimmed || /[()]/.test(trimmed)) return null
+  const tokens = trimmed.split(/\s*(\|\||&&)\s*/)
+  if (!tokens.length || tokens.length % 2 === 0) return null
+  const refKeys = [], conds = [], joinOps = []
+  for (let i = 0; i < tokens.length; i += 2) {
+    const seg = tokens[i].trim()
+    const m = /^point\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)(.*)$/.exec(seg)
+    if (!m) return null
+    refKeys.push(`${m[1]}|${m[2]}`)
+    conds.push(m[3].trim())
+    if (i + 1 < tokens.length) joinOps.push(tokens[i + 1])
+  }
+  return { refKeys, conds, joinOps }
+}
+
+function syncConds(len) {
+  const conds = form.conds.slice(0, len)
+  while (conds.length < len) conds.push('')
+  const joinOps = form.joinOps.slice(0, len)
+  while (joinOps.length < len) joinOps.push('&&')
+  form.conds = conds
+  form.joinOps = joinOps
+}
+
+watch(() => form.refKeys.slice(), (next) => syncConds(next.length))
 
 async function load() {
   loading.value = true
@@ -60,32 +105,44 @@ async function load() {
   }
 }
 
-function openCreate() {
-  editingId.value = ''
+function resetForm() {
   Object.assign(form, {
     name: '', enabled: true, severity: 'warning',
-    expr: '', refKeys: [], outputIds: [],
+    refKeys: [], conds: [], joinOps: [], outputIds: [],
     freshnessSeconds: 300, cooldownSeconds: 0,
+    expr: '', advanced: false,
   })
+}
+
+function openCreate() {
+  editingId.value = ''
+  resetForm()
   dialogVisible.value = true
 }
 
 function openEdit(row) {
   editingId.value = row.id
+  const parsed = parseExpr(row.expr)
+  const refKeys = parsed ? parsed.refKeys : toKeys(row.referencedPoints)
   Object.assign(form, {
     name: row.name, enabled: row.enabled, severity: row.severity || 'warning',
-    expr: row.expr, refKeys: toKeys(row.referencedPoints), outputIds: row.outputIds || [],
+    refKeys, outputIds: row.outputIds || [],
     freshnessSeconds: row.freshnessSeconds || 300, cooldownSeconds: row.cooldownSeconds || 0,
+    conds: parsed ? parsed.conds : refKeys.map(() => ''),
+    joinOps: parsed && parsed.joinOps.length ? parsed.joinOps : refKeys.map(() => '&&'),
+    expr: parsed ? '' : (row.expr || ''),
+    advanced: !parsed,
   })
   dialogVisible.value = true
 }
 
 async function save() {
-  if (!form.expr.trim()) { ElMessage.error('请填写表达式'); return }
+  const expr = compiledExpr.value
+  if (!expr) { ElMessage.error(form.advanced ? '请填写表达式' : '请选择引用点位并填写条件'); return }
   if (form.refKeys.length === 0) { ElMessage.error('请选择至少一个引用点位'); return }
   const payload = {
     name: form.name, enabled: form.enabled, severity: form.severity,
-    expr: form.expr, referencedPoints: fromKeys(form.refKeys),
+    expr, referencedPoints: fromKeys(form.refKeys),
     outputIds: form.outputIds, freshnessSeconds: form.freshnessSeconds,
     cooldownSeconds: form.cooldownSeconds,
   }
@@ -131,8 +188,7 @@ onMounted(load)
     <div class="panel">
       <p class="form-hint" style="margin-top: 0">
         跨设备/跨点位告警:表达式求值为 true 即边沿触发告警,条件解除自动恢复。
-        表达式用 point("设备ID","点位名") 引用点位最新值,如
-        point("d1","temp")&gt;30 &amp;&amp; point("d2","sw")=="off"。
+        配置时选择引用点位后自动生成 point(),只需为每个点位填写条件;复杂场景可切高级模式直接编表达式。
       </p>
       <el-table v-loading="loading" :data="list" empty-text="暂无告警规则">
         <el-table-column prop="name" label="名称" min-width="140" />
@@ -175,8 +231,28 @@ onMounted(load)
             <el-option v-for="o in pointOptions" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
         </el-form-item>
-        <el-form-item label="表达式" required>
+        <el-form-item v-if="!form.advanced" label="触发条件" required>
+          <div v-if="form.refKeys.length === 0" class="cond-empty">先选择引用点位,再为每个点位填写条件</div>
+          <div v-for="(k, i) in form.refKeys" :key="k" class="cond-row">
+            <span class="mono cond-point">{{ pointLabel(k) }}</span>
+            <el-input v-model="form.conds[i]" placeholder="如 > 30" class="cond-input" />
+            <el-select v-if="i < form.refKeys.length - 1" v-model="form.joinOps[i]" class="cond-op">
+              <el-option label="且 (AND)" value="&&" />
+              <el-option label="或 (OR)" value="||" />
+            </el-select>
+          </div>
+          <p class="form-hint">
+            填点位后的比较,如 &gt; 30、&lt;= 20、== "off"、!= "on";留空表示"有值即触发"。
+          </p>
+        </el-form-item>
+        <el-form-item v-else label="表达式" required>
           <el-input v-model="form.expr" type="textarea" :rows="3" placeholder='point("d1","temp")>30 && point("d2","sw")=="off"' />
+        </el-form-item>
+        <el-form-item v-if="!form.advanced && compiledExpr" label="表达式预览">
+          <code class="mono cond-preview">{{ compiledExpr }}</code>
+        </el-form-item>
+        <el-form-item>
+          <el-checkbox v-model="form.advanced">高级模式:直接编辑完整表达式</el-checkbox>
         </el-form-item>
         <el-form-item label="投递输出">
           <el-select v-model="form.outputIds" multiple style="width: 100%" placeholder="告警发往哪些输出">
@@ -194,3 +270,15 @@ onMounted(load)
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.cond-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.cond-point { color: #6b7280; white-space: nowrap; }
+.cond-input { flex: 1; }
+.cond-op { width: 110px; }
+.cond-empty { color: #9ca3af; font-size: 13px; }
+.cond-preview {
+  display: block; background: #f3f4f6; padding: 8px 10px;
+  border-radius: 4px; color: #374151; word-break: break-all;
+}
+</style>
