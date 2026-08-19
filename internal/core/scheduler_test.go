@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -342,5 +343,106 @@ func TestSchedulerNotifiesTransitions(t *testing.T) {
 	}
 	if len(n.offline) != 1 || n.offline[0] != "d1" {
 		t.Fatalf("offline notifications: %v", n.offline)
+	}
+}
+
+// mockErrConn 的 Read 永远失败,验证采集错误计数。
+type mockErrConn struct{}
+
+func (mockErrConn) Read(context.Context, []model.Point) ([]model.DataPoint, error) {
+	return nil, errors.New("boom")
+}
+func (mockErrConn) Close() error { return nil }
+
+type mockErrDriver struct{}
+
+func (mockErrDriver) Open(_ context.Context, _ driver.OpenRequest) (driver.Conn, error) {
+	return mockErrConn{}, nil
+}
+
+// TestSchedulerStatsAndReady 验证采集计数与就绪状态:运行前未就绪,
+// 采集成功后 collect_total 递增、无错误、队列容量为 2×poolSize 且就绪。
+func TestSchedulerStatsAndReady(t *testing.T) {
+	driver.Register("statdriver", mockDriver{})
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	st.SaveConnection(model.Connection{ID: "c1", Name: "c1", Driver: "statdriver", Config: []byte(`{}`)})
+	st.SaveDevice(model.Device{
+		ID: "d1", ConnectionID: "c1", Params: []byte(`{}`),
+		IntervalMs: 100, Enabled: true,
+		Points: []model.Point{{Name: "p1", Address: "holding:0", DataType: model.DataTypeInt16}},
+	})
+
+	reg := status.NewRegistry()
+	scheduler := NewScheduler(st, make(chan model.DataPoint, 10), 4, reg, values.NewRegistry(), nil)
+	if scheduler.IsReady() {
+		t.Fatal("scheduler should not be ready before run")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go scheduler.Run(ctx)
+	defer cancel()
+
+	waitForOnline(t, reg, "d1")
+	waitForStat(t, scheduler, func(s SchedulerStats) bool { return s.CollectTotal > 0 })
+
+	s := scheduler.Stats()
+	if s.CollectErrors != 0 {
+		t.Fatalf("unexpected collect errors: %d", s.CollectErrors)
+	}
+	if s.TaskQueueCap != 8 { // 2 × poolSize(4)
+		t.Fatalf("task queue cap=%d want 8", s.TaskQueueCap)
+	}
+	if !scheduler.IsReady() {
+		t.Fatal("scheduler should be ready after run")
+	}
+}
+
+// TestSchedulerCollectErrors 验证采集失败计入 collect_errors。
+func TestSchedulerCollectErrors(t *testing.T) {
+	driver.Register("errdriver", mockErrDriver{})
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	st.SaveConnection(model.Connection{ID: "c1", Name: "c1", Driver: "errdriver", Config: []byte(`{}`)})
+	st.SaveDevice(model.Device{
+		ID: "d1", ConnectionID: "c1", Params: []byte(`{}`),
+		IntervalMs: 100, Enabled: true,
+		Points: []model.Point{{Name: "p1", Address: "holding:0", DataType: model.DataTypeInt16}},
+	})
+
+	reg := status.NewRegistry()
+	scheduler := NewScheduler(st, make(chan model.DataPoint, 10), 4, reg, values.NewRegistry(), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	go scheduler.Run(ctx)
+	defer cancel()
+
+	waitForOffline(t, reg, "d1")
+	waitForStat(t, scheduler, func(s SchedulerStats) bool { return s.CollectErrors > 0 })
+
+	s := scheduler.Stats()
+	if s.CollectTotal == 0 {
+		t.Fatal("collect total should be > 0 even on error")
+	}
+}
+
+// waitForStat 轮询直到 cond(scheduler.Stats()) 为真。
+func waitForStat(t *testing.T, scheduler *Scheduler, cond func(SchedulerStats) bool) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if cond(scheduler.Stats()) {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timeout waiting for scheduler stats: %+v", scheduler.Stats())
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

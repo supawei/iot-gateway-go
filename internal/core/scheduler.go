@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -42,6 +43,10 @@ type Scheduler struct {
 	workersDone   <-chan struct{}
 	collectCtx    context.Context
 	collectCancel context.CancelFunc
+
+	// 采集计数(原子,worker 并发自增;供 /metrics 暴露)。仅轮询路径在 collectOnce 累加。
+	collectCount  atomic.Int64
+	collectErrors atomic.Int64
 }
 
 // collectMode 是设备的采集方式。
@@ -578,9 +583,11 @@ func (s *Scheduler) emit(ctx context.Context, dp model.DataPoint) bool {
 }
 
 func (s *Scheduler) collectOnce(ctx context.Context, conn driver.Conn, points []model.Point, deviceID string) {
+	s.collectCount.Add(1)
 	dataPoints, err := conn.Read(ctx, points)
 	if err != nil {
 		// 配置级错误(整批无效):记录离线,不发送
+		s.collectErrors.Add(1)
 		s.markOffline(deviceID, err.Error())
 		slog.Error("read points failed", "points", len(points), "err", err)
 		return
@@ -597,8 +604,43 @@ func (s *Scheduler) collectOnce(ctx context.Context, conn driver.Conn, points []
 	if anyGood {
 		s.markOnline(deviceID, time.Now())
 	} else {
+		// 全部点位质量坏:无可采数据,计入采集错误
+		s.collectErrors.Add(1)
 		s.markOffline(deviceID, "all points bad")
 	}
+}
+
+// SchedulerStats 是调度器采集侧运行统计快照,供 /metrics 暴露。
+type SchedulerStats struct {
+	CollectTotal  int64 // 轮询采集执行次数
+	CollectErrors int64 // 轮询采集失败次数(读失败或全部点位质量坏)
+	TaskQueueLen  int   // taskCh 当前长度
+	TaskQueueCap  int   // taskCh 容量(2×poolSize)
+}
+
+// Stats 返回采集计数与任务队列长度快照。
+func (s *Scheduler) Stats() SchedulerStats {
+	s.mu.Lock()
+	var qlen, qcap int
+	if s.taskCh != nil {
+		qlen = len(s.taskCh)
+		qcap = cap(s.taskCh)
+	}
+	s.mu.Unlock()
+	return SchedulerStats{
+		CollectTotal:  s.collectCount.Load(),
+		CollectErrors: s.collectErrors.Load(),
+		TaskQueueLen:  qlen,
+		TaskQueueCap:  qcap,
+	}
+}
+
+// IsReady 指示采集基础设施(cron)已启动,供 /readyz 就绪探针。
+// store 已开 + 配置加载完成在装配期必然为真,故就绪判定主要看 cron 是否就绪。
+func (s *Scheduler) IsReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cron != nil
 }
 
 type collectTask struct {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"iot-gateway-go/internal/config"
 	"iot-gateway-go/internal/core"
 	"iot-gateway-go/internal/model"
+	"iot-gateway-go/internal/observability"
 	"iot-gateway-go/internal/output"
 	"iot-gateway-go/internal/processing"
 	"iot-gateway-go/internal/status"
@@ -112,7 +114,8 @@ func main() {
 	if err != nil {
 		fatal("load config failed", "err", err)
 	}
-	slog.SetDefault(initLogger(cfg))
+	logger, gidHandler := initLogger(cfg)
+	slog.SetDefault(logger)
 
 	st, err := store.Open(cfg.Storage.SqlitePath)
 	if err != nil {
@@ -126,6 +129,14 @@ func main() {
 	if err != nil {
 		fatal("init backfill store failed", "err", err)
 	}
+
+	// 网关 ID 存 SQLite(settings 表,Web UI 可改):启动读一次注入日志公共字段并供
+	// 告警引擎使用。改 ID 后日志字段需重启生效(输出侧已热重载)。
+	gatewayID, err := st.GetGatewayID()
+	if err != nil {
+		fatal("get gateway id", "err", err)
+	}
+	gidHandler.SetGatewayID(gatewayID)
 
 	// 下行写回调:共享属性/RPC → core.WritePoint → 驱动 Writer。
 	write := func(ctx context.Context, deviceID, point string, value interface{}) error {
@@ -167,10 +178,6 @@ func main() {
 
 	// 告警引擎:跨设备/跨点位告警,接在边缘处理层下游;规则存 SQLite(alert_rules 表),
 	// 随 store.OnChange 热重载。放行点先经告警判断(可能触发告警动作),再正常扇出。
-	gatewayID, err := st.GetGatewayID()
-	if err != nil {
-		fatal("get gateway id for alert engine", "err", err)
-	}
 	alertEng := alert.NewEngine(st, outputs, gatewayID)
 	go alertEng.Run(ctx)
 
@@ -182,15 +189,17 @@ func main() {
 		core.RunPipeline(ctx, dataPoints, proc, outputs)
 	}()
 
-	// schedulerDone := make(chan struct{})
+	// scheduler:用 cron 统一调度采集,任务投递到 worker pool。保留 handle 供
+	// /metrics 与 /readyz 查询采集统计与就绪状态。
+	sched := core.NewScheduler(st, dataPoints, cfg.Scheduler.PoolSize, statusReg, valuesReg, outputs)
 	go func() {
-		if err := core.NewScheduler(st, dataPoints, cfg.Scheduler.PoolSize, statusReg, valuesReg, outputs).Run(ctx); err != nil {
+		if err := sched.Run(ctx); err != nil {
 			slog.Error("scheduler exited", "err", err)
 		}
-		// close(schedulerDone)
 	}()
 
-	// 根路由挂内嵌前端(SPA),/api/ 挂 REST 接口,单端口同时提供界面与 API。
+	// 根路由挂内嵌前端(SPA),/api/ 挂 REST 接口(经 access log 中间件);
+	// /livez /readyz /metrics 为匿名运维端点(不进 access log、不鉴权)。
 	mux := http.NewServeMux()
 	mux.Handle("/", web.Handler())
 	authEnabled := true
@@ -199,7 +208,17 @@ func main() {
 	}
 	apiSrv := api.New(st, statusReg, valuesReg, authz, authEnabled, outputs)
 	apiSrv.SetProcessing(proc)
-	mux.Handle("/api/", apiSrv.Routes())
+	mux.Handle("/api/", observability.AccessLog(apiSrv.Routes()))
+
+	// 运维监控:磁盘占用按数据库与日志所在分区统计。
+	logPath := ""
+	if cfg.Log.File.Path != "" {
+		logPath = filepath.Dir(cfg.Log.File.Path)
+	}
+	collector := observability.NewCollector(statusReg, outputs, proc, sched, filepath.Dir(cfg.Storage.SqlitePath), logPath)
+	mux.HandleFunc("/livez", observability.LivezHandler(ctx))
+	mux.HandleFunc("/readyz", observability.ReadyzHandler(sched))
+	mux.HandleFunc("/metrics", collector.MetricsHandler)
 
 	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: mux}
 	go func() {
@@ -222,8 +241,9 @@ func main() {
 }
 
 // initLogger 按 config 构造 slog logger:level 控制级别,format 选 text/json,
-// file.path 非空时同时写 stdout 与轮转文件(防爆盘)。
-func initLogger(cfg config.Config) *slog.Logger {
+// file.path 非空时同时写 stdout 与轮转文件(防爆盘)。返回的 LoggerHandler 给每条
+// 日志注入 gateway_id + component 公共字段;gateway_id 由 main 启动后经 SetGatewayID 注入。
+func initLogger(cfg config.Config) (*slog.Logger, *observability.LoggerHandler) {
 	opts := &slog.HandlerOptions{Level: parseLogLevel(cfg.Log.Level)}
 
 	writer := io.Writer(os.Stdout)
@@ -238,10 +258,14 @@ func initLogger(cfg config.Config) *slog.Logger {
 		})
 	}
 
+	var base slog.Handler
 	if strings.EqualFold(cfg.Log.Format, "json") {
-		return slog.New(slog.NewJSONHandler(writer, opts))
+		base = slog.NewJSONHandler(writer, opts)
+	} else {
+		base = slog.NewTextHandler(writer, opts)
 	}
-	return slog.New(slog.NewTextHandler(writer, opts))
+	handler := observability.NewLoggerHandler(base)
+	return slog.New(handler), handler
 }
 
 func parseLogLevel(level string) slog.Level {
