@@ -254,7 +254,7 @@ onMounted(load)
         <el-form-item v-if="!form.advanced" label="触发条件" required>
           <div v-if="form.refKeys.length === 0" class="cond-empty">先选择引用点位,再为每个点位填写条件</div>
           <div v-for="(k, i) in form.refKeys" :key="k" class="cond-row">
-            <span class="mono cond-point">{{ pointLabel(k) }}</span>
+            <span class="mono cond-point" :title="pointLabel(k)">{{ pointLabel(k) }}</span>
             <el-input v-model="form.conds[i]" placeholder="如 > 30" class="cond-input" />
             <el-select v-if="i < form.refKeys.length - 1" v-model="form.joinOps[i]" class="cond-op">
               <el-option label="且 (AND)" value="&&" />
@@ -294,9 +294,18 @@ onMounted(load)
 
 <style scoped>
 .cond-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.cond-point { color: #6b7280; white-space: nowrap; }
-.cond-input { flex: 1; }
-.cond-op { width: 110px; }
+/* 点位标签:长 ID/点名为 nowrap 且不可压缩,会撑破整行、挤压输入框与 且/或 选择框;
+   改为限宽省略号 + title 悬停看完整值,保证输入框与选择框始终可见 */
+.cond-point {
+  color: #6b7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 42%;
+  flex-shrink: 0;
+}
+.cond-input { flex: 1 1 auto; min-width: 0; }
+.cond-op { width: 110px; flex-shrink: 0; }
 .cond-empty { color: #9ca3af; font-size: 13px; }
 .cond-preview {
   display: block; background: #f3f4f6; padding: 8px 10px;
