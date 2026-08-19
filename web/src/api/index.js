@@ -65,6 +65,8 @@ export const api = {
   createConnection: (data) => http.post('/connections', data),
   updateConnection: (id, data) => http.put(`/connections/${id}`, data),
   deleteConnection: (id) => http.delete(`/connections/${id}`),
+  // 批量操作(action: delete;ids 为连接 id 列表)
+  batchConnections: (action, ids) => http.post('/connections/batch', { action, ids }),
   // 节点浏览(OPC UA 等支持 Browse 的驱动,供点位编辑选择节点)
   browseConnection: (id, parent) => http.post(`/connections/${id}/browse`, { parent }),
 
@@ -83,6 +85,8 @@ export const api = {
   deleteDevice: (id) => http.delete(`/devices/${id}`),
   cloneDevice: (id, data) => http.post(`/devices/${id}/clone`, data),
   writeDevice: (id, data) => http.post(`/devices/${id}/write`, data),
+  // 批量操作(action: delete | setEnabled;setEnabled 需 enabled 字段)
+  batchDevices: (action, ids, enabled) => http.post('/devices/batch', { action, ids, enabled }),
 
   // 状态
   listStatus: () => http.get('/status'),

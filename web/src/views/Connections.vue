@@ -13,6 +13,8 @@ const drivers = ref([])
 const loading = ref(false)
 const dialogVisible = ref(false)
 const editingId = ref('')
+const selected = ref([])
+const tableRef = ref()
 
 const { page, pageSize, pageSizes, total, sync, pageRows, onSizeChange } = usePagination()
 const pagedList = computed(() => pageRows(list.value))
@@ -35,6 +37,9 @@ async function load() {
     list.value = c
     sync(list.value)
     drivers.value = d
+    // 数据刷新后清除勾选(列表可能已变化,保留旧选中易误操作)
+    selected.value = []
+    tableRef.value?.clearSelection()
   } finally {
     loading.value = false
   }
@@ -102,6 +107,44 @@ async function remove(row) {
   }
 }
 
+// batchSummary 汇总批量操作结果:成功数 + 失败明细(含 error 文案)。
+function batchSummary(res) {
+  const failed = (res.results || []).filter((r) => !r.ok)
+  const ok = (res.results || []).length - failed.length
+  if (failed.length === 0) {
+    ElMessage.success(`批量操作完成,成功 ${ok} 项`)
+  } else {
+    ElMessage.warning(`成功 ${ok} 项,失败 ${failed.length} 项:` +
+      failed.map((f) => `${f.id}(${f.error || '未知错误'})`).join('; '))
+  }
+  return failed.length === 0
+}
+
+async function batchDelete() {
+  const ids = selected.value.map((r) => r.id)
+  const names = selected.value.map((r) => r.name || r.id).join('、')
+  try {
+    await ElMessageBox.confirm(`确定删除选中的 ${ids.length} 个连接吗？\n${names}`, '批量删除确认', {
+      type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  try {
+    const res = await api.batchConnections('delete', ids)
+    if (batchSummary(res)) {
+      selected.value = []
+    }
+    load()
+  } catch (e) {
+    ElMessage.error(e.message)
+  }
+}
+
+function onSelectionChange(rows) {
+  selected.value = rows
+}
+
 onMounted(load)
 </script>
 
@@ -109,11 +152,22 @@ onMounted(load)
   <div>
     <div class="page-head">
       <h1>连接</h1>
-      <el-button type="primary" :icon="Plus" @click="openCreate">新建连接</el-button>
+      <div>
+        <el-button
+          v-if="selected.length"
+          type="danger"
+          plain
+          @click="batchDelete"
+        >
+          批量删除({{ selected.length }})
+        </el-button>
+        <el-button type="primary" :icon="Plus" @click="openCreate">新建连接</el-button>
+      </div>
     </div>
 
     <div class="panel">
-      <el-table v-loading="loading" :data="pagedList" empty-text="暂无连接">
+      <el-table ref="tableRef" v-loading="loading" :data="pagedList" empty-text="暂无连接" @selection-change="onSelectionChange">
+        <el-table-column type="selection" width="46" />
         <el-table-column prop="name" label="名称" min-width="150" />
         <el-table-column label="驱动" width="150">
           <template #default="{ row }">

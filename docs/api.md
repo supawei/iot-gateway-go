@@ -260,6 +260,38 @@ curl -X POST http://localhost:8080/api/v1/connections \
 
 **响应**:`204 No Content`(无响应体)
 
+#### 批量操作连接
+
+`POST /api/v1/connections/batch`
+
+对多个连接执行同一操作,逐条返回结果(部分失败不阻断其余项)。权限 `connections:write`。
+
+**请求体**:
+
+```json
+{ "action": "delete", "ids": ["conn-1", "conn-2"] }
+```
+
+| 字段 | 说明 |
+|---|---|
+| `action` | 操作类型,当前支持 `delete` |
+| `ids` | 连接 id 列表,非空 |
+
+**响应**:`200 OK` + 逐条结果与计数
+
+```json
+{
+  "results": [
+    { "id": "conn-1", "ok": false, "error": "connection is referenced by devices: 1 device(s)" },
+    { "id": "conn-2", "ok": true }
+  ],
+  "okCount": 1,
+  "failCount": 1
+}
+```
+
+> 语义与单条删除一致:被设备引用的连接逐条失败(其余照删);不存在的 id 幂等成功。请求非法(未知 action / 空 ids)返回 `400`。
+
 #### 节点浏览(OPC UA 等支持 Browse 的驱动)
 
 `POST /api/v1/connections/{connectionId}/browse`
@@ -347,6 +379,40 @@ curl -X POST http://localhost:8080/api/v1/devices \
 级联删除该设备的所有点位。
 
 **响应**:`204 No Content`(无响应体)
+
+#### 批量操作设备
+
+`POST /api/v1/devices/batch`
+
+对多个设备执行同一操作,逐条返回结果(部分失败不阻断其余项)。权限 `devices:write`。
+
+**请求体**:
+
+```json
+{ "action": "delete", "ids": ["sensor-01", "sensor-02"] }
+{ "action": "setEnabled", "ids": ["sensor-01", "sensor-02"], "enabled": false }
+```
+
+| 字段 | 说明 |
+|---|---|
+| `action` | `delete` 级联删除设备及点位;`setEnabled` 批量启/停用(需 `enabled` 字段) |
+| `ids` | 设备 id 列表,非空 |
+| `enabled` | 仅 `setEnabled` 必填:`true` 启用 / `false` 停用 |
+
+**响应**:`200 OK` + 逐条结果与计数
+
+```json
+{
+  "results": [
+    { "id": "sensor-01", "ok": true },
+    { "id": "sensor-02", "ok": false, "error": "device \"sensor-02\" not found" }
+  ],
+  "okCount": 1,
+  "failCount": 1
+}
+```
+
+> 与单条语义一致:`delete` 对不存在的 id 幂等成功;`setEnabled` 对不存在的 id 逐条报错。请求非法(未知 action / 空 ids / `setEnabled` 缺 `enabled`)返回 `400`。
 
 #### 复制设备
 

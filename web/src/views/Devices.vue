@@ -40,6 +40,8 @@ const connections = ref([])
 const drivers = ref([])
 const statuses = ref([])
 const loading = ref(false)
+const selected = ref([])
+const tableRef = ref()
 
 const { page, pageSize, pageSizes, total, sync, pageRows, onSizeChange } = usePagination()
 const pagedList = computed(() => pageRows(list.value))
@@ -94,8 +96,66 @@ async function load() {
     connections.value = c
     statuses.value = s
     drivers.value = drv
+    // 数据刷新后清除勾选(列表可能已变化,保留旧选中易误操作)
+    selected.value = []
+    tableRef.value?.clearSelection()
   } finally {
     loading.value = false
+  }
+}
+
+// batchSummary 汇总批量操作结果:成功数 + 失败明细(含 error 文案)。
+function batchSummary(res) {
+  const failed = (res.results || []).filter((r) => !r.ok)
+  const ok = (res.results || []).length - failed.length
+  if (failed.length === 0) {
+    ElMessage.success(`批量操作完成,成功 ${ok} 项`)
+  } else {
+    ElMessage.warning(`成功 ${ok} 项,失败 ${failed.length} 项:` +
+      failed.map((f) => `${f.id}(${f.error || '未知错误'})`).join('; '))
+  }
+  return failed.length === 0
+}
+
+function onSelectionChange(rows) {
+  selected.value = rows
+}
+
+async function batchDelete() {
+  const ids = selected.value.map((r) => r.id)
+  const names = selected.value.map((r) => r.name || r.id).join('、')
+  try {
+    await ElMessageBox.confirm(`确定删除选中的 ${ids.length} 个设备吗？\n${names}`, '批量删除确认', {
+      type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  try {
+    const res = await api.batchDevices('delete', ids)
+    batchSummary(res)
+    load()
+  } catch (e) {
+    ElMessage.error(e.message)
+  }
+}
+
+async function batchSetEnabled(enabled) {
+  const ids = selected.value.map((r) => r.id)
+  const label = enabled ? '启用' : '停用'
+  try {
+    await ElMessageBox.confirm(`确定${label}选中的 ${ids.length} 个设备吗？`, `批量${label}确认`, {
+      type: 'warning', confirmButtonText: label, cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  try {
+    const res = await api.batchDevices('setEnabled', ids, enabled)
+    batchSummary(res)
+    load()
+  } catch (e) {
+    ElMessage.error(e.message)
   }
 }
 
@@ -409,11 +469,19 @@ onUnmounted(() => {
   <div>
     <div class="page-head">
       <h1>设备</h1>
-      <el-button type="primary" :icon="Plus" @click="openCreate">新建设备</el-button>
+      <div>
+        <template v-if="selected.length">
+          <el-button type="primary" plain @click="batchSetEnabled(true)">批量启用({{ selected.length }})</el-button>
+          <el-button type="warning" plain @click="batchSetEnabled(false)">批量停用({{ selected.length }})</el-button>
+          <el-button type="danger" plain @click="batchDelete">批量删除({{ selected.length }})</el-button>
+        </template>
+        <el-button type="primary" :icon="Plus" @click="openCreate">新建设备</el-button>
+      </div>
     </div>
 
     <div class="panel">
-      <el-table v-loading="loading" :data="pagedList" empty-text="暂无设备">
+      <el-table ref="tableRef" v-loading="loading" :data="pagedList" empty-text="暂无设备" @selection-change="onSelectionChange">
+        <el-table-column type="selection" width="46" />
         <el-table-column prop="name" label="名称" min-width="140" />
         <el-table-column label="连接" min-width="140">
           <template #default="{ row }">

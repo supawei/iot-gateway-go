@@ -32,7 +32,7 @@ type API struct {
 	values      *values.Registry
 	auth        *auth.Manager
 	authEnabled bool
-	outputs     *output.Manager // 输出配置变更后触发热重载;可为 nil(测试或未接线时跳过)
+	outputs     *output.Manager    // 输出配置变更后触发热重载;可为 nil(测试或未接线时跳过)
 	proc        *processing.Engine // 边缘处理层运行统计来源;可为 nil
 
 	// 会话级密码加密盒(懒初始化)
@@ -84,6 +84,7 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/connections/{connectionId}/browse", a.require(auth.ScopeConnectionsRead, a.browseConnection))
 	mux.HandleFunc("PUT /api/v1/connections/{connectionId}", a.require(auth.ScopeConnectionsWrite, a.putConnection))
 	mux.HandleFunc("DELETE /api/v1/connections/{connectionId}", a.require(auth.ScopeConnectionsWrite, a.deleteConnection))
+	mux.HandleFunc("POST /api/v1/connections/batch", a.require(auth.ScopeConnectionsWrite, a.batchConnections))
 	mux.HandleFunc("POST /api/v1/devices", a.require(auth.ScopeDevicesWrite, a.createDevice))
 	mux.HandleFunc("GET /api/v1/devices", a.require(auth.ScopeDevicesRead, a.listDevices))
 	mux.HandleFunc("GET /api/v1/devices/{deviceId}", a.require(auth.ScopeDevicesRead, a.getDevice))
@@ -91,6 +92,7 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("DELETE /api/v1/devices/{deviceId}", a.require(auth.ScopeDevicesWrite, a.deleteDevice))
 	mux.HandleFunc("POST /api/v1/devices/{deviceId}/clone", a.require(auth.ScopeDevicesWrite, a.cloneDevice))
 	mux.HandleFunc("POST /api/v1/devices/{deviceId}/write", a.require(auth.ScopeDevicesCommand, a.writeDevice))
+	mux.HandleFunc("POST /api/v1/devices/batch", a.require(auth.ScopeDevicesWrite, a.batchDevices))
 	mux.HandleFunc("POST /api/v1/devices/{deviceId}/points", a.require(auth.ScopeDevicesWrite, a.addPoint))
 	mux.HandleFunc("DELETE /api/v1/devices/{deviceId}/points/{name}", a.require(auth.ScopeDevicesWrite, a.deletePoint))
 	mux.HandleFunc("GET /api/v1/status", a.require(auth.ScopeStatusRead, a.listStatus))
@@ -306,6 +308,119 @@ func (a *API) deleteConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// batchRequest 是批量操作请求体:action 为操作类型,ids 为操作对象列表,
+// enabled 仅 setEnabled 操作使用(批量启/停设备)。
+type batchRequest struct {
+	Action  string   `json:"action"`
+	IDs     []string `json:"ids"`
+	Enabled *bool    `json:"enabled"`
+}
+
+// batchItemResult 是批量操作中单个对象的执行结果:成功 ok=true;失败携带 error 明细。
+type batchItemResult struct {
+	ID    string `json:"id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// batchResponse 是批量操作响应:逐条结果 + 成功/失败计数,便于前端汇总展示。
+type batchResponse struct {
+	Results   []batchItemResult `json:"results"`
+	OKCount   int               `json:"okCount"`
+	FailCount int               `json:"failCount"`
+}
+
+// decodeBatch 解码并校验批量请求:action 非空、ids 非空。
+func decodeBatch(w http.ResponseWriter, r *http.Request, validActions ...string) (batchRequest, bool) {
+	var req batchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return batchRequest{}, false
+	}
+	if req.Action == "" {
+		writeError(w, http.StatusBadRequest, errors.New("action is required"))
+		return batchRequest{}, false
+	}
+	valid := false
+	for _, a := range validActions {
+		if req.Action == a {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported action %q", req.Action))
+		return batchRequest{}, false
+	}
+	if len(req.IDs) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("ids is required"))
+		return batchRequest{}, false
+	}
+	return req, true
+}
+
+// respondBatch 写批量操作结果:逐条结果 + 计数。
+func respondBatch(w http.ResponseWriter, results []batchItemResult) {
+	resp := batchResponse{Results: results}
+	for _, r := range results {
+		if r.OK {
+			resp.OKCount++
+		} else {
+			resp.FailCount++
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// batchConnections 批量操作连接。当前支持 action=delete(被设备引用时逐条失败,
+// 与单条删除同语义,不阻断其他连接删除)。
+func (a *API) batchConnections(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeBatch(w, r, "delete")
+	if !ok {
+		return
+	}
+	results := make([]batchItemResult, 0, len(req.IDs))
+	for _, id := range req.IDs {
+		res := batchItemResult{ID: id, OK: true}
+		if err := a.store.DeleteConnection(id); err != nil {
+			res.OK = false
+			res.Error = err.Error()
+		}
+		results = append(results, res)
+	}
+	respondBatch(w, results)
+}
+
+// batchDevices 批量操作设备。支持 action=delete(删除设备及其点位)与
+// action=setEnabled(批量启/停,enabled 必填)。
+func (a *API) batchDevices(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeBatch(w, r, "delete", "setEnabled")
+	if !ok {
+		return
+	}
+	if req.Action == "setEnabled" && req.Enabled == nil {
+		writeError(w, http.StatusBadRequest, errors.New("setEnabled requires enabled field"))
+		return
+	}
+	results := make([]batchItemResult, 0, len(req.IDs))
+	for _, id := range req.IDs {
+		res := batchItemResult{ID: id, OK: true}
+		var err error
+		switch req.Action {
+		case "delete":
+			err = a.store.DeleteDevice(id)
+		case "setEnabled":
+			err = a.store.SetDeviceEnabled(id, *req.Enabled)
+		}
+		if err != nil {
+			res.OK = false
+			res.Error = err.Error()
+		}
+		results = append(results, res)
+	}
+	respondBatch(w, results)
 }
 
 // browseRequest 是节点浏览请求体:parent 为空串表示从根/Objects 开始。

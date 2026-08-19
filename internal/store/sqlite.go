@@ -335,6 +335,24 @@ func (s *Store) DeleteDevice(id string) error {
 	return nil
 }
 
+// SetDeviceEnabled 批量启停用:只改 enabled 字段,不动 params/points。
+// 设备不存在时返回 not-found 错误(与 GetDevice 语义一致,供 batch 逐条报错)。
+func (s *Store) SetDeviceEnabled(id string, enabled bool) error {
+	enabledVal := 0
+	if enabled {
+		enabledVal = 1
+	}
+	res, err := s.db.Exec("UPDATE device SET enabled = ? WHERE id = ?", enabledVal, id)
+	if err != nil {
+		return fmt.Errorf("update device enabled: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("device %q not found", id)
+	}
+	s.notify()
+	return nil
+}
+
 func (s *Store) AddPoint(deviceID string, point model.Point) error {
 	// 追加到末尾:seq 取该设备当前最大序号 +1,保持用户定义的点位顺序。
 	var maxSeq int

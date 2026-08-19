@@ -284,6 +284,184 @@ func TestDeleteDevice(t *testing.T) {
 	}
 }
 
+// seedSecondDevice 预置第二个设备(sensor-02),供批量操作测试用。
+func seedSecondDevice(t *testing.T, handler http.Handler) {
+	t.Helper()
+	dev := sampleDevice()
+	dev.ID = "sensor-02"
+	dev.Name = "温湿度-2"
+	rec := doRequest(t, handler, "POST", "/api/v1/devices", dev)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("seed second device: got %d", rec.Code)
+	}
+}
+
+// decodeBatchResp 解析 batch 端点响应。
+func decodeBatchResp(t *testing.T, rec *httptest.ResponseRecorder) batchResponse {
+	t.Helper()
+	var resp batchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal batch response: %v\nbody=%s", err, rec.Body.String())
+	}
+	return resp
+}
+
+func TestBatchDeleteConnections(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
+	doRequest(t, handler, "POST", "/api/v1/connections", sampleConnection())
+	conn2 := sampleConnection()
+	conn2.ID = "conn-2"
+	doRequest(t, handler, "POST", "/api/v1/connections", conn2)
+
+	// 全部成功
+	rec := doRequest(t, handler, "POST", "/api/v1/connections/batch",
+		batchRequest{Action: "delete", IDs: []string{"conn-1", "conn-2"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch delete: got %d want %d", rec.Code, http.StatusOK)
+	}
+	resp := decodeBatchResp(t, rec)
+	if resp.OKCount != 2 || resp.FailCount != 0 {
+		t.Fatalf("batch delete counts: ok=%d fail=%d want ok=2 fail=0", resp.OKCount, resp.FailCount)
+	}
+	for _, r := range resp.Results {
+		if !r.OK {
+			t.Fatalf("unexpected failure for %s: %s", r.ID, r.Error)
+		}
+	}
+	// 库中已删空
+	rec = doRequest(t, handler, "GET", "/api/v1/connections", nil)
+	var conns []model.Connection
+	json.Unmarshal(rec.Body.Bytes(), &conns)
+	if len(conns) != 0 {
+		t.Fatalf("connections not deleted: %+v", conns)
+	}
+}
+
+// TestBatchDeleteConnectionsPartial 验证部分失败:被设备引用的连接删除失败,
+// 其余照删(与单条删除 ErrConnectionInUse 语义一致)。
+func TestBatchDeleteConnectionsPartial(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
+	doRequest(t, handler, "POST", "/api/v1/connections", sampleConnection())
+	conn2 := sampleConnection()
+	conn2.ID = "conn-2"
+	doRequest(t, handler, "POST", "/api/v1/connections", conn2)
+	// conn-1 被设备引用 → 删除失败
+	doRequest(t, handler, "POST", "/api/v1/devices", sampleDevice())
+
+	rec := doRequest(t, handler, "POST", "/api/v1/connections/batch",
+		batchRequest{Action: "delete", IDs: []string{"conn-1", "conn-2"}})
+	resp := decodeBatchResp(t, rec)
+	if resp.OKCount != 1 || resp.FailCount != 1 {
+		t.Fatalf("partial batch counts: ok=%d fail=%d want ok=1 fail=1", resp.OKCount, resp.FailCount)
+	}
+	for _, r := range resp.Results {
+		if r.ID == "conn-1" && r.OK {
+			t.Fatal("conn-1 (referenced) should have failed")
+		}
+		if r.ID == "conn-1" && !strings.Contains(r.Error, "referenced by devices") {
+			t.Fatalf("conn-1 error should mention referenced by devices, got %q", r.Error)
+		}
+		if r.ID == "conn-2" && !r.OK {
+			t.Fatalf("conn-2 should succeed, got %s", r.Error)
+		}
+	}
+}
+
+func TestBatchConnectionsValidation(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+
+	// 未知 action
+	rec := doRequest(t, handler, "POST", "/api/v1/connections/batch",
+		batchRequest{Action: "bogus", IDs: []string{"conn-1"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown action: got %d want %d", rec.Code, http.StatusBadRequest)
+	}
+	// 空 ids
+	rec = doRequest(t, handler, "POST", "/api/v1/connections/batch",
+		batchRequest{Action: "delete", IDs: nil})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty ids: got %d want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestBatchDeleteDevices(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+	seedConnection(t, handler)
+	doRequest(t, handler, "POST", "/api/v1/devices", sampleDevice())
+	seedSecondDevice(t, handler)
+
+	rec := doRequest(t, handler, "POST", "/api/v1/devices/batch",
+		batchRequest{Action: "delete", IDs: []string{"sensor-01", "sensor-02"}})
+	resp := decodeBatchResp(t, rec)
+	if resp.OKCount != 2 || resp.FailCount != 0 {
+		t.Fatalf("batch delete devices: ok=%d fail=%d want 2/0", resp.OKCount, resp.FailCount)
+	}
+	// 已删设备再删:与单条 DELETE 一致,幂等成功(不存在的 id 不报错)。
+	rec = doRequest(t, handler, "POST", "/api/v1/devices/batch",
+		batchRequest{Action: "delete", IDs: []string{"sensor-01", "no-such"}})
+	resp = decodeBatchResp(t, rec)
+	if resp.OKCount != 2 || resp.FailCount != 0 {
+		t.Fatalf("idempotent batch delete: ok=%d fail=%d want 2/0", resp.OKCount, resp.FailCount)
+	}
+	// 库中已删空
+	rec = doRequest(t, handler, "GET", "/api/v1/devices", nil)
+	var devices []model.Device
+	json.Unmarshal(rec.Body.Bytes(), &devices)
+	if len(devices) != 0 {
+		t.Fatalf("devices not deleted: %+v", devices)
+	}
+}
+
+func TestBatchSetDeviceEnabled(t *testing.T) {
+	apiInstance := newTestAPI(t)
+	handler := apiInstance.Routes()
+	seedConnection(t, handler)
+	doRequest(t, handler, "POST", "/api/v1/devices", sampleDevice())
+	seedSecondDevice(t, handler)
+
+	// 批量停用
+	enabled := false
+	rec := doRequest(t, handler, "POST", "/api/v1/devices/batch",
+		batchRequest{Action: "setEnabled", IDs: []string{"sensor-01", "sensor-02"}, Enabled: &enabled})
+	resp := decodeBatchResp(t, rec)
+	if resp.OKCount != 2 || resp.FailCount != 0 {
+		t.Fatalf("batch disable: ok=%d fail=%d want 2/0", resp.OKCount, resp.FailCount)
+	}
+	rec = doRequest(t, handler, "GET", "/api/v1/devices/sensor-01", nil)
+	var got model.Device
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.Enabled {
+		t.Fatal("device should be disabled after batch setEnabled=false")
+	}
+
+	// 批量启用
+	enabled = true
+	rec = doRequest(t, handler, "POST", "/api/v1/devices/batch",
+		batchRequest{Action: "setEnabled", IDs: []string{"sensor-01"}, Enabled: &enabled})
+	resp = decodeBatchResp(t, rec)
+	if resp.OKCount != 1 {
+		t.Fatalf("batch enable: ok=%d want 1", resp.OKCount)
+	}
+	rec = doRequest(t, handler, "GET", "/api/v1/devices/sensor-01", nil)
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	if !got.Enabled {
+		t.Fatal("device should be enabled after batch setEnabled=true")
+	}
+
+	// setEnabled 缺 enabled 字段 → 400
+	rec = doRequest(t, handler, "POST", "/api/v1/devices/batch",
+		batchRequest{Action: "setEnabled", IDs: []string{"sensor-01"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("setEnabled without enabled: got %d want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
 // TestAddAndDeletePoint 验证点位增删,路径含 {deviceId} 与 {name} 两段参数。
 func TestAddAndDeletePoint(t *testing.T) {
 	apiInstance := newTestAPI(t)
