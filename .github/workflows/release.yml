@@ -1,0 +1,53 @@
+# .github/workflows/release.yml
+#
+# GitHub 发布流水线:推送 v* 格式 tag 时,用 GoReleaser 构建三平台
+# (linux amd64 / arm64 / armv7)静态二进制并创建 GitHub Release。
+#
+# 触发:
+#   git tag v1.2.0
+#   git push origin v1.2.0
+#
+# 产物见 https://github.com/supawei/iot-gateway-go/releases
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # goreleaser 需要完整历史生成 changelog
+          fetch-depth: 0
+
+      - name: Set up Node.js (web 前端)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          # Actions 内置的仓库级写权限 token(permissions.contents: write)
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

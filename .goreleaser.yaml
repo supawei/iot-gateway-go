@@ -1,0 +1,84 @@
+# .goreleaser.yaml
+#
+# GoReleaser 配置 —— 用于在 GitHub 上发布 iot-gateway-go 发行版。
+# 触发方式:推送 v* 格式的 tag 到 GitHub(见 .github/workflows/release.yml)。
+# 本地验证:goreleaser check && goreleaser build --snapshot --clean
+#
+# 文档:https://goreleaser.com
+
+# GoReleaser 配置 schema 版本
+version: 2
+
+project_name: iot-gateway-go
+
+before:
+  hooks:
+    # 前端产物经 go:embed 内嵌进二进制,必须在 go build 之前生成 web/dist
+    # (web/dist 已 gitignore,CI 每次全新构建)
+    - npm ci --prefix web
+    - npm run build --prefix web
+
+builds:
+  - id: gateway
+    main: ./cmd/gateway
+    binary: gateway
+    env:
+      # 依赖全为纯 Go(modernc.org/sqlite 无 CGO),关闭 CGO 产出静态二进制
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    goarm:
+      - "7"
+    ldflags:
+      # 版本信息注入,与 internal/version 包及 Makefile 保持一致
+      - >-
+        -s -w
+        -X iot-gateway-go/internal/version.Version={{ .Version }}
+        -X iot-gateway-go/internal/version.Commit={{ .FullCommit }}
+        -X iot-gateway-go/internal/version.BuildTime={{ .Date }}
+
+archives:
+  # 默认格式即 tar.gz(v2 起不再配置 format)
+  - name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    # 只携带二进制与必要的示例/许可证,不含任何运行时数据
+    files:
+      - src: config.example.yaml
+        dst: config.example.yaml
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  # 快照构建(本地 goreleaser build --snapshot)时的版本号
+  version_template: "{{ incpatch .Version }}-SNAPSHOT-{{ .ShortCommit }}"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^doc:"
+      - "^chore:"
+      - "^ci:"
+      - "^test:"
+      - "^refactor:"
+      - "^build:"
+      - Merge pull request
+      - Merge branch
+      - go mod tidy
+
+release:
+  github:
+    owner: supawei
+    name: iot-gateway-go
+  draft: false
+  # 含预发布标识的 tag(如 v1.1.0-rc1)自动标记为 pre-release
+  prerelease: auto

@@ -46,6 +46,38 @@ go build -o gateway ./cmd/gateway    # 或 make build(自动注入版本号)
 
 版本号(语义化版本 + git 提交哈希 + 构建时间 + Go 版本)在编译时自动注入:`make build` 会取最近的 git tag(如 `v1.2.0`),无 tag 时回退到短提交哈希;`go build` 直编则显示占位版本 `dev`。要打版本 tag,执行 `git tag v1.2.0 && make build` 即可。
 
+## GitHub Release(GoReleaser 发布)
+
+项目在 GitHub 上发布预编译二进制,由 **GoReleaser** 自动化完成:
+[releases](https://github.com/supawei/iot-gateway-go/releases) 页面的每个 Release 附
+**linux amd64 / arm64 / armv7** 三个平台的静态二进制(`CGO_ENABLED=0`),并带
+`checksums.txt` 校验和与自动生成的变更日志。
+
+**发布一个版本**(推 tag 即触发,无需手动构建):
+
+```bash
+git checkout develop && git pull
+git tag v1.2.0                      # 语义化版本,以 v 开头
+git push origin v1.2.0              # 触发 .github/workflows/release.yml → GoReleaser 发布
+```
+
+流程:
+
+1. 推送 `v*` tag 到 GitHub,`Release` workflow 自动运行(`actions/checkout` → `setup-node`
+   构建前端 → `setup-go` → `goreleaser release`)。
+2. GoReleaser 先执行 before hooks(`npm ci && npm run build`,生成 `go:embed` 所需
+   `web/dist`),再交叉编译三平台,上传归档与校验和,创建 GitHub Release。
+3. 带预发布标识的 tag(如 `v1.1.0-rc1`)会自动标记为 **Pre-release**。
+
+**本地预演**(不推送、不发布,验证配置与构建是否通过):
+
+```bash
+goreleaser check                          # 校验 .goreleaser.yaml
+goreleaser build --snapshot --clean       # 本地三平台快照构建,产物在 dist/
+```
+
+配置与说明见 [.goreleaser.yaml](.goreleaser.yaml) 与 [.github/workflows/release.yml](.github/workflows/release.yml)。
+
 ## 网关配置
 
 `config.yaml` 仅含**引导配置**(监听地址、鉴权、存储、日志),启动时读取一次,修改后需重启进程;
