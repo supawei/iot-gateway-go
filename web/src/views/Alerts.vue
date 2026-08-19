@@ -1,17 +1,22 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import api from '../api'
+import { usePagination } from '../utils/pagination'
 
 const list = ref([])
 const loading = ref(false)
 const statusFilter = ref('')
 
+const { page, pageSize, pageSizes, total, sync, pageRows, onSizeChange } = usePagination()
+const pagedList = computed(() => pageRows(list.value))
+
 async function load() {
   loading.value = true
   try {
     list.value = await api.listAlerts(statusFilter.value)
+    sync(list.value)
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -40,7 +45,7 @@ onMounted(load)
     </div>
 
     <div class="panel">
-      <el-table v-loading="loading" :data="list" empty-text="暂无告警记录">
+      <el-table v-loading="loading" :data="pagedList" empty-text="暂无告警记录">
         <el-table-column label="级别" width="90">
           <template #default="{ row }">
             <el-tag :type="row.severity === 'critical' ? 'danger' : 'warning'" effect="plain" size="small">{{ row.severity }}</el-tag>
@@ -62,6 +67,16 @@ onMounted(load)
           <template #default="{ row }">{{ fmtTime(row.resolvedAt) }}</template>
         </el-table-column>
       </el-table>
+      <div class="pager">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :page-sizes="pageSizes"
+          :total="total"
+          layout="total, sizes, prev, pager, next, jumper"
+          @size-change="onSizeChange"
+        />
+      </div>
     </div>
   </div>
 </template>

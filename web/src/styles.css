@@ -169,3 +169,14 @@ body,
 .el-table {
   --el-table-header-bg-color: #fafbfc;
 }
+
+/* 列表分页栏:右对齐 */
+.pager {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+.pager .el-pagination {
+  --el-pagination-button-bg-color: #f6f7f9;
+  --el-pagination-hover-color: var(--el-color-primary);
+}

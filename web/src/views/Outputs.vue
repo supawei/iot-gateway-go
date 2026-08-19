@@ -6,11 +6,15 @@ import api from '../api'
 import SchemaForm from '../components/SchemaForm.vue'
 import { defaultModel, modelFromValue, valueFromModel } from '../utils/schema'
 import { encryptSensitive } from '../utils/crypto'
+import { usePagination } from '../utils/pagination'
 
 const list = ref([])
 const types = ref([])
 const statuses = ref([])
 const loading = ref(false)
+
+const { page, pageSize, pageSizes, total, sync, pageRows, onSizeChange } = usePagination()
+const pagedList = computed(() => pageRows(list.value))
 
 const dialogVisible = ref(false)
 const editingId = ref('')
@@ -61,6 +65,7 @@ async function load() {
   try {
     const [o, t, s] = await Promise.all([api.listOutputs(), api.listOutputTypes(), api.listOutputStatus()])
     list.value = o
+    sync(list.value)
     types.value = t
     statuses.value = s
   } catch (e) {
@@ -150,7 +155,7 @@ onMounted(load)
         配置数据上送目标(MQTT / ThingsBoard / TDengine);保存后立即热重载,无需重启网关。
         点行展开可查看运行状态(连接、上送、积压与错误)。
       </p>
-      <el-table v-loading="loading" :data="list" empty-text="暂无输出">
+      <el-table v-loading="loading" :data="pagedList" empty-text="暂无输出">
         <el-table-column type="expand">
           <template #default="{ row }">
             <div style="padding: 4px 24px 12px">
@@ -202,6 +207,16 @@ onMounted(load)
           </template>
         </el-table-column>
       </el-table>
+      <div class="pager">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :page-sizes="pageSizes"
+          :total="total"
+          layout="total, sizes, prev, pager, next, jumper"
+          @size-change="onSizeChange"
+        />
+      </div>
     </div>
 
     <!-- 新建/编辑对话框 -->

@@ -3,6 +3,7 @@ import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import api from '../api'
+import { usePagination } from '../utils/pagination'
 
 const list = ref([])
 const outputs = ref([])
@@ -10,6 +11,9 @@ const devices = ref([])
 const loading = ref(false)
 const dialogVisible = ref(false)
 const editingId = ref('')
+
+const { page, pageSize, pageSizes, total, sync, pageRows, onSizeChange } = usePagination()
+const pagedList = computed(() => pageRows(list.value))
 
 const form = reactive({
   name: '', enabled: true, severity: 'warning',
@@ -96,6 +100,7 @@ async function load() {
   try {
     const [r, o, d] = await Promise.all([api.listAlertRules(), api.listOutputs(), api.listDevices()])
     list.value = r
+    sync(list.value)
     outputs.value = o
     devices.value = d
   } catch (e) {
@@ -190,7 +195,7 @@ onMounted(load)
         跨设备/跨点位告警:表达式求值为 true 即边沿触发告警,条件解除自动恢复。
         配置时选择引用点位后自动生成 point(),只需为每个点位填写条件;复杂场景可切高级模式直接编表达式。
       </p>
-      <el-table v-loading="loading" :data="list" empty-text="暂无告警规则">
+      <el-table v-loading="loading" :data="pagedList" empty-text="暂无告警规则">
         <el-table-column prop="name" label="名称" min-width="140" />
         <el-table-column label="级别" width="90">
           <template #default="{ row }">
@@ -216,6 +221,16 @@ onMounted(load)
           </template>
         </el-table-column>
       </el-table>
+      <div class="pager">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :page-sizes="pageSizes"
+          :total="total"
+          layout="total, sizes, prev, pager, next, jumper"
+          @size-change="onSizeChange"
+        />
+      </div>
     </div>
 
     <el-dialog v-model="dialogVisible" :title="editingId ? '编辑规则' : '新建规则'" width="640px" destroy-on-close>

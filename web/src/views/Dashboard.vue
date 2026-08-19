@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Edit, Refresh } from '@element-plus/icons-vue'
 import api from '../api'
+import { usePagination } from '../utils/pagination'
 
 const devices = ref([])
 const connections = ref([])
@@ -10,6 +11,9 @@ const statuses = ref([])
 const gatewayId = ref('')
 const procStats = ref(null)
 const loading = ref(false)
+
+const { page, pageSize, pageSizes, total, sync, pageRows, onSizeChange } = usePagination()
+const pagedDevices = computed(() => pageRows(devices.value))
 
 const statusMap = computed(() => {
   const m = {}
@@ -30,6 +34,7 @@ async function load() {
       api.getProcessingStatus(),
     ])
     devices.value = d
+    sync(devices.value)
     connections.value = c
     statuses.value = s
     gatewayId.value = g.id
@@ -130,7 +135,7 @@ onMounted(load)
 
     <div class="panel">
       <h2 class="panel-title">设备状态</h2>
-      <el-table v-loading="loading" :data="devices" empty-text="暂无设备">
+      <el-table v-loading="loading" :data="pagedDevices" empty-text="暂无设备">
         <el-table-column prop="id" label="设备 ID" min-width="140">
           <template #default="{ row }">
             <span class="mono">{{ row.id }}</span>
@@ -163,6 +168,16 @@ onMounted(load)
           </template>
         </el-table-column>
       </el-table>
+      <div class="pager">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :page-sizes="pageSizes"
+          :total="total"
+          layout="total, sizes, prev, pager, next, jumper"
+          @size-change="onSizeChange"
+        />
+      </div>
     </div>
   </div>
 </template>

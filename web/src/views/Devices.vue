@@ -6,6 +6,7 @@ import api from '../api'
 import SchemaForm from '../components/SchemaForm.vue'
 import { defaultModel, modelFromValue, valueFromModel } from '../utils/schema'
 import { encryptSensitive } from '../utils/crypto'
+import { usePagination } from '../utils/pagination'
 
 const DATA_TYPES = [
   'bool', 'int16', 'uint16', 'int32', 'uint32', 'int64',
@@ -39,6 +40,9 @@ const connections = ref([])
 const drivers = ref([])
 const statuses = ref([])
 const loading = ref(false)
+
+const { page, pageSize, pageSizes, total, sync, pageRows, onSizeChange } = usePagination()
+const pagedList = computed(() => pageRows(list.value))
 
 const dialogVisible = ref(false)
 const editingId = ref('')
@@ -86,6 +90,7 @@ async function load() {
       api.listDrivers(),
     ])
     list.value = d
+    sync(list.value)
     connections.value = c
     statuses.value = s
     drivers.value = drv
@@ -320,6 +325,12 @@ const valuesList = ref({ points: [] })
 const valuesLoading = ref(false)
 let valuesTimer = null
 
+const {
+  page: vPage, pageSize: vPageSize, pageSizes: vPageSizes, total: vTotal,
+  sync: vSync, pageRows: vPageRows, onSizeChange: vOnSizeChange,
+} = usePagination()
+const pagedValues = computed(() => vPageRows(valuesList.value.points || []))
+
 function fmtValue(v) {
   if (v === null || v === undefined) return '—'
   if (typeof v === 'object') return JSON.stringify(v)
@@ -336,6 +347,7 @@ async function loadValues() {
   valuesLoading.value = true
   try {
     valuesList.value = await api.getDeviceValues(valuesTarget.value.id)
+    vSync(valuesList.value.points || [])
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -401,7 +413,7 @@ onUnmounted(() => {
     </div>
 
     <div class="panel">
-      <el-table v-loading="loading" :data="list" empty-text="暂无设备">
+      <el-table v-loading="loading" :data="pagedList" empty-text="暂无设备">
         <el-table-column prop="name" label="名称" min-width="140" />
         <el-table-column label="连接" min-width="140">
           <template #default="{ row }">
@@ -442,6 +454,16 @@ onUnmounted(() => {
           </template>
         </el-table-column>
       </el-table>
+      <div class="pager">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :page-sizes="pageSizes"
+          :total="total"
+          layout="total, sizes, prev, pager, next, jumper"
+          @size-change="onSizeChange"
+        />
+      </div>
     </div>
 
     <!-- 设备编辑对话框 -->
@@ -624,7 +646,7 @@ onUnmounted(() => {
       destroy-on-close
       @closed="closeValues"
     >
-      <el-table v-loading="valuesLoading" :data="valuesList.points" empty-text="暂无采集数据">
+      <el-table v-loading="valuesLoading" :data="pagedValues" empty-text="暂无采集数据">
         <el-table-column prop="point" label="点位" min-width="140">
           <template #default="{ row }">
             <span class="mono">{{ row.point }}</span>
@@ -652,6 +674,16 @@ onUnmounted(() => {
           </template>
         </el-table-column>
       </el-table>
+      <div class="pager">
+        <el-pagination
+          v-model:current-page="vPage"
+          v-model:page-size="vPageSize"
+          :page-sizes="vPageSizes"
+          :total="vTotal"
+          layout="total, sizes, prev, pager, next, jumper"
+          @size-change="vOnSizeChange"
+        />
+      </div>
       <template #footer>
         <el-button @click="loadValues">刷新</el-button>
         <el-button type="primary" @click="valuesVisible = false">关闭</el-button>

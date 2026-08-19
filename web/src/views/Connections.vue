@@ -6,12 +6,16 @@ import api from '../api'
 import SchemaForm from '../components/SchemaForm.vue'
 import { defaultModel, modelFromValue, valueFromModel } from '../utils/schema'
 import { encryptSensitive } from '../utils/crypto'
+import { usePagination } from '../utils/pagination'
 
 const list = ref([])
 const drivers = ref([])
 const loading = ref(false)
 const dialogVisible = ref(false)
 const editingId = ref('')
+
+const { page, pageSize, pageSizes, total, sync, pageRows, onSizeChange } = usePagination()
+const pagedList = computed(() => pageRows(list.value))
 
 const form = reactive({ name: '', driver: '' })
 const configModel = ref({})
@@ -29,6 +33,7 @@ async function load() {
   try {
     const [c, d] = await Promise.all([api.listConnections(), api.listDrivers()])
     list.value = c
+    sync(list.value)
     drivers.value = d
   } finally {
     loading.value = false
@@ -108,7 +113,7 @@ onMounted(load)
     </div>
 
     <div class="panel">
-      <el-table v-loading="loading" :data="list" empty-text="暂无连接">
+      <el-table v-loading="loading" :data="pagedList" empty-text="暂无连接">
         <el-table-column prop="name" label="名称" min-width="150" />
         <el-table-column label="驱动" width="150">
           <template #default="{ row }">
@@ -127,6 +132,16 @@ onMounted(load)
           </template>
         </el-table-column>
       </el-table>
+      <div class="pager">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :page-sizes="pageSizes"
+          :total="total"
+          layout="total, sizes, prev, pager, next, jumper"
+          @size-change="onSizeChange"
+        />
+      </div>
     </div>
 
     <el-dialog

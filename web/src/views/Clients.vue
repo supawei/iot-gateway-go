@@ -1,8 +1,9 @@
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, CopyDocument } from '@element-plus/icons-vue'
 import api from '../api'
+import { usePagination } from '../utils/pagination'
 
 // scope 分组(与后端 docs/authz.md §3.1 矩阵对应),用于友好展示与多选。
 const SCOPE_GROUPS = [
@@ -60,6 +61,9 @@ for (const g of SCOPE_GROUPS) {
 const list = ref([])
 const loading = ref(false)
 
+const { page, pageSize, pageSizes, total, sync, pageRows, onSizeChange } = usePagination()
+const pagedList = computed(() => pageRows(list.value))
+
 const dialogVisible = ref(false)
 const editingId = ref('')
 const form = reactive({ name: '', scopes: [], enabled: true })
@@ -72,6 +76,7 @@ async function load() {
   loading.value = true
   try {
     list.value = await api.listClients()
+    sync(list.value)
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -152,7 +157,7 @@ onMounted(load)
       <p class="form-hint" style="margin-top: 0">
         为 MES/SCADA 等三方系统创建 API Key 并按接口授权;API Key 创建后仅展示一次。
       </p>
-      <el-table v-loading="loading" :data="list" empty-text="暂无三方系统">
+      <el-table v-loading="loading" :data="pagedList" empty-text="暂无三方系统">
         <el-table-column prop="name" label="名称" min-width="150" />
         <el-table-column label="权限" min-width="280">
           <template #default="{ row }">
@@ -181,6 +186,16 @@ onMounted(load)
           </template>
         </el-table-column>
       </el-table>
+      <div class="pager">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :page-sizes="pageSizes"
+          :total="total"
+          layout="total, sizes, prev, pager, next, jumper"
+          @size-change="onSizeChange"
+        />
+      </div>
     </div>
 
     <!-- 新建/编辑对话框 -->
