@@ -145,6 +145,11 @@ async function save() {
   const expr = compiledExpr.value
   if (!expr) { ElMessage.error(form.advanced ? '请填写表达式' : '请选择引用点位并填写条件'); return }
   if (form.refKeys.length === 0) { ElMessage.error('请选择至少一个引用点位'); return }
+  // 分段模式下每个引用点都必须填比较条件:空条件生成的表达式结果不是布尔,引擎会跳过该规则。
+  if (!form.advanced && form.conds.some((c) => !(c || '').trim())) {
+    ElMessage.error('请为每个引用点位填写条件(如 > 30、== "off")')
+    return
+  }
   const payload = {
     name: form.name, enabled: form.enabled, severity: form.severity,
     expr, referencedPoints: fromKeys(form.refKeys),
@@ -257,7 +262,8 @@ onMounted(load)
             </el-select>
           </div>
           <p class="form-hint">
-            填点位后的比较,如 &gt; 30、&lt;= 20、== "off"、!= "on";留空表示"有值即触发"。
+            填点位后的比较,如 &gt; 30、&lt;= 20、== "off"、!= "on";每个引用点都必须填写,
+            表达式需可求值为 true/false。
           </p>
         </el-form-item>
         <el-form-item v-else label="表达式" required>
