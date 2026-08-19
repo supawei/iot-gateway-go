@@ -105,9 +105,11 @@ func diskStats(paths ...string) map[string]diskStat {
 }
 
 func fsDiskStat(stat *syscall.Statfs_t) diskStat {
+	// Bsize 在 64 位与 32 位架构上类型不同(int64/int32),统一转 int64 再乘。
+	bsize := int64(stat.Bsize)
 	return diskStat{
-		total: int64(stat.Blocks) * stat.Bsize,
-		free:  int64(stat.Bavail) * stat.Bsize,
+		total: int64(stat.Blocks) * bsize,
+		free:  int64(stat.Bavail) * bsize,
 	}
 }
 
