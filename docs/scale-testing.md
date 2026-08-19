@@ -106,9 +106,16 @@ RSS            = X MB(进程常驻,重点看 ARM)
 - 处理层计数:`processing_points_in/passed/filtered/aggregated_total` 验证边缘计算在压测下不丢路径。
 - 内存:`process_rss_bytes` 是产品化关键指标(尤其 32 位 ARM)。
 
-### 6.1 已发现的现象(需进一步调查)
+### 6.1 已发现的现象(专项调查结论)
 
-- **子秒轮询未生效**:30 设备 `-interval-ms 500`(应 60 次/s)实测稳定在 **30 次/s**(= 1 次/设备/秒),即使全部在线、pool 32、无错误。`@every 500ms` 的 robfig/cron 调度在该规模下呈 1 秒级节拍,疑似 cron 子秒调度/唤醒行为所致。**建议作为专项调查**:确认是 robfig/cron v3.0.1 限制还是网关用法问题,再决定是否换用更精确的定时器(如 `time.Ticker` 批量调度)。
+- **子秒轮询未生效 → 已修复(2026-08-20)**。
+  - **根因**:**robfig/cron v3.0.1 限制**,非网关用法问题。`@every <d>` 解析后走 `ConstantDelaySchedule.Every()`:
+    - `<1s` 的间隔**钳到 1s**(`constantdelay.go:15-17`);
+    - 任意间隔的**亚秒余量被静默截掉**(`Delay = d - d%1s`,故 `@every 1500ms` 实际 = 1s);
+    - `Next()` 对齐秒边界(截断纳秒),同间隔设备在同一秒边界**集体触发**。
+  - 独立探针实测:同一 `cron.New()` 下 `@every 500ms / 1000ms / 1500ms` 在 3.2s 内**均只触发 3 次**(=1 次/秒),证实上述行为。
+  - **修复**:`internal/core/pollsched.go` 新增 `pollScheduler` 取代 cron——单 goroutine 定时器 + 小顶堆,**精确支持亚秒间隔、不截断余量**,并按 deviceID 哈希**相位错峰**(消除秒边界惊群),触发仍非阻塞投递 worker pool。`Scheduler` 轮询路径已切换。
+  - **修复后复测**:30 设备 `-interval-ms 500` → **59.9 次/s**(原 30/s);200 设备 `@1s` → 200.3 次/s(原 199.7/s,错峰后更平顺),0 错误、全部在线、任务队列 0/cap。
 - **配置爬坡**:大批量 REST 建设备时,scheduler 增量 reconcile 逐设备接入,全部上线耗时 = 设备数 × 每设备连接/首采时间。压测必须等全部上线再采样(见 §3 预热指引),否则速率被低估(200 设备预热不足时测得 62/s,充分预热后 200/s)。
 
 ## 7. ARMv7 专项(重点)
@@ -150,7 +157,7 @@ harness 适合分钟级吞吐基准;长稳(热泄漏/内存慢涨/SQLite 无限�
 | 现象 | 手段 |
 |---|---|
 | 队列逼近 cap / collect 掉速 | 增大 `-pool`(scheduler.poolSize) |
-| 子秒轮询只有 1/s | 调查 robfig/cron 子秒调度(§6.1),必要时改定时器 |
+| 子秒轮询只有 1/s | 已修复:pollScheduler 取代 cron(§6.1);若复现,先确认配置 intervalMs 确实 <1000 |
 | 输出 pending/dropped 非 0 | 增大输出批量(`flushInterval`/`batchMax`)或排查 broker |
 | RSS 逼近预算(ARM) | 减点位/降频;检查 SQLite 页缓存与补传队列上限(`backfillMax`) |
 | goroutines 慢涨 | 检查驱动连接/订阅/补传 goroutine 是否泄漏(长稳) |

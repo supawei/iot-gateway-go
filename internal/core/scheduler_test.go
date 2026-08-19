@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,17 +17,17 @@ import (
 
 type mockConn struct {
 	deviceID string
-	reads    int
+	reads    atomic.Int64 // worker 可能并发采集同一设备,计数需原子
 }
 
 func (c *mockConn) Read(_ context.Context, points []model.Point) ([]model.DataPoint, error) {
-	c.reads++
+	seq := c.reads.Add(1)
 	results := make([]model.DataPoint, len(points))
 	for i, p := range points {
 		results[i] = model.DataPoint{
 			DeviceID:  c.deviceID,
 			Point:     p.Name,
-			Value:     c.reads,
+			Value:     seq,
 			Timestamp: time.Now(),
 			Quality:   model.QualityGood,
 		}
@@ -300,6 +301,52 @@ func waitForOffline(t *testing.T, reg *status.Registry, deviceID string) {
 			t.Fatal("timeout waiting for offline status")
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+// TestSchedulerSubSecondPoll 验证亚秒级轮询端到端真实生效:IntervalMs=200 时
+// 1.1s 内应收到 ≈5 次采集(robfig/cron 的 @every 会把 200ms 钳成 1s,只能 1 次)。
+func TestSchedulerSubSecondPoll(t *testing.T) {
+	driver.Register("subsec", mockDriver{})
+
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	st.SaveConnection(model.Connection{ID: "c1", Name: "c1", Driver: "subsec", Config: []byte(`{}`)})
+	st.SaveDevice(model.Device{
+		ID: "d1", ConnectionID: "c1", Params: []byte(`{}`),
+		IntervalMs: 200, Enabled: true,
+		Points: []model.Point{{Name: "p1", Address: "holding:0", DataType: model.DataTypeInt16}},
+	})
+
+	dataPoints := make(chan model.DataPoint, 1024)
+	scheduler := NewScheduler(st, dataPoints, 4, status.NewRegistry(), values.NewRegistry(), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go scheduler.Run(ctx)
+
+	var got atomic.Int64
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-dataPoints:
+				got.Add(1)
+			}
+		}
+	}()
+
+	time.Sleep(1100 * time.Millisecond)
+	cancel()
+	<-readDone
+
+	if n := got.Load(); n < 4 {
+		t.Fatalf("datapoints in 1.1s at 200ms interval = %d, want >= 4 (cron-era was 1)", n)
 	}
 }
 

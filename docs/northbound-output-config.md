@@ -33,7 +33,7 @@ MQTT 密码、ThingsBoard accessToken 目前躺在 yaml 里,**API 不会返回**
 
 ### 3.2 输出热重载复杂度远高于设备热加载 🔴
 
-设备的"热加载"是 scheduler 内部重载(停 cron、重建采集)。输出热加载要动的链路完全不同:
+设备的"热加载"是 scheduler 内部重载(增量 reconcile,不重建调度器)。输出热加载要动的链路完全不同:
 
 - 输出在 `RunPipeline` 和 `NewScheduler` 里都是**启动时一次性传入**的切片;
 - 热切换输出需引入"可变输出注册表"(`OutputManager`):关闭旧连接 → 重建新输出 → **原子替换**;pipeline 按需读取、scheduler 的 `DeviceNotifier` 也要跟着换。

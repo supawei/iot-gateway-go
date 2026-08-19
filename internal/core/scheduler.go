@@ -9,8 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/robfig/cron/v3"
-
 	"iot-gateway-go/internal/driver"
 	"iot-gateway-go/internal/model"
 	"iot-gateway-go/internal/output"
@@ -21,8 +19,8 @@ import (
 
 const defaultInterval = 5 * time.Second
 
-// Scheduler 用 cron 统一调度采集任务,任务投递到 worker pool 执行。
-// 常驻 goroutine = cron 调度器 + poolSize 个 worker,与设备数解耦;
+// Scheduler 用 pollScheduler(替代 robfig/cron)统一调度采集任务,任务投递到 worker pool 执行。
+// 常驻 goroutine = 调度器(恒 1) + poolSize 个 worker,与设备数解耦;
 // 配置变更时**增量 reconcile**:只增删改受影响的设备/连接,保留未变设备的
 // 连接与采集,消除全量重载造成的采集空窗与连接重连。见 docs/incremental-hot-reload-design.md。
 type Scheduler struct {
@@ -38,7 +36,7 @@ type Scheduler struct {
 	// 以下采集基础设施跨 reload 持久(首次创建,进程关闭才销毁)。
 	mu            sync.Mutex
 	runtimes      map[string]*deviceRuntime // deviceID -> 运行态(仅 reload 单 goroutine 访问)
-	cron          *cron.Cron
+	sched         *pollScheduler
 	taskCh        chan collectTask
 	workersDone   <-chan struct{}
 	collectCtx    context.Context
@@ -64,8 +62,7 @@ type deviceRuntime struct {
 	conn     driver.Conn
 	mode     collectMode
 	// poll:
-	cronID cron.EntryID
-	job    *deviceJob
+	job *deviceJob
 	// diff 键与内容
 	connKey    string
 	params     json.RawMessage
@@ -138,7 +135,7 @@ func (s *Scheduler) reload() error {
 	return nil
 }
 
-// ensureInfra 创建跨 reload 持久的基础设施(cron / taskCh / workers / collectCtx)。
+// ensureInfra 创建跨 reload 持久的基础设施(pollScheduler / taskCh / workers / collectCtx)。
 func (s *Scheduler) ensureInfra() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,12 +146,12 @@ func (s *Scheduler) ensureInfra() {
 	s.collectCtx = collectCtx
 	s.collectCancel = cancel
 	// 任务队列容量取 2×poolSize:非阻塞投递、满则跳过(防堆积),缓冲只用于吸收
-	// 同一瞬间多个 cron 刻度同时触发(启动/热重载/间隔对齐)的突发,不做积压。
+	// 同一瞬间多个调度刻度同时触发(启动/热重载/间隔对齐)的突发,不做积压。
 	s.taskCh = make(chan collectTask, 2*s.poolSize)
 	s.workersDone = s.startWorkers(s.taskCh)
-	c := cron.New()
-	c.Start()
-	s.cron = c
+	ps := newPollScheduler()
+	ps.start()
+	s.sched = ps
 }
 
 // buildDesired 把设备列表组装为 reconcile 的期望计划(跳过禁用/无点位设备)。
@@ -326,18 +323,9 @@ func (s *Scheduler) updatePollDevice(rt *deviceRuntime, dd desiredDevice) bool {
 		return false // 设备参数变化(如从机地址)须重开设备级 conn
 	}
 	if rt.intervalMs != dd.device.IntervalMs {
-		// 间隔变化:替换 cron 条目(新 job 携带新点位)。
-		s.cron.Remove(rt.cronID)
-		job := &deviceJob{taskCh: s.taskCh, conn: rt.conn, deviceID: rt.deviceID, ctx: s.collectCtx}
-		job.setPoints(dd.device.Points)
-		id, err := s.cron.AddJob(intervalSpec(dd.device.IntervalMs), job)
-		if err != nil {
-			slog.Error("add cron job failed", "device", dd.device.ID, "err", err)
-			s.markOffline(dd.device.ID, err.Error())
-			return false
-		}
-		rt.job = job
-		rt.cronID = id
+		// 间隔变化:重排调度(复用同 job 指针,点位同时原地更新,不重连不重建)。
+		rt.job.setPoints(dd.device.Points)
+		s.sched.schedule(rt.deviceID, intervalOf(dd.device.IntervalMs), rt.job)
 		rt.intervalMs = dd.device.IntervalMs
 		return true
 	}
@@ -420,26 +408,22 @@ func (s *Scheduler) registerDevice(rt *deviceRuntime, dd desiredDevice) bool {
 		s.markOnline(device.ID, time.Now())
 		return true
 	}
-	// 轮询:注册 cron job。
+	// 轮询:注册到 pollScheduler(支持亚秒级精确间隔,替代 cron)。
 	rt.mode = collectPoll
 	job := &deviceJob{taskCh: s.taskCh, conn: rt.conn, deviceID: device.ID, ctx: s.collectCtx}
 	job.setPoints(device.Points)
-	id, err := s.cron.AddJob(intervalSpec(device.IntervalMs), job)
-	if err != nil {
-		slog.Error("add cron job failed", "device", device.ID, "err", err)
-		s.markOffline(device.ID, err.Error())
-		return false
-	}
+	s.sched.schedule(device.ID, intervalOf(device.IntervalMs), job)
 	rt.job = job
-	rt.cronID = id
 	rt.intervalMs = device.IntervalMs
 	return true
 }
 
-// stopDevice 停止单个设备:轮询移除 cron 条目,关闭设备连接(驱动池引用计数释放)。
+// stopDevice 停止单个设备:轮询移除调度条目,关闭设备连接(驱动池引用计数释放)。
 func (s *Scheduler) stopDevice(rt *deviceRuntime) {
 	if rt.mode == collectPoll && rt.job != nil {
-		s.cron.Remove(rt.cronID)
+		if s.sched != nil {
+			s.sched.remove(rt.deviceID)
+		}
 	}
 	if rt.conn != nil {
 		if err := rt.conn.Close(); err != nil {
@@ -448,17 +432,17 @@ func (s *Scheduler) stopDevice(rt *deviceRuntime) {
 	}
 }
 
-// stopCollectors 进程关闭时的整体清理:取消采集、停 cron、关 taskCh、等 workers、
+// stopCollectors 进程关闭时的整体清理:取消采集、停调度器、关 taskCh、等 workers、
 // 关闭全部设备连接。补传队列等持久化数据不动(跨重启续传)。
 func (s *Scheduler) stopCollectors() {
 	s.mu.Lock()
 	collectCancel := s.collectCancel
-	c := s.cron
+	sched := s.sched
 	taskCh := s.taskCh
 	workersDone := s.workersDone
 	runtimes := s.runtimes
 	s.collectCancel = nil
-	s.cron = nil
+	s.sched = nil
 	s.taskCh = nil
 	s.workersDone = nil
 	s.runtimes = nil
@@ -468,8 +452,8 @@ func (s *Scheduler) stopCollectors() {
 		return
 	}
 	collectCancel()
-	if c != nil {
-		<-c.Stop().Done()
+	if sched != nil {
+		sched.stop()
 	}
 	if taskCh != nil {
 		close(taskCh)
@@ -635,12 +619,12 @@ func (s *Scheduler) Stats() SchedulerStats {
 	}
 }
 
-// IsReady 指示采集基础设施(cron)已启动,供 /readyz 就绪探针。
-// store 已开 + 配置加载完成在装配期必然为真,故就绪判定主要看 cron 是否就绪。
+// IsReady 指示采集基础设施(调度器)已启动,供 /readyz 就绪探针。
+// store 已开 + 配置加载完成在装配期必然为真,故就绪判定主要看调度器是否就绪。
 func (s *Scheduler) IsReady() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cron != nil
+	return s.sched != nil
 }
 
 type collectTask struct {
@@ -672,8 +656,8 @@ func (j *deviceJob) getPoints() []model.Point {
 	return j.points
 }
 
-// Run 到达采集周期时触发:把采集任务非阻塞投递到 pool,满则跳过本次(防堆积)。
-func (j *deviceJob) Run() {
+// fire 到达采集周期时由 pollScheduler 触发:把采集任务非阻塞投递到 pool,满则跳过本次(防堆积)。
+func (j *deviceJob) fire() {
 	select {
 	case j.taskCh <- collectTask{ctx: j.ctx, conn: j.conn, points: j.getPoints(), deviceID: j.deviceID}:
 	default:
@@ -681,10 +665,11 @@ func (j *deviceJob) Run() {
 	}
 }
 
-func intervalSpec(intervalMs int) string {
+// intervalOf 把设备配置的毫秒间隔转成 Duration,非法值回落默认间隔。
+func intervalOf(intervalMs int) time.Duration {
 	interval := time.Duration(intervalMs) * time.Millisecond
 	if interval <= 0 {
 		interval = defaultInterval
 	}
-	return "@every " + interval.String()
+	return interval
 }

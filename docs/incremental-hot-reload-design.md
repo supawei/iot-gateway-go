@@ -2,7 +2,7 @@
 
 ## 1. 背景与问题
 
-当前 `Scheduler.reload()` 是**全量停-重建**:任何一次配置变更(`store.OnChange()` 覆盖连接/设备/点位/输出/网关 ID 的增删改)都会 `stopCollectors()`——取消全部 Read、停掉整个 cron、关闭全部设备连接,再按新配置并行重开所有连接。
+当前 `Scheduler.reload()` 是**全量停-重建**:任何一次配置变更(`store.OnChange()` 覆盖连接/设备/点位/输出/网关 ID 的增删改)都会 `stopCollectors()`——取消全部 Read、停掉整个调度器、关闭全部设备连接,再按新配置并行重开所有连接。
 
 带来的实际问题:
 
@@ -19,7 +19,7 @@ ROADMAP P3 项"增量热加载:scheduler 对设备/点位做 diff,增删改而�
 ### 2.1 目标
 
 - **未变的连接与设备零打扰**:编辑任一设备/点位/输出/网关 ID 时,其余设备的连接与采集完全不受影响。
-- **轮询设备(poll)原地更新**:点位/间隔变化不重连、不重建 cron 调度相位;参数(从机地址等)变化只换设备级 conn,物理连接经驱动连接池保持。
+- **轮询设备(poll)原地更新**:点位/间隔变化不重连、不重建调度相位;参数(从机地址等)变化只换设备级 conn,物理连接经驱动连接池保持。
 - **连接级粒度**:连接配置/驱动变化只重开该连接下的设备;连接删除/新增同理。
 - **订阅/监听连接**:纯新增设备可增量;涉及删除/点位变化的设备时,以"整组重开"兜底(共享订阅无单设备卸载能力),但**不影响其他连接**。
 - **首次加载 = 现状**:首次(无运行时状态)按新配置全量打开,行为与当前一致。
@@ -40,7 +40,7 @@ store.OnChange → reload()
   ├─ 对比当前 runtimes(deviceID → runtime)
   ├─ 生成操作集:keep / add(开+注册) / remove(停)
   │                 / poll-update(原地改点/换job) / group-restart(整组停+重开)
-  └─ 执行:仅对受影响设备操作;任务池与 cron 实例跨 reload 保持
+  └─ 执行:仅对受影响设备操作;任务池与调度器(pollScheduler)实例跨 reload 保持
 ```
 
 **diff 键**:
@@ -68,8 +68,7 @@ type deviceRuntime struct {
     deviceID string
     conn     driver.Conn
     mode     collectMode
-    // poll: cron 条目 + 任务
-    cronID   cron.EntryID
+    // poll: 调度条目 + 任务
     job      *deviceJob
     // subscribe/listen: 设备级 ctx 取消 + 退出信号
     cancel   context.CancelFunc
@@ -80,7 +79,7 @@ type deviceRuntime struct {
 }
 ```
 
-`Scheduler` 字段调整:以 `runtimes map[string]*deviceRuntime` 取代 `conns []driver.Conn`;`cron`/`taskCh`/`workers`/`collectCtx` 变为**跨 reload 持久**(首次创建,shutdown 才销毁)。
+`Scheduler` 字段调整:以 `runtimes map[string]*deviceRuntime` 取代 `conns []driver.Conn`;`pollScheduler`/`taskCh`/`workers`/`collectCtx` 变为**跨 reload 持久**(首次创建,shutdown 才销毁)。
 
 ### 4.2 执行顺序与并发
 
@@ -93,7 +92,7 @@ type deviceRuntime struct {
 | 变化 | 操作 | 连接影响 |
 |---|---|---|
 | 仅点位(`points`)变 | `job.setPoints(new)` | 无 |
-| `intervalMs` 变 | 移除旧 cron 条目 + 新增新间隔 job(新点位) | 无 |
+| `intervalMs` 变 | `pollScheduler.schedule` 重排(复用同 job,点位同时原地更新) | 无 |
 | 设备参数(`params`,如 slaveId)变 | 新开设备 conn(驱动池复用物理连接)+ 重建 job,再关旧 conn | 物理连接不动 |
 | `enabled` false | 视为 remove | — |
 
@@ -104,9 +103,9 @@ type deviceRuntime struct {
 
 ### 4.5 持久化资源与关闭
 
-- `cron` 实例、`taskCh`、worker pool、`collectCtx` 在首个 reload 创建,后续 reload 复用;
-- 设备停止:轮询 → `cron.Remove(entryID)` + `conn.Close()`;订阅/监听 → `cancel()` + 等 `subDone` + `conn.Close()`(组内最后一个触发共享资源释放);
-- `Run` ctx 取消(进程关闭):停 cron、关 taskCh、等 workers、按组释放全部连接(等价旧 `stopCollectors`)。
+- `pollScheduler` 实例、`taskCh`、worker pool、`collectCtx` 在首个 reload 创建,后续 reload 复用;
+- 设备停止:轮询 → `pollScheduler.remove(deviceID)` + `conn.Close()`;订阅/监听 → `cancel()` + 等 `subDone` + `conn.Close()`(组内最后一个触发共享资源释放);
+- `Run` ctx 取消(进程关闭):停调度器、关 taskCh、等 workers、按组释放全部连接(等价旧 `stopCollectors`)。
 
 ### 4.6 状态与通知
 
@@ -139,10 +138,10 @@ type deviceRuntime struct {
 
 ### 8.1 单测(核心 reconcile)
 
-- 无变化 reload → 所有设备 keep(连接对象引用不变、cron 条目数不变)。
+- 无变化 reload → 所有设备 keep(连接对象引用不变、调度条目数不变)。
 - 新增设备 → 仅新增打开;其余设备 conn 对象不变。
 - 删除设备 → 仅关闭该设备 conn。
-- 轮询点位变化 → 原地更新(conn 不变、job 点位更新);间隔变化 → cron 条目替换。
+- 轮询点位变化 → 原地更新(conn 不变、job 点位更新);间隔变化 → 调度重排。
 - 轮询参数变化 → conn 重开(驱动池复用),物理连接不关。
 - 连接配置变化 → 该连接组全部重开,其他连接不动。
 - 订阅/监听组:纯新增增量;删除/改点整组重开;其他连接不动。
@@ -159,7 +158,7 @@ type deviceRuntime struct {
 2. poll 设备增量(原地更新/换 job)。
 3. 连接组管理(新增/删除/配置变更)。
 4. 订阅/监听组重开兜底。
-5. 持久化 cron/taskCh/workers 改造 + 关闭路径。
+5. 持久化 pollScheduler/taskCh/workers 改造 + 关闭路径。
 6. 测试 + 文档(ROADMAP / 本设计文档实施记录)。
 
 ## 10. 决策记录
@@ -169,7 +168,7 @@ type deviceRuntime struct {
 | diff 粒度 | 设备级 `sig` + 连接级 `connKey` | 一次配置保存可能改多设备多连接;键驱动 diff 天然覆盖批量变更 |
 | 轮询设备 | 原地更新点位/换 job,参数变化仅换设备 conn | 轮询是主流(Modbus),物理连接复用即最大收益 |
 | 订阅/监听组 | 纯新增增量;删除/改点整组重开 | 驱动共享订阅无单设备卸载接口;整组重开保证正确性,其余连接不受影响 |
-| 持久化资源 | cron/taskCh/workers/collectCtx 跨 reload 复用 | 避免"每次保存都重建调度骨架";配合增量操作 |
+| 持久化资源 | pollScheduler/taskCh/workers/collectCtx 跨 reload 复用 | 避免"每次保存都重建调度骨架";配合增量操作 |
 | 连接配置变更 | 该组先停后开 | 驱动池按 ConnectionID 复用,不先释放则复用旧配置连接 |
 | 操作执行顺序 | 重开组先开新后关旧(同 connKey 内) | 驱动池复用物理连接,无空窗 |
 
@@ -178,10 +177,10 @@ type deviceRuntime struct {
 ### 11.1 代码变更(2026-08-18)
 
 - **`internal/core/scheduler.go`**(重构):
-  - 新增 `deviceRuntime`(connKey/sig/mode/job/cronID)与 `collectMode`(poll/subscribe/listen)。
+  - 新增 `deviceRuntime`(connKey/sig/mode/job)与 `collectMode`(poll/subscribe/listen)。
   - `reload()` 改为 diff + reconcile:按连接组增量执行 keep/add/remove/poll-update/group-restart;未变设备零操作。
-  - `cron`/`taskCh`/workers/`collectCtx` 跨 reload 持久(首次创建,进程关闭才销毁);`stopCollectors` 仅用于进程关闭。
-  - 轮询设备:点位变化 `deviceJob.setPoints` 原地更新;间隔变化替换 cron 条目;参数变化先开新 conn(驱动池复用物理连接)再关旧。
+  - `pollScheduler`/`taskCh`/workers/`collectCtx` 跨 reload 持久(首次创建,进程关闭才销毁);`stopCollectors` 仅用于进程关闭。
+  - 轮询设备:点位变化 `deviceJob.setPoints` 原地更新;间隔变化 `pollScheduler.schedule` 重排;参数变化先开新 conn(驱动池复用物理连接)再关旧。
   - 订阅/监听组:纯新增增量;删除/点位/参数变化整组重开(共享订阅无单设备卸载能力)。
 - **`internal/core/scheduler_incremental_test.go`**(新增):10 个增量场景测试(无变化零操作 / 增删设备 / 点位·间隔·参数变化 / 连接配置变化 / 订阅组纯新增与整组重开 / 输出变更不碰调度器)。
 
@@ -193,3 +192,10 @@ type deviceRuntime struct {
 ### 11.3 已知限制(见 §7)
 
 - 订阅/监听组内删除或点位变化走整组重开(该组短暂断采,其他连接不受影响);驱动级 `Reconfigure`(单设备卸载)留待未来按需实现。
+
+### 11.4 调度器替换 cron(2026-08-20)
+
+- **背景**:robfig/cron v3.0.1 的 `@every` 把 <1s 间隔钳到 1s、并静默截掉亚秒余量(`1500ms` 实际 = 1s),`Next()` 还对齐秒边界导致同间隔设备集体触发。见 [scale-testing.md §6.1](scale-testing.md)。
+- **`internal/core/pollsched.go`**(新增):`pollScheduler` 取代 cron——单 goroutine + 小顶堆(按下次触发时间)到点**批量触发**,精确支持亚秒间隔、不截断余量;首次触发相位 = fnv(deviceID)%interval 错峰,消除秒边界惊群;固定速率不追补;remove 惰性删除。
+- **`internal/core/scheduler.go`**(改):轮询注册/间隔变化改走 `s.sched.schedule`;停止走 `s.sched.remove`;`IsReady` 看 `sched != nil`;`deviceJob.Run` → `fire`;`intervalSpec` → `intervalOf`。
+- **验证**:`pollsched_test.go` 新增亚秒节拍/remove/reschedule/堆序/多设备错峰测试;`scheduler_test.go` 新增亚秒端到端用例;压测 30 设备 `@500ms` 从 30/s → **59.9/s**,200 设备 `@1s` 200.3/s 无回归。

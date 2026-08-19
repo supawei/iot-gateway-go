@@ -80,15 +80,15 @@ P4 运维监控三件套:**指标采集** / **健康检查端点** / **结构化
 ### 2.3 设计取舍
 
 - **不做 per-device 标签**:设备数多会爆 Prometheus 基数;采集侧计数为全局。输出数量少,带 `output_id`。
-- **不做采集延迟直方图**:手写直方图代价高,且 Modbus cron 轮询周期已知,延迟分布价值有限。需要时再引 `client_golang`。
+- **不做采集延迟直方图**:手写直方图代价高,且 Modbus 轮询周期已知,延迟分布价值有限。需要时再引 `client_golang`。
 - **磁盘路径**:只统计数据库与日志所在分区(关心点:会不会涨满),非全部挂载点;同分区则多条同值,基数极低可接受。
 
 ## 3. 健康检查端点(`/livez` `/readyz`)
 
 - 均匿名、始终开,给负载均衡/k8s 探针用。
 - `/livez`:`baseCtx` 未取消返 200,优雅退出期返 503(让探针停发流量)。
-- `/readyz`:**store 已开 + 配置加载完成 + scheduler cron 已注册** 返 200,否则 503。
-  - store/config 在装配到挂路由阶段已必然为真,就绪判定主要看 `Scheduler.IsReady()`(cron 非空)。
+- `/readyz`:**store 已开 + 配置加载完成 + scheduler 调度器已启动** 返 200,否则 503。
+  - store/config 在装配到挂路由阶段已必然为真,就绪判定主要看 `Scheduler.IsReady()`(pollScheduler 非空)。
   - **不含输出连接健康**:上游全断不应让网关被判 not-ready 而被负载均衡误杀。
 - 响应体:小 JSON `{status, checks:{scheduler}}` 便于排障。
 
@@ -120,7 +120,7 @@ P4 运维监控三件套:**指标采集** / **健康检查端点** / **结构化
 
 - `Scheduler` 新增 `collectCount` / `collectErrors`(`atomic.Int64`,worker 并发自增)。
 - `collectOnce` 入口累加 `collectCount`,Read 失败与"全部点位质量坏"两条路径累加 `collectErrors`。
-- 新增 `SchedulerStats` + `Stats()`(原子读计数 + 锁内读 taskCh len/cap)+ `IsReady()`(cron 非空)。
+- 新增 `SchedulerStats` + `Stats()`(原子读计数 + 锁内读 taskCh len/cap)+ `IsReady()`(pollScheduler 非空)。
 - 仅轮询路径在 collectOnce 计数;订阅/监听为持续推送无"执行次数",其数据计入 `processing_points_in_total`(emit 入口)。
 
 ## 6. 装配(`cmd/gateway/main.go`)
