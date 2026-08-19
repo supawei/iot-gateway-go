@@ -53,8 +53,9 @@ function pointLabel(k) {
   return `point("${deviceId}","${point}")`
 }
 
-const compiledExpr = computed(() => {
-  if (form.advanced) return (form.expr || '').trim()
+// segmentedExpr 由分段配置(引用点位 + 条件 + 连接符)实时拼出完整表达式。
+// 既供"表达式预览"展示,也用于切到高级模式时回填输入框。
+function segmentedExpr() {
   const segments = form.refKeys.map((k, i) => {
     const cond = (form.conds[i] || '').trim()
     return `${pointLabel(k)}${cond}`
@@ -64,6 +65,20 @@ const compiledExpr = computed(() => {
     const op = form.joinOps[i] || '&&'
     return `${seg} ${op}`
   }).join(' ')
+}
+
+const compiledExpr = computed(() => {
+  if (form.advanced) return (form.expr || '').trim()
+  return segmentedExpr()
+})
+
+// 切到高级模式:把"表达式预览"里分段模式拼出的表达式填入输入框,方便在其基础上继续编辑。
+// 仅当输入框为空时回填,避免覆盖用户已手动编辑过的表达式。
+watch(() => form.advanced, (advanced, was) => {
+  if (advanced && !was && !(form.expr || '').trim()) {
+    const expr = segmentedExpr().trim()
+    if (expr) form.expr = expr
+  }
 })
 
 // 顶层按 && / || 分段反解;含括号(嵌套)或段非 point() 开头则判为复杂表达式,回退高级模式
