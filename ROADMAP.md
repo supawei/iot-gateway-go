@@ -10,7 +10,7 @@
 |---|---|---|
 | **P1** | MVP:Modbus→MQTT 端到端链路 + REST 配置 + SQLite | ✅ 已完成 (2026-08-13) |
 | **P2** | 验证扩展性:第二协议 / 第二北向输出 / 能力接口 | ✅ 已完成 (2026-08-16) |
-| **P3** | 增强:边缘计算、断网补传、更多云平台、增量热加载、API 鉴权 | 🔶 进行中(仅剩云平台对接;边缘计算/输出重试退避已完成) |
+| **P3** | 增强:边缘计算、规则告警、断网补传、云平台对接、增量热加载、API 鉴权 | ✅ 已完成 (2026-08-19) |
 | **P4** | 产品化:更多协议、Sparkplug B、运维监控、物模型映射 | ⬜ 待开始 |
 
 ---
@@ -90,7 +90,8 @@
 - [x] **增量热加载**:配置变更时 scheduler 对设备/点位 diff,只增删改受影响部分;未变设备连接与采集零打扰,轮询点位/间隔原地更新,订阅监听组增删整组重开(设计见 [docs/incremental-hot-reload-design.md](docs/incremental-hot-reload-design.md),2026-08-18)
 - [x] **MQTT 批量发布**:默认即时单条(向后兼容);配置 `flushInterval` 启用批量——同设备窗口内多点聚合为一条(数组 payload),`batchMax` 拆条,减少高频发布次数;并已接入断网补传(失败落库恢复重放),数据完整性闭环(设计见 [docs/mqtt-batch-publish-design.md](docs/mqtt-batch-publish-design.md),2026-08-18)
 - [x] **边缘计算**:过滤(死区/阈值/质量)+ 时间窗口聚合,插入 pipeline 处理层;配置随设备点位存 SQLite + Web UI 编辑 + 增量热重载;派生点走完整输出链路(设计见 [docs/edge-computing-design.md](docs/edge-computing-design.md),2026-08-18)
-- [ ] **云 IoT 平台对接**:阿里云 / 华为云 / AWS IoT 输出插件(ThingsBoard 已作为 P2 验证完成;smardaten 已接入,见 [docs/smardaten-iot.md](docs/smardaten-iot.md))
+- [x] **规则告警**:跨设备/跨点位表达式告警——规则引用任意设备点位最新值求值,`true` 边沿触发、条件解除自动恢复;写入 SQLite 告警表并定向投递到规则指定的输出(MQTT 告警 topic),含新鲜度/防抖保护与触发值快照(`context`);配置经 Web UI「告警规则」页保存即热重载,记录在「告警记录」页查看(设计见 [docs/alert-engine-design.md](docs/alert-engine-design.md),使用见 [docs/alert-rules.md](docs/alert-rules.md),2026-08-19)
+- [x] **云 IoT 平台对接**:smardaten-iot 私有云平台**全双工**对接——属性上报/设备状态/服务调用(下行写)/配置下发/设备诊断(真实协议探测)/`application.json` 自动同步(平台为配置权威源)+ 孤儿清理,复用 mqttutil 韧性与断网补传,Core 零改动(见 [docs/smardaten-iot.md](docs/smardaten-iot.md),2026-08-18);**阿里云 IoT 平台已停服**(停止开发与功能更新,2026-02-01 起停止新开通),不再支持;华为云/AWS IoT 按真实需求驱动(见暂缓清单)
 - [x] **输出侧连接级重试与退避**:MQTT 类输出(mqtt/thingsboard/smardaten)非阻塞建连 + ConnectRetry 指数退避 + 发布有界等待 + 构建失败隔离(设计见 [docs/mqtt-resilience-design.md](docs/mqtt-resilience-design.md),2026-08-18)
 
 ---
@@ -100,7 +101,7 @@
 - [ ] **更多协议**:Profinet / EtherCAT(工业以太网实时)、现场总线
 - [x] **Sparkplug B 支持**:工业 MQTT 事实标准——网关作为边缘节点发布 STATE/NBIRTH/DBIRTH/DDATA/DDEATH/NDEATH,手写 protobuf 编码 + 别名压缩,复用 mqttutil 韧性,接入设备上下线通知与断网补传(设计见 [docs/sparkplugb.md](docs/sparkplugb.md),2026-08-18)
 - [ ] **运维监控**:指标采集、结构化日志增强、健康检查端点
-- [ ] **物模型映射层**:在设备-点位之上加云物模型(TSL)映射,对接云平台语义(草案见 [docs/tsl-mapping.md](docs/tsl-mapping.md))
+- [ ] **物模型映射层**:在设备-点位之上加云物模型(TSL)映射,对接云平台语义(草案见 [docs/tsl-mapping.md](docs/tsl-mapping.md));**边界**:smardaten 路线下语义由平台 `application.json` 承担(网关自动同步,无需自建 TSL),该层仅在对接物模型驱动的公有云(华为云/AWS IoT,见暂缓清单)时需要
 
 ---
 
@@ -109,7 +110,7 @@
 | 项 | 暂缓理由 | 触发条件 |
 |---|---|---|
 | `go plugin` / 进程外插件 | 起步无隔离需求,坑多/复杂度高 | 出现不稳定驱动需隔离或第三方插件 |
-| 规则引擎 | 非 MVP 核心,复杂度高 | P3 或真实需求驱动(断网补传已 P3 完成) |
+| 公有云物模型平台(华为云/AWS IoT)对接 | 阿里云 IoT 平台已停服;smardaten 已覆盖真实云平台全双工对接,公有云语义由平台侧承担;对接物模型驱动公有云需 TSL 映射(P4)前置 | 对接特定公有云的真实需求 |
 | 工业以太网(Profinet/EtherCAT)/ 现场总线 | P1/P2 聚焦 Modbus、OPC UA | P4 或有真实设备需求 |
 | Sparkplug B 下行(NCMD/DCMD) | 出生/数据/死亡已完成(2026-08-18),下行暂缓 | 有 host 下发指令的真实需求 |
 
@@ -142,4 +143,5 @@
 | 配置/数据库变更 | 开发期不做迁移,直接改结构 | 未发布无存量部署;发布后再引入版本化迁移,见 [docs/development-conventions.md](docs/development-conventions.md) |
 | 网关 ID | 从 config.yaml 迁到 SQLite(默认预置,Web UI 可改) | 属运行时配置而非引导配置,与输出配置一致走数据库 + 热重载;yaml 只留引导项 |
 | 边缘处理 | 插入 pipeline 处理层(`processing.Engine`),配置挂在设备点位 | 单点位过滤 + 聚合,避免通用规则引擎;派生点走完整输出链路;原始值仍进 values 实时值 |
+| 规则告警 | 独立 `alert.Engine`(expr-lang 表达式),引用点位最新值边沿触发 + 定向投递 | 通用规则引擎过重;告警判定与边缘处理职责分离——边缘处理管数据清洗,告警引擎管跨设备规则判定与投递;不做事件溯源/复杂编排;触发快照入 SQLite |
 | Sparkplug B | 手写最小 protobuf 编码器 + 独立输出插件,别名压缩 + 出生/死亡生命周期 | 避免引入 protobuf 运行时依赖;复用 mqttutil/补传/DeviceNotifier;先发布后消费(下行按需扩展) |
