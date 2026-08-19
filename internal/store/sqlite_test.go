@@ -160,6 +160,99 @@ func TestDeleteDevice(t *testing.T) {
 	}
 }
 
+// TestManagedByRoundTrip managed_by 标记随 Save/Get 持久化;手工配置的实体默认空串。
+func TestManagedByRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	saveSampleConnection(t, st)
+
+	conn := sampleConnection()
+	conn.ManagedBy = "smardaten:out-1"
+	if err := st.SaveConnection(conn); err != nil {
+		t.Fatalf("save connection: %v", err)
+	}
+	got, err := st.GetConnection("conn-1")
+	if err != nil {
+		t.Fatalf("get connection: %v", err)
+	}
+	if got.ManagedBy != "smardaten:out-1" {
+		t.Errorf("connection ManagedBy = %q, want smardaten:out-1", got.ManagedBy)
+	}
+
+	dev := sampleDevice("d-managed")
+	dev.ManagedBy = "smardaten:out-1"
+	if err := st.SaveDevice(dev); err != nil {
+		t.Fatalf("save device: %v", err)
+	}
+	gotDev, err := st.GetDevice("d-managed")
+	if err != nil {
+		t.Fatalf("get device: %v", err)
+	}
+	if gotDev.ManagedBy != "smardaten:out-1" {
+		t.Errorf("device ManagedBy = %q, want smardaten:out-1", gotDev.ManagedBy)
+	}
+
+	// 手工配置(未设 ManagedBy)持久化后为空串
+	manual := sampleDevice("d-manual")
+	if err := st.SaveDevice(manual); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := st.GetDevice("d-manual"); d.ManagedBy != "" {
+		t.Errorf("manual device ManagedBy = %q, want empty", d.ManagedBy)
+	}
+}
+
+// TestListManagedIDs ListManaged* 只返回指定 manager 创建管理的实体 ID,
+// 不同 manager(不同 smardaten 输出实例)互不干扰,手工配置不在结果中。
+func TestListManagedIDs(t *testing.T) {
+	st := newTestStore(t)
+
+	c1 := sampleConnection() // ID=conn-1
+	c1.ManagedBy = "smardaten:out-1"
+	c2 := sampleConnection()
+	c2.ID = "c2"
+	c2.ManagedBy = "smardaten:out-2"
+	manual := sampleConnection()
+	manual.ID = "manual-conn"
+	for _, c := range []model.Connection{c1, c2, manual} {
+		if err := st.SaveConnection(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 设备均引用 conn-1,满足外键
+	d1 := sampleDevice("d1")
+	d1.ManagedBy = "smardaten:out-1"
+	d2 := sampleDevice("d2")
+	d2.ManagedBy = "smardaten:out-2"
+	dm := sampleDevice("dm") // 手工设备,ManagedBy 空
+	for _, d := range []model.Device{d1, d2, dm} {
+		if err := st.SaveDevice(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	connIDs, err := st.ListManagedConnectionIDs("smardaten:out-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(connIDs) != 1 || connIDs[0] != "conn-1" {
+		t.Errorf("ListManagedConnectionIDs(out-1) = %v, want [conn-1]", connIDs)
+	}
+	devIDs, err := st.ListManagedDeviceIDs("smardaten:out-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devIDs) != 1 || devIDs[0] != "d2" {
+		t.Errorf("ListManagedDeviceIDs(out-2) = %v, want [d2]", devIDs)
+	}
+	if ids, _ := st.ListManagedConnectionIDs("smardaten:none"); len(ids) != 0 {
+		t.Errorf("unknown manager returned %v, want empty", ids)
+	}
+	if ids, _ := st.ListManagedDeviceIDs("smardaten:none"); len(ids) != 0 {
+		t.Errorf("unknown manager returned %v, want empty", ids)
+	}
+}
+
 func TestAddAndDeletePoint(t *testing.T) {
 	st := newTestStore(t)
 	saveSampleConnection(t, st)

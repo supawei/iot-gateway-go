@@ -17,10 +17,11 @@ import (
 
 const schema = `
 CREATE TABLE IF NOT EXISTS connection (
-    id     TEXT PRIMARY KEY,
-    name   TEXT NOT NULL,
-    driver TEXT NOT NULL,
-    config TEXT NOT NULL
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    driver     TEXT NOT NULL,
+    config     TEXT NOT NULL,
+    managed_by TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS device (
     id            TEXT PRIMARY KEY,
@@ -29,6 +30,7 @@ CREATE TABLE IF NOT EXISTS device (
     params        TEXT NOT NULL DEFAULT '{}',
     interval_ms   INTEGER NOT NULL,
     enabled       INTEGER NOT NULL DEFAULT 1,
+    managed_by    TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (connection_id) REFERENCES connection(id) ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS point (
@@ -139,6 +141,16 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("evolve point schema: %w", err)
 	}
+	// 开发期结构演进:为历史 connection/device 表补 managed_by 列(幂等;标记
+	// 平台同步创建的实体,取代 settings 表的 JSON 登记,见 internal/output/smardaten/sync.go)。
+	if _, err := db.Exec(`ALTER TABLE connection ADD COLUMN managed_by TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+		db.Close()
+		return nil, fmt.Errorf("evolve connection schema: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE device ADD COLUMN managed_by TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+		db.Close()
+		return nil, fmt.Errorf("evolve device schema: %w", err)
+	}
 	// 预置默认网关设置(幂等):数据库为空时内置默认网关 ID。
 	if _, err := db.Exec(
 		`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`,
@@ -208,9 +220,9 @@ func (s *Store) notify() {
 
 func (s *Store) SaveConnection(conn model.Connection) error {
 	_, err := s.db.Exec(
-		`INSERT INTO connection (id, name, driver, config) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, driver=excluded.driver, config=excluded.config`,
-		conn.ID, conn.Name, conn.Driver, string(conn.Config),
+		`INSERT INTO connection (id, name, driver, config, managed_by) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, driver=excluded.driver, config=excluded.config, managed_by=excluded.managed_by`,
+		conn.ID, conn.Name, conn.Driver, string(conn.Config), conn.ManagedBy,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert connection: %w", err)
@@ -220,7 +232,7 @@ func (s *Store) SaveConnection(conn model.Connection) error {
 }
 
 func (s *Store) ListConnections() ([]model.Connection, error) {
-	rows, err := s.db.Query("SELECT id, name, driver, config FROM connection")
+	rows, err := s.db.Query("SELECT id, name, driver, config, managed_by FROM connection")
 	if err != nil {
 		return nil, fmt.Errorf("query connections: %w", err)
 	}
@@ -237,7 +249,7 @@ func (s *Store) ListConnections() ([]model.Connection, error) {
 }
 
 func (s *Store) GetConnection(id string) (model.Connection, error) {
-	row := s.db.QueryRow("SELECT id, name, driver, config FROM connection WHERE id = ?", id)
+	row := s.db.QueryRow("SELECT id, name, driver, config, managed_by FROM connection WHERE id = ?", id)
 	conn, err := scanConnection(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -246,6 +258,25 @@ func (s *Store) GetConnection(id string) (model.Connection, error) {
 		return model.Connection{}, fmt.Errorf("get connection: %w", err)
 	}
 	return conn, nil
+}
+
+// ListManagedConnectionIDs 列出由 manager 自动创建管理的连接 ID(用于平台同步
+// 的孤儿清理;手工配置的连接 managed_by 为空,不会出现在结果中)。
+func (s *Store) ListManagedConnectionIDs(manager string) ([]string, error) {
+	rows, err := s.db.Query("SELECT id FROM connection WHERE managed_by = ?", manager)
+	if err != nil {
+		return nil, fmt.Errorf("query managed connections: %w", err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan managed connection: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // DeleteConnection 删除连接;若有 device 引用则返回 ErrConnectionInUse。
@@ -265,7 +296,7 @@ func (s *Store) DeleteConnection(id string) error {
 }
 
 func (s *Store) ListDevices() ([]model.Device, error) {
-	devices, err := s.queryDevices("SELECT id, name, connection_id, params, interval_ms, enabled FROM device")
+	devices, err := s.queryDevices("SELECT id, name, connection_id, params, interval_ms, enabled, managed_by FROM device")
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +315,7 @@ func (s *Store) ListDevices() ([]model.Device, error) {
 }
 
 func (s *Store) GetDevice(id string) (model.Device, error) {
-	devices, err := s.queryDevices("SELECT id, name, connection_id, params, interval_ms, enabled FROM device WHERE id = ?", id)
+	devices, err := s.queryDevices("SELECT id, name, connection_id, params, interval_ms, enabled, managed_by FROM device WHERE id = ?", id)
 	if err != nil {
 		return model.Device{}, err
 	}
@@ -333,6 +364,25 @@ func (s *Store) DeleteDevice(id string) error {
 	}
 	s.notify()
 	return nil
+}
+
+// ListManagedDeviceIDs 列出由 manager 自动创建管理的设备 ID(用于平台同步的
+// 孤儿清理;手工配置的设备 managed_by 为空,不会出现在结果中)。
+func (s *Store) ListManagedDeviceIDs(manager string) ([]string, error) {
+	rows, err := s.db.Query("SELECT id FROM device WHERE managed_by = ?", manager)
+	if err != nil {
+		return nil, fmt.Errorf("query managed devices: %w", err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan managed device: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // SetDeviceEnabled 批量启停用:只改 enabled 字段,不动 params/points。
@@ -679,7 +729,7 @@ type rowScanner interface {
 func scanConnection(row rowScanner) (model.Connection, error) {
 	var conn model.Connection
 	var config string
-	if err := row.Scan(&conn.ID, &conn.Name, &conn.Driver, &config); err != nil {
+	if err := row.Scan(&conn.ID, &conn.Name, &conn.Driver, &config, &conn.ManagedBy); err != nil {
 		return model.Connection{}, fmt.Errorf("scan connection: %w", err)
 	}
 	conn.Config = json.RawMessage(config)
@@ -690,7 +740,7 @@ func scanDevice(row rowScanner) (model.Device, error) {
 	var device model.Device
 	var connectionID, params string
 	var enabled int
-	if err := row.Scan(&device.ID, &device.Name, &connectionID, &params, &device.IntervalMs, &enabled); err != nil {
+	if err := row.Scan(&device.ID, &device.Name, &connectionID, &params, &device.IntervalMs, &enabled, &device.ManagedBy); err != nil {
 		return model.Device{}, fmt.Errorf("scan device: %w", err)
 	}
 	device.ConnectionID = connectionID
@@ -745,9 +795,9 @@ func saveDeviceTx(tx *sql.Tx, device model.Device) error {
 		params = json.RawMessage(`{}`)
 	}
 	_, err := tx.Exec(
-		`INSERT INTO device (id, name, connection_id, params, interval_ms, enabled) VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, connection_id=excluded.connection_id, params=excluded.params, interval_ms=excluded.interval_ms, enabled=excluded.enabled`,
-		device.ID, device.Name, device.ConnectionID, string(params), device.IntervalMs, enabled,
+		`INSERT INTO device (id, name, connection_id, params, interval_ms, enabled, managed_by) VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, connection_id=excluded.connection_id, params=excluded.params, interval_ms=excluded.interval_ms, enabled=excluded.enabled, managed_by=excluded.managed_by`,
+		device.ID, device.Name, device.ConnectionID, string(params), device.IntervalMs, enabled, device.ManagedBy,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert device: %w", err)

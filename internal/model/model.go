@@ -7,11 +7,14 @@ import (
 
 // Connection 是传输层连接,可被多个设备共享(如同一串口或 DTU 下的多个 Modbus 从站)。
 // Config 只含传输参数(怎么到达总线);设备级协议参数(从机地址等)归 Device.Params。
+// ManagedBy 标记该连接的自动管理来源(如 "smardaten:<outputID>");空串表示
+// Web UI 手工配置,不会被平台同步的孤儿清理删除。见 internal/output/smardaten/sync.go。
 type Connection struct {
-	ID     string          `json:"id"`
-	Name   string          `json:"name"`
-	Driver string          `json:"driver"`
-	Config json.RawMessage `json:"config"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Driver    string          `json:"driver"`
+	Config    json.RawMessage `json:"config"`
+	ManagedBy string          `json:"managedBy,omitempty"`
 }
 
 // User 是登录管理员账号。密码只存 bcrypt 哈希,不落明文。
@@ -44,6 +47,7 @@ type Output struct {
 
 // Device 表示一个物理或逻辑设备,引用一个 Connection 并携带设备级协议参数。
 // IntervalMs 为设备级采集周期,连读时按此周期批量读取所有点位。
+// ManagedBy 同 Connection.ManagedBy,标记设备的自动管理来源(空串=手工配置)。
 type Device struct {
 	ID           string          `json:"id"`
 	Name         string          `json:"name"`
@@ -52,6 +56,7 @@ type Device struct {
 	Points       []Point         `json:"points"`
 	IntervalMs   int             `json:"intervalMs"`
 	Enabled      bool            `json:"enabled"`
+	ManagedBy    string          `json:"managedBy,omitempty"`
 }
 
 // Point 描述单个采集点:采什么、怎么采,以及可选的边缘处理(过滤/聚合)。

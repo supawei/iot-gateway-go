@@ -27,10 +27,12 @@ func (f *fakeStore) ListDevices() ([]model.Device, error) {
 	}
 	return out, nil
 }
-func (f *fakeStore) DeleteConnection(string) error                { return nil }
-func (f *fakeStore) DeleteDevice(string) error                    { return nil }
-func (f *fakeStore) GetSetting(string) (string, bool, error)      { return "", false, nil }
-func (f *fakeStore) SetSetting(string, string) error              { return nil }
+func (f *fakeStore) DeleteConnection(string) error                     { return nil }
+func (f *fakeStore) DeleteDevice(string) error                         { return nil }
+func (f *fakeStore) ListManagedConnectionIDs(string) ([]string, error) { return nil, nil }
+func (f *fakeStore) ListManagedDeviceIDs(string) ([]string, error)     { return nil, nil }
+func (f *fakeStore) GetSetting(string) (string, bool, error)           { return "", false, nil }
+func (f *fakeStore) SetSetting(string, string) error                   { return nil }
 
 // fakeBackfill 记录被落库补传的点。
 type fakeBackfill struct {

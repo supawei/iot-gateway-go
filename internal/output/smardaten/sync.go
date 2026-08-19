@@ -164,6 +164,8 @@ func (o *platformOutput) syncToGateway(cfg *ApplicationConfig) {
 			slog.Warn("skip controller, convert failed", "controllerId", ctrl.ControllerID, "err", err)
 			continue
 		}
+		// 打管理标记:本实体由平台同步创建/管理,孤儿清理据此区分手工配置。
+		conn.ManagedBy = o.managedBy()
 		if o.connectionNeedsSave(conn) {
 			if err := o.store.SaveConnection(conn); err != nil {
 				slog.Error("save connection failed", "controllerId", ctrl.ControllerID, "err", err)
@@ -193,6 +195,8 @@ func (o *platformOutput) syncToGateway(cfg *ApplicationConfig) {
 			slog.Warn("skip device, convert failed", "deviceId", dev.DeviceID, "err", err)
 			continue
 		}
+		// 打管理标记:本设备由平台同步创建/管理,孤儿清理据此区分手工配置。
+		device.ManagedBy = o.managedBy()
 		if o.deviceNeedsSave(device) {
 			if err := o.store.SaveDevice(device); err != nil {
 				slog.Error("save device failed", "deviceId", dev.DeviceID, "err", err)
@@ -211,14 +215,17 @@ func (o *platformOutput) syncToGateway(cfg *ApplicationConfig) {
 
 // deleteOrphanSynced 删除此前由平台同步管理、但本次配置中已不存在的连接与设备。
 //
-// 管理集合(controllerId/deviceId)持久化在 store 的 settings 表(按 output 实例隔离),
-// 重启后依然有效,天然区分"平台同步创建"与"Web UI 手工配置"——只清理前者。
-// 删除顺序:先设备后连接(连接被设备引用时删除会失败)。删除失败的孤儿保留在
-// 管理集合中,待引用解除后下次同步重试。
+// 管理集合不再落 settings 表:同步创建/更新的连接与设备在自身行上带 managed_by
+// 标记(见 syncToGateway),孤儿集合 = 带本输出实例标记、但本次配置中已不存在的实体,
+// 直接按行查询即可,无需任何 JSON 登记/写回。天然区分"平台同步创建"与
+// "Web UI 手工配置"(后者 managed_by 为空)——只清理前者。
+// 删除顺序:先设备后连接(连接被设备引用时删除会失败)。删除失败的孤儿仍带
+// managed_by 标记,下次同步自然再次进入候选集合重试,无需额外持久化。
 func (o *platformOutput) deleteOrphanSynced(cfg *ApplicationConfig) {
 	if o.store == nil {
 		return
 	}
+	manager := o.managedBy()
 
 	// 本次配置中存在的 controller/device ID 集合(以此为"应保留"的权威集)。
 	presentConns := make(map[string]bool)
@@ -230,106 +237,55 @@ func (o *platformOutput) deleteOrphanSynced(cfg *ApplicationConfig) {
 		presentDevs[dev.DeviceID] = true
 	}
 
-	connKey, devKey := o.managedConnectionKey(), o.managedDeviceKey()
-	prevConns := o.loadManagedIDs(connKey)
-	prevDevs := o.loadManagedIDs(devKey)
-
-	// 先删设备:平台已移除的设备
-	persistDevs := make(map[string]bool, len(presentDevs))
-	for id := range presentDevs {
-		persistDevs[id] = true
+	// 先删设备:带标记但平台已移除的设备
+	prevDevs, err := o.store.ListManagedDeviceIDs(manager)
+	if err != nil {
+		slog.Warn("list managed device ids failed, skip orphan cleanup", "manager", manager, "err", err)
+		return
 	}
-	for id := range prevDevs {
+	for _, id := range prevDevs {
 		if presentDevs[id] {
 			continue
 		}
 		if err := o.store.DeleteDevice(id); err != nil {
-			slog.Warn("delete orphan device failed, keep tracked for retry", "deviceId", id, "err", err)
-			persistDevs[id] = true
+			slog.Warn("delete orphan device failed, kept tracked for retry", "deviceId", id, "err", err)
 			continue
 		}
 		slog.Info("deleted orphan device (removed from platform config)", "deviceId", id)
 	}
 
-	// 再删连接:平台已移除的控制器
-	persistConns := make(map[string]bool, len(presentConns))
-	for id := range presentConns {
-		persistConns[id] = true
+	// 再删连接:带标记但平台已移除的控制器
+	prevConns, err := o.store.ListManagedConnectionIDs(manager)
+	if err != nil {
+		slog.Warn("list managed connection ids failed, skip orphan cleanup", "manager", manager, "err", err)
+		return
 	}
-	for id := range prevConns {
+	for _, id := range prevConns {
 		if presentConns[id] {
 			continue
 		}
 		if err := o.store.DeleteConnection(id); err != nil {
-			slog.Warn("delete orphan connection failed, keep tracked for retry", "connectionId", id, "err", err)
-			persistConns[id] = true
+			slog.Warn("delete orphan connection failed, kept tracked for retry", "connectionId", id, "err", err)
 			continue
 		}
 		slog.Info("deleted orphan connection (removed from platform config)", "connectionId", id)
 	}
-
-	// 持久化当前管理集合(供下次同步判断删除;删除失败的孤儿保留跟踪以重试)。
-	o.saveManagedIDs(connKey, persistConns)
-	o.saveManagedIDs(devKey, persistDevs)
 }
 
-// ---------- 孤儿清理:平台同步管理集合 ----------
+// ---------- 孤儿清理:管理标记 ----------
 
-// managedConnectionKey / managedDeviceKey 返回本输出实例的连接/设备管理集合在
-// settings 表中的键。按 output 实例隔离,避免多个 smardaten 输出实例互相干扰。
-func (o *platformOutput) managedConnectionKey() string {
-	return "smardaten.sync.managed.connections." + o.managedScope()
+// managedBy 返回本输出实例的平台管理标记,写入 connection/device 的 managed_by
+// 列。按 output 实例隔离,避免多个 smardaten 输出实例互相清理对方创建的实体。
+func (o *platformOutput) managedBy() string {
+	return "smardaten:" + o.managedScope()
 }
 
-func (o *platformOutput) managedDeviceKey() string {
-	return "smardaten.sync.managed.devices." + o.managedScope()
-}
-
-// managedScope 返回本输出实例的管理集合隔离键(outputID;直接构造时回退 default)。
+// managedScope 返回本输出实例的隔离键(outputID;直接构造时回退 default)。
 func (o *platformOutput) managedScope() string {
 	if o.outputID != "" {
 		return o.outputID
 	}
 	return "default"
-}
-
-// loadManagedIDs 读取此前由平台同步管理的 ID 集合。
-func (o *platformOutput) loadManagedIDs(key string) map[string]bool {
-	set := make(map[string]bool)
-	if o.store == nil {
-		return set
-	}
-	raw, ok, err := o.store.GetSetting(key)
-	if err != nil || !ok || raw == "" {
-		return set
-	}
-	var ids []string
-	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
-		return set
-	}
-	for _, id := range ids {
-		set[id] = true
-	}
-	return set
-}
-
-// saveManagedIDs 持久化当前由平台同步管理的 ID 集合。
-func (o *platformOutput) saveManagedIDs(key string, set map[string]bool) {
-	if o.store == nil {
-		return
-	}
-	ids := make([]string, 0, len(set))
-	for id := range set {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	raw, err := json.Marshal(ids)
-	if err != nil {
-		return
-	}
-	if err := o.store.SetSetting(key, string(raw)); err != nil {
-		slog.Error("persist managed ids failed", "key", key, "err", err)
-	}
 }
 
 // connectionNeedsSave 目标连接当前不存在或内容不同才写入。
@@ -350,19 +306,22 @@ func (o *platformOutput) deviceNeedsSave(target model.Device) bool {
 	return !deviceEqual(cur, target)
 }
 
-// connectionEqual 判断存储中的连接与目标内容是否一致。
+// connectionEqual 判断存储中的连接与目标内容是否一致(含管理标记,便于
+// 手工连接被平台覆盖后打上 managed_by,以及内容未变时跳过无谓写入)。
 func connectionEqual(cur, target model.Connection) bool {
 	return cur.Name == target.Name &&
 		cur.Driver == target.Driver &&
+		cur.ManagedBy == target.ManagedBy &&
 		jsonEqual(cur.Config, target.Config)
 }
 
-// deviceEqual 判断存储中的设备与目标内容是否一致(含点位列表)。
+// deviceEqual 判断存储中的设备与目标内容是否一致(含点位列表与管理标记)。
 func deviceEqual(cur, target model.Device) bool {
 	return cur.Name == target.Name &&
 		cur.ConnectionID == target.ConnectionID &&
 		cur.IntervalMs == target.IntervalMs &&
 		cur.Enabled == target.Enabled &&
+		cur.ManagedBy == target.ManagedBy &&
 		jsonEqual(cur.Params, target.Params) &&
 		pointsEqual(cur.Points, target.Points)
 }

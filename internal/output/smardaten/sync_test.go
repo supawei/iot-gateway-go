@@ -564,8 +564,8 @@ func TestSyncKeepsManualEntities(t *testing.T) {
 	}
 }
 
-// TestSyncOrphanPersistentAcrossRestart 管理集合持久化在 settings,新实例(同 outputID,
-// 模拟重启)仍能据此清理孤儿。
+// TestSyncOrphanPersistentAcrossRestart 同步创建实体带 managed_by 标记(存行上),
+// 新实例(同 outputID,模拟重启)仍能据此清理孤儿。
 func TestSyncOrphanPersistentAcrossRestart(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
@@ -577,7 +577,7 @@ func TestSyncOrphanPersistentAcrossRestart(t *testing.T) {
 		t.Fatalf("c1 not synced: %v", err)
 	}
 
-	// 第二"进程"实例(同 outputID,读到持久化管理集合)
+	// 第二"进程"实例(同 outputID,按行上标记识别管理实体)
 	o2 := &platformOutput{store: st, outputID: "out-1"}
 	o2.syncToGateway(syncConfigWith(nil))
 
@@ -586,7 +586,7 @@ func TestSyncOrphanPersistentAcrossRestart(t *testing.T) {
 	}
 }
 
-// TestSyncOrphanPerInstanceIsolation 不同 output 实例的管理集合互不干扰。
+// TestSyncOrphanPerInstanceIsolation 不同 output 实例的管理标记互不干扰。
 func TestSyncOrphanPerInstanceIsolation(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
@@ -613,7 +613,7 @@ func TestSyncOrphanPerInstanceIsolation(t *testing.T) {
 }
 
 // TestSyncOrphanConnectionInUseRetained 连接仍被手工设备引用时删除失败,
-// 管理集合保留该连接,引用解除后下次同步重试清理。
+// 连接行保留 managed_by 标记,引用解除后下次同步重试清理。
 func TestSyncOrphanConnectionInUseRetained(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
@@ -637,12 +637,97 @@ func TestSyncOrphanConnectionInUseRetained(t *testing.T) {
 		t.Fatalf("in-use connection c1 should be retained: %v", err)
 	}
 
-	// 手工设备删除后,下次同步应清理 c1(管理集合仍跟踪它)
+	// 手工设备删除后,下次同步应清理 c1(连接行仍带标记,可重试)
 	if err := st.DeleteDevice("manual-dev"); err != nil {
 		t.Fatal(err)
 	}
 	o.syncToGateway(syncConfigWith(nil))
 	if _, err := st.GetConnection("c1"); err == nil {
 		t.Fatal("c1 should be deleted once no longer in use")
+	}
+}
+
+// TestSyncMarksManagedBy 同步创建的连接/设备在自身行上打 managed_by 标记
+// (方案C,不再落 settings JSON),手工配置的实体不带标记;孤儿清理据此区分。
+func TestSyncMarksManagedBy(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	o := &platformOutput{store: st, outputID: "out-1"}
+
+	o.syncToGateway(syncConfigWith([]string{"c1"}))
+
+	conn, err := st.GetConnection("c1")
+	if err != nil {
+		t.Fatalf("get c1: %v", err)
+	}
+	if conn.ManagedBy != "smardaten:out-1" {
+		t.Errorf("synced connection ManagedBy = %q, want %q", conn.ManagedBy, "smardaten:out-1")
+	}
+	dev, err := st.GetDevice("dev-c1")
+	if err != nil {
+		t.Fatalf("get dev-c1: %v", err)
+	}
+	if dev.ManagedBy != "smardaten:out-1" {
+		t.Errorf("synced device ManagedBy = %q, want %q", dev.ManagedBy, "smardaten:out-1")
+	}
+
+	// 手工配置的实体不带标记
+	manualConn := model.Connection{ID: "manual-conn", Name: "manual", Driver: "modbus", Config: json.RawMessage(`{"mode":"tcp"}`)}
+	if err := st.SaveConnection(manualConn); err != nil {
+		t.Fatal(err)
+	}
+	manualDev := model.Device{ID: "manual-dev", Name: "manual-dev", ConnectionID: "manual-conn", Params: json.RawMessage(`{}`), IntervalMs: 5000, Enabled: true}
+	if err := st.SaveDevice(manualDev); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := st.GetConnection("manual-conn"); c.ManagedBy != "" {
+		t.Errorf("manual connection ManagedBy = %q, want empty", c.ManagedBy)
+	}
+	if d, _ := st.GetDevice("manual-dev"); d.ManagedBy != "" {
+		t.Errorf("manual device ManagedBy = %q, want empty", d.ManagedBy)
+	}
+
+	// ListManaged* 只含本实例同步创建、且按实例隔离
+	connIDs, err := st.ListManagedConnectionIDs("smardaten:out-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(connIDs) != 1 || connIDs[0] != "c1" {
+		t.Errorf("ListManagedConnectionIDs = %v, want [c1]", connIDs)
+	}
+	devIDs, err := st.ListManagedDeviceIDs("smardaten:out-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devIDs) != 1 || devIDs[0] != "dev-c1" {
+		t.Errorf("ListManagedDeviceIDs = %v, want [dev-c1]", devIDs)
+	}
+	if ids, _ := st.ListManagedConnectionIDs("smardaten:out-other"); len(ids) != 0 {
+		t.Errorf("other instance saw managed conns %v, want empty", ids)
+	}
+}
+
+// TestSyncOrphanNoSettingsRegistry 方案C下孤儿清理不再写 settings 的 JSON 登记:
+// 同步/清理后 settings 表不应存在 smardaten.sync.managed.* 键,孤儿清理完全
+// 依赖实体行的 managed_by 标记。
+func TestSyncOrphanNoSettingsRegistry(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	o := &platformOutput{store: st, outputID: "out-1"}
+
+	o.syncToGateway(syncConfigWith([]string{"c1", "c2"}))
+	o.syncToGateway(syncConfigWith([]string{"c1"})) // 平台移除 c2
+
+	if _, ok, _ := st.GetSetting("smardaten.sync.managed.connections.out-1"); ok {
+		t.Error("settings still has legacy managed-connections key")
+	}
+	if _, ok, _ := st.GetSetting("smardaten.sync.managed.devices.out-1"); ok {
+		t.Error("settings still has legacy managed-devices key")
+	}
+	if _, err := st.GetConnection("c2"); err == nil {
+		t.Error("orphan c2 should still be deleted via managed_by marker")
+	}
+	if _, err := st.GetConnection("c1"); err != nil {
+		t.Errorf("c1 should remain: %v", err)
 	}
 }

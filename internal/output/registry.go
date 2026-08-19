@@ -57,7 +57,7 @@ type WriteFunc func(ctx context.Context, deviceID, point string, value interface
 // StoreAccessor 是插件访问网关配置存储的接口。
 // 实现者为 *store.Store;只暴露插件所需的访问方法,避免插件直接依赖 store 包。
 // smardaten-iot 的配置同步用 Get* 做"内容对比、跳过无谓写入",
-// 用 Delete*/GetSetting/SetSetting 清理"平台已移除的实体"(见 sync.go);
+// 用 Delete*/ListManaged* 清理"平台已移除的实体"(见 sync.go);
 // sparkplugb 的 birth 消息用 ListDevices 枚举全部设备(见 sparkplugb.go)。
 type StoreAccessor interface {
 	SaveConnection(conn model.Connection) error
@@ -67,14 +67,16 @@ type StoreAccessor interface {
 	ListDevices() ([]model.Device, error)
 
 	// 配置同步的孤儿清理:删除平台同步创建、但已从平台配置移除的连接/设备。
-	// DeleteConnection 在仍有设备引用时返回 store.ErrConnectionInUse(不可强删,
-	// 调用方应保留该连接的同步跟踪、等引用解除后下次同步重试)。
+	// 同步创建的实体在 connection/device 表上带 managed_by 标记(区分"平台同步
+	// 创建"与"Web UI 手工配置",后者不删);ListManaged* 枚举本输出实例管理的
+	// ID 集合,DeleteConnection 在仍有设备引用时返回 store.ErrConnectionInUse
+	// (不可强删,调用方保留该连接的标记、等引用解除后下次同步重试)。
 	DeleteConnection(id string) error
 	DeleteDevice(id string) error
+	ListManagedConnectionIDs(manager string) ([]string, error)
+	ListManagedDeviceIDs(manager string) ([]string, error)
 
-	// 持久化"平台同步管理集合":sync 把本输出实例同步过的 controllerId/deviceId
-	// 记录在 settings 表(按输出实例隔离),重启后据此清理已移除的实体,
-	// 并区分"平台同步创建"与"Web UI 手工配置"(后者不删)。
+	// 网关级设置(settings 表):网关 ID 等配置项。
 	GetSetting(key string) (string, bool, error)
 	SetSetting(key, value string) error
 }
