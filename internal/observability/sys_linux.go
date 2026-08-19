@@ -37,18 +37,18 @@ func parseProcRSS(data []byte) (int64, bool) {
 	return 0, false
 }
 
-// systemMemUsedPercent 读 /proc/meminfo,返回 (MemTotal - MemAvailable) / MemTotal * 100。
-// 用 MemAvailable(含可回收缓存)而非 MemFree,反映实际可用压力。
-func systemMemUsedPercent() (float64, bool) {
+// systemMem 读 /proc/meminfo,返回总内存与可用内存(字节)。
+// 可用内存用 MemAvailable(含可回收缓存)而非 MemFree,反映实际可用余量。
+func systemMem() (memStat, bool) {
 	data, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
-		return 0, false
+		return memStat{}, false
 	}
-	return memUsedPercent(data)
+	return parseMemInfo(data)
 }
 
-// memUsedPercent 从 /proc/meminfo 内容算系统内存占用率。
-func memUsedPercent(data []byte) (float64, bool) {
+// parseMemInfo 从 /proc/meminfo 内容解析总内存与可用内存(kB→字节)。
+func parseMemInfo(data []byte) (memStat, bool) {
 	var total, avail int64
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
@@ -63,16 +63,34 @@ func memUsedPercent(data []byte) (float64, bool) {
 		}
 	}
 	if total <= 0 {
-		return 0, false
+		return memStat{}, false
 	}
-	return float64(total-avail) / float64(total) * 100, true
+	return memStat{total: total * 1024, avail: avail * 1024}, true
 }
 
-// diskUsedPercent 对各路径所在文件系统返回 used%。
-// used% = (Blocks - Bavail) / Blocks * 100,Bavail 为非 root 可用块(运维视角)。
+// systemMemUsedPercent 读 /proc/meminfo,返回内存占用率 ((total-avail)/total×100)。
+func systemMemUsedPercent() (float64, bool) {
+	ms, ok := systemMem()
+	if !ok {
+		return 0, false
+	}
+	return memUsedPercentOf(ms), true
+}
+
+// memUsedPercent 从 /proc/meminfo 内容算系统内存占用率。
+func memUsedPercent(data []byte) (float64, bool) {
+	ms, ok := parseMemInfo(data)
+	if !ok {
+		return 0, false
+	}
+	return memUsedPercentOf(ms), true
+}
+
+// diskStats 对各路径所在文件系统返回总容量与可用容量(字节)。
+// 可用容量取 Bavail(非 root 可用块,运维视角,与 used% 口径一致)。
 // dataPath 必查;logPath 非空则并查(同分区则两条同值,可接受且基数极低)。
-func diskUsedPercent(paths ...string) map[string]float64 {
-	out := make(map[string]float64)
+func diskStats(paths ...string) map[string]diskStat {
+	out := make(map[string]diskStat)
 	var stat syscall.Statfs_t
 	for _, p := range paths {
 		if p == "" {
@@ -81,14 +99,23 @@ func diskUsedPercent(paths ...string) map[string]float64 {
 		if err := syscall.Statfs(p, &stat); err != nil {
 			continue
 		}
-		out[p] = fsUsedPercent(&stat)
+		out[p] = fsDiskStat(&stat)
 	}
 	return out
 }
 
-func fsUsedPercent(stat *syscall.Statfs_t) float64 {
-	if stat.Blocks == 0 {
-		return 0
+func fsDiskStat(stat *syscall.Statfs_t) diskStat {
+	return diskStat{
+		total: int64(stat.Blocks) * stat.Bsize,
+		free:  int64(stat.Bavail) * stat.Bsize,
 	}
-	return float64(stat.Blocks-stat.Bavail) / float64(stat.Blocks) * 100
+}
+
+// diskUsedPercent 对各路径所在文件系统返回 used% ((total-free)/total×100)。
+func diskUsedPercent(paths ...string) map[string]float64 {
+	out := make(map[string]float64)
+	for p, s := range diskStats(paths...) {
+		out[p] = diskUsedPercentOf(s)
+	}
+	return out
 }

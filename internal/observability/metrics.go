@@ -78,14 +78,23 @@ func (c *Collector) writeRuntimeMetrics(b *strings.Builder) {
 		metric(b, "gauge", "iot_gateway_process_rss_bytes", "Gateway process resident set size in bytes.")
 		sample(b, "iot_gateway_process_rss_bytes", "", float64(rss))
 	}
-	if used, ok := systemMemUsedPercent(); ok {
+	if ms, ok := systemMem(); ok {
+		metric(b, "gauge", "iot_gateway_mem_total_bytes", "System total physical memory in bytes.")
+		sample(b, "iot_gateway_mem_total_bytes", "", float64(ms.total))
+		metric(b, "gauge", "iot_gateway_mem_available_bytes", "System memory available for new processes in bytes (MemAvailable).")
+		sample(b, "iot_gateway_mem_available_bytes", "", float64(ms.avail))
 		metric(b, "gauge", "iot_gateway_mem_used_percent", "System memory used percent.")
-		sample(b, "iot_gateway_mem_used_percent", "", used)
+		sample(b, "iot_gateway_mem_used_percent", "", memUsedPercentOf(ms))
 	}
-	if paths := diskUsedPercent(c.dataPath, c.logPath); len(paths) > 0 {
+	if stats := diskStats(c.dataPath, c.logPath); len(stats) > 0 {
+		metric(b, "gauge", "iot_gateway_disk_total_bytes", "Filesystem total bytes of data/log partitions.")
+		metric(b, "gauge", "iot_gateway_disk_free_bytes", "Filesystem free bytes (non-root available) of data/log partitions.")
 		metric(b, "gauge", "iot_gateway_disk_used_percent", "Filesystem used percent of data/log partitions.")
-		for _, p := range sortedKeys(paths) {
-			sample(b, "iot_gateway_disk_used_percent", labels("path", p), paths[p])
+		for _, p := range sortedKeys(stats) {
+			s := stats[p]
+			sample(b, "iot_gateway_disk_total_bytes", labels("path", p), float64(s.total))
+			sample(b, "iot_gateway_disk_free_bytes", labels("path", p), float64(s.free))
+			sample(b, "iot_gateway_disk_used_percent", labels("path", p), diskUsedPercentOf(s))
 		}
 	}
 }
@@ -198,7 +207,7 @@ func boolToFloat(b bool) float64 {
 }
 
 // sortedKeys 返回 map 的键排序,保证指标输出稳定(便于测试快照与人类阅读)。
-func sortedKeys(m map[string]float64) []string {
+func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

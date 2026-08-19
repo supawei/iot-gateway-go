@@ -288,6 +288,33 @@ cd web && npm install && npm run dev   # http://localhost:5173, /api 代理到 :
 
 详见 [web/README.md](web/README.md)。
 
+## 运维监控
+
+网关提供三个**匿名**运维端点(不进 access log、不鉴权,供 Prometheus / 负载均衡探针直接抓取):
+
+| 端点 | 用途 |
+|---|---|
+| `/metrics` | Prometheus text exposition 指标(纯标准库手写,零监控依赖) |
+| `/livez` | 存活探针:进程存活返 200,优雅退出期返 503 |
+| `/readyz` | 就绪探针:scheduler 采集基础设施已启动返 200,否则 503 |
+
+**运行时指标**(全局,Linux 专属;抓取时即时读内存态,不落历史):
+
+| 指标 | 含义 |
+|---|---|
+| `iot_gateway_uptime_seconds` / `iot_gateway_info{version,commit}` / `iot_gateway_go_goroutines` | 运行时长 / 构建信息 / goroutine 数 |
+| `iot_gateway_process_rss_bytes` | 网关进程常驻内存(字节) |
+| `iot_gateway_mem_total_bytes` | 系统**总内存**(字节) |
+| `iot_gateway_mem_available_bytes` | 系统**剩余可用内存**(字节,MemAvailable 含可回收缓存) |
+| `iot_gateway_mem_used_percent` | 系统内存占用率 |
+| `iot_gateway_disk_total_bytes{path}` | 网关所在分区(数据库/日志)**总磁盘空间**(字节) |
+| `iot_gateway_disk_free_bytes{path}` | 所在分区**剩余磁盘空间**(字节,非 root 可用) |
+| `iot_gateway_disk_used_percent{path}` | 所在分区磁盘占用率 |
+
+另含采集/调度、设备在线数、边缘处理、各北向输出(按 `output_id` 标签)指标族;字节级指标与
+used_percent 同源同口径,可直接画 Grafana "总量-剩余"面积图。完整指标清单与设计见
+[docs/ops-monitoring-design.md](docs/ops-monitoring-design.md)。
+
 ## 扩展开发
 
 新增协议/平台均为**插件式**,无需改动核心;驱动与输出的配置表单、API、Web UI、状态面板自动适配。
@@ -328,6 +355,7 @@ internal/
   status/             设备运行时状态
   values/             采集值实时注册表
   backfill/           断网补传持久化队列
+  observability/      运维监控(指标 /metrics、健康探针 /livez /readyz、访问日志、日志增强)
   config/             YAML 引导配置
 docs/                  设计文档与开发指引(驱动/输出/协议/韧性等)
 web/                  管理界面(Vue 3 + Element Plus,dist 经 go:embed 内嵌)

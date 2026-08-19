@@ -67,8 +67,15 @@ P4 运维监控三件套:**指标采集** / **健康检查端点** / **结构化
 | `iot_gateway_info{version,commit}` | gauge | =1,构建信息 |
 | `iot_gateway_go_goroutines` | gauge | `runtime.NumGoroutine` |
 | `iot_gateway_process_rss_bytes` | gauge | `/proc/self/status` VmRSS |
-| `iot_gateway_mem_used_percent` | gauge | `/proc/meminfo`(MemTotal−MemAvailable)/MemTotal×100 |
-| `iot_gateway_disk_used_percent{path}` | gauge | 数据库与日志所在分区 used%(`syscall.Statfs`,Blocks−Bavail) |
+| `iot_gateway_mem_total_bytes` | gauge | `/proc/meminfo` MemTotal(kB→字节) |
+| `iot_gateway_mem_available_bytes` | gauge | `/proc/meminfo` MemAvailable(kB→字节,含可回收缓存) |
+| `iot_gateway_mem_used_percent` | gauge | (MemTotal−MemAvailable)/MemTotal×100 |
+| `iot_gateway_disk_total_bytes{path}` | gauge | `syscall.Statfs` Blocks×Bsize |
+| `iot_gateway_disk_free_bytes{path}` | gauge | `syscall.Statfs` Bavail×Bsize(非 root 可用) |
+| `iot_gateway_disk_used_percent{path}` | gauge | (Blocks−Bavail)/Blocks×100 |
+
+> 内存/磁盘四项字节级指标(总/剩余)与 used_percent 同源同口径,便于 Grafana 直接
+> 画"总量-剩余"面积图,无需 percent→byte 反推。
 
 ### 2.3 设计取舍
 
@@ -128,5 +135,5 @@ P4 运维监控三件套:**指标采集** / **健康检查端点** / **结构化
 
 ## 7. 测试
 
-- `observability` 包:`LoggerHandler` 公共字段端到端(真实 slog.Info 路径)、`AccessLog` request_id 复用/生成 + 状态捕获、`MetricsHandler` 输出格式与各指标族、`Livez`/`Readyz` 状态码、系统指标解析(`/proc` 解析 + 临时目录 Statfs)。
+- `observability` 包:`LoggerHandler` 公共字段端到端(真实 slog.Info 路径)、`AccessLog` request_id 复用/生成 + 状态捕获、`MetricsHandler` 输出格式与各指标族、`Livez`/`Readyz` 状态码、系统指标解析(`/proc` 解析 + 临时目录 Statfs),另含字节级系统指标渲染端到端(`mem_total/available_bytes`、`disk_total/free_bytes` 名称与 path 标签、非零值)。
 - `core` 包:`Stats`/`IsReady` 与采集错误计数(成功路径 + Read 失败路径)。

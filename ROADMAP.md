@@ -100,7 +100,7 @@
 
 - [ ] **更多协议**:Profinet / EtherCAT(工业以太网实时)、现场总线
 - [x] **Sparkplug B 支持**:工业 MQTT 事实标准——网关作为边缘节点发布 STATE/NBIRTH/DBIRTH/DDATA/DDEATH/NDEATH,手写 protobuf 编码 + 别名压缩,复用 mqttutil 韧性,接入设备上下线通知与断网补传(设计见 [docs/sparkplugb.md](docs/sparkplugb.md),2026-08-18)
-- [x] **运维监控**:指标采集、结构化日志增强、健康检查端点--纯标准库手写 Prometheus text exposition(零新增依赖,零 client_golang/otel),`/metrics` + `/livez` + `/readyz` 匿名端点;access log 中间件带 request_id(复用客户端 header);日志经 slog handler 包装注入 gateway_id + component 公共字段(component 由调用方 PC 推导,零调用点改动);采集侧补全局采集计数/错误计数,运行时含磁盘占用率/系统内存占用率/进程 RSS;沿用 output-status-design 的纯内存可观测边界(不落历史指标、不做运维阈值告警推送,运维告警交外部 Alertmanager)(设计见 [docs/ops-monitoring-design.md](docs/ops-monitoring-design.md),2026-08-19)
+- [x] **运维监控**:指标采集、结构化日志增强、健康检查端点--纯标准库手写 Prometheus text exposition(零新增依赖,零 client_golang/otel),`/metrics` + `/livez` + `/readyz` 匿名端点;access log 中间件带 request_id(复用客户端 header);日志经 slog handler 包装注入 gateway_id + component 公共字段(component 由调用方 PC 推导,零调用点改动);采集侧补全局采集计数/错误计数,运行时含系统内存总/剩余字节与占用率、网关所在分区磁盘总/剩余字节与占用率、进程 RSS;沿用 output-status-design 的纯内存可观测边界(不落历史指标、不做运维阈值告警推送,运维告警交外部 Alertmanager)(设计见 [docs/ops-monitoring-design.md](docs/ops-monitoring-design.md),2026-08-19)
 - [ ] **物模型映射层**:在设备-点位之上加云物模型(TSL)映射,对接云平台语义(草案见 [docs/tsl-mapping.md](docs/tsl-mapping.md));**边界**:smardaten 路线下语义由平台 `application.json` 承担(网关自动同步,无需自建 TSL),该层仅在对接物模型驱动的公有云(华为云/AWS IoT,见暂缓清单)时需要
 
 ---
