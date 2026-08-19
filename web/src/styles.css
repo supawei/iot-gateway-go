@@ -158,8 +158,7 @@ body,
   overflow-wrap: anywhere;
 }
 
-/* 点位编辑器行:6 个子项(名称/地址/类型/系数/按钮组),系数收窄为固定宽度,保证单行排布 */
-.point-row {
+/* 点位编辑器行:6 个子项(名称/地址/类型/系数/按钮组),系数收窄为固定宽度,保证单行排布 */.point-row {
   display: grid;
   grid-template-columns: 1.1fr 1.3fr 0.9fr 100px auto;
   gap: 8px;
@@ -172,6 +171,12 @@ body,
   align-items: center;
   gap: 2px;
   white-space: nowrap;
+}
+
+/* 弹窗内 el-select 下拉面板:强制渲染在弹窗/遮罩层之上(基础 z-index 与 .el-overlay 同为 2000),
+   避免下拉面板一半被弹窗裁切、一半在弹窗外 */
+.dlg-popper {
+  z-index: 3000 !important;
 }
 
 /* 表单里的说明文字 */

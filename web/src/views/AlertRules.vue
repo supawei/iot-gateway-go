@@ -242,12 +242,12 @@ onMounted(load)
       <el-form label-width="100px">
         <el-form-item label="名称"><el-input v-model="form.name" placeholder="高温且空调关闭" /></el-form-item>
         <el-form-item label="级别">
-          <el-select v-model="form.severity" style="width: 100%">
+          <el-select v-model="form.severity" style="width: 100%" :teleported="true" popper-class="dlg-popper">
             <el-option v-for="s in severityOptions" :key="s.value" :label="s.label" :value="s.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="引用点位" required>
-          <el-select v-model="form.refKeys" multiple filterable style="width: 100%" placeholder="选择表达式引用的设备点位">
+          <el-select v-model="form.refKeys" multiple filterable style="width: 100%" :teleported="true" popper-class="dlg-popper" placeholder="选择表达式引用的设备点位">
             <el-option v-for="o in pointOptions" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
         </el-form-item>
@@ -256,7 +256,7 @@ onMounted(load)
           <div v-for="(k, i) in form.refKeys" :key="k" class="cond-row">
             <span class="mono cond-point" :title="pointLabel(k)">{{ pointLabel(k) }}</span>
             <el-input v-model="form.conds[i]" placeholder="如 > 30" class="cond-input" />
-            <el-select v-if="i < form.refKeys.length - 1" v-model="form.joinOps[i]" class="cond-op">
+            <el-select v-if="i < form.refKeys.length - 1" v-model="form.joinOps[i]" class="cond-op" :teleported="true" popper-class="dlg-popper">
               <el-option label="且 (AND)" value="&&" />
               <el-option label="或 (OR)" value="||" />
             </el-select>
@@ -276,7 +276,7 @@ onMounted(load)
           <el-checkbox v-model="form.advanced">高级模式:直接编辑完整表达式</el-checkbox>
         </el-form-item>
         <el-form-item label="投递输出">
-          <el-select v-model="form.outputIds" multiple style="width: 100%" placeholder="告警发往哪些输出">
+          <el-select v-model="form.outputIds" multiple style="width: 100%" :teleported="true" popper-class="dlg-popper" placeholder="告警发往哪些输出">
             <el-option v-for="o in outputOptions" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
         </el-form-item>
