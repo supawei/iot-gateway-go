@@ -117,67 +117,6 @@ const (
 // DefaultGatewayID 是首次启动预置的默认网关 ID(与旧 config.yaml 默认值一致)。
 const DefaultGatewayID = "iot-gateway"
 
-// isDuplicateColumn 判断 SQLite 报错是否为"重复添加已存在列"(幂等 ALTER 忽略)。
-func isDuplicateColumn(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "duplicate column name")
-}
-
-// tableExists 判断 SQLite 中是否存在指定表(开发期结构演进用)。
-func tableExists(db *sql.DB, name string) (bool, error) {
-	var n int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name,
-	).Scan(&n); err != nil {
-		return false, err
-	}
-	return n > 0, nil
-}
-
-// evolveRenameTable 开发期结构演进:把旧表名改名新表名(幂等;仅当旧表存在且
-// 新表不存在时执行),保留数据。表名来自代码常量,无注入风险。
-func evolveRenameTable(db *sql.DB, oldName, newName string) error {
-	oldExists, err := tableExists(db, oldName)
-	if err != nil {
-		return err
-	}
-	if !oldExists {
-		return nil
-	}
-	newExists, err := tableExists(db, newName)
-	if err != nil {
-		return err
-	}
-	if newExists {
-		return nil
-	}
-	if _, err := db.Exec("ALTER TABLE " + oldName + " RENAME TO " + newName); err != nil {
-		return fmt.Errorf("rename %s -> %s: %w", oldName, newName, err)
-	}
-	return nil
-}
-
-// columnExists 判断表中是否存在指定列(开发期结构演进用)。
-// 表名来自代码常量,无注入风险。
-func columnExists(db *sql.DB, table, column string) (bool, error) {
-	rows, err := db.Query("PRAGMA table_info(" + table + ")")
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid, notnull, pk int
-		var name, ctype string
-		var dflt any
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return false, err
-		}
-		if name == column {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
-}
-
 // Store 负责连接/设备/点位配置的持久化与变更通知。
 type Store struct {
 	db *sql.DB
@@ -193,72 +132,9 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	// 开发期结构演进:旧表名统一加 gw_ 前缀(命名规范,规避保留字/通用名冲突)。
-	// 须在 schema 建表前执行,否则 CREATE TABLE IF NOT EXISTS gw_* 会先建出空表
-	// 挡住重命名;保留旧数据。user/app_user 均为历史形态,统一落到 gw_user。
-	renames := [][2]string{
-		{"connection", "gw_connection"},
-		{"device", "gw_device"},
-		{"point", "gw_point"},
-		{"user", "gw_user"},
-		{"app_user", "gw_user"},
-		{"client", "gw_client"},
-		{"output", "gw_output"},
-		{"settings", "gw_settings"},
-		{"alert_rule", "gw_alert_rule"},
-		{"alert", "gw_alert"},
-	}
-	for _, r := range renames {
-		if err := evolveRenameTable(db, r[0], r[1]); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("evolve rename table %s: %w", r[0], err)
-		}
-	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
-	}
-	// 开发期结构演进:为历史 point 表补 processing / seq 列(幂等;新库已含该列时报错忽略)。
-	// 见 docs/development-conventions.md(未发布不做版本化迁移)。
-	if _, err := db.Exec(`ALTER TABLE gw_point ADD COLUMN processing TEXT`); err != nil && !isDuplicateColumn(err) {
-		db.Close()
-		return nil, fmt.Errorf("evolve point schema: %w", err)
-	}
-	if _, err := db.Exec(`ALTER TABLE gw_point ADD COLUMN seq INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumn(err) {
-		db.Close()
-		return nil, fmt.Errorf("evolve point schema: %w", err)
-	}
-	// 开发期结构演进:为历史 connection/device 表补 managed_by 列(幂等;标记
-	// 平台同步创建的实体,取代 settings 表的 JSON 登记,见 internal/output/smardaten/sync.go)。
-	if _, err := db.Exec(`ALTER TABLE gw_connection ADD COLUMN managed_by TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
-		db.Close()
-		return nil, fmt.Errorf("evolve connection schema: %w", err)
-	}
-	if _, err := db.Exec(`ALTER TABLE gw_device ADD COLUMN managed_by TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
-		db.Close()
-		return nil, fmt.Errorf("evolve device schema: %w", err)
-	}
-	// 开发期结构演进:gw_connection/gw_device/gw_output/gw_user 补 created_at/updated_at 列(幂等)。
-	for _, t := range []struct{ table, col string }{
-		{"gw_connection", "created_at"}, {"gw_connection", "updated_at"},
-		{"gw_device", "created_at"}, {"gw_device", "updated_at"},
-		{"gw_output", "created_at"}, {"gw_output", "updated_at"},
-		{"gw_user", "created_at"},
-	} {
-		if _, err := db.Exec("ALTER TABLE " + t.table + " ADD COLUMN " + t.col + " TEXT NOT NULL DEFAULT ''"); err != nil && !isDuplicateColumn(err) {
-			db.Close()
-			return nil, fmt.Errorf("evolve %s.%s: %w", t.table, t.col, err)
-		}
-	}
-	// 开发期结构演进:gw_settings.key 改名 setting_key(规避保留字;幂等,
-	// 仅当旧列存在且新列不存在时执行)。
-	if has, err := columnExists(db, "gw_settings", "key"); err == nil && has {
-		if missing, err := columnExists(db, "gw_settings", "setting_key"); err == nil && !missing {
-			if _, err := db.Exec(`ALTER TABLE gw_settings RENAME COLUMN key TO setting_key`); err != nil {
-				db.Close()
-				return nil, fmt.Errorf("evolve settings column: %w", err)
-			}
-		}
 	}
 	// 预置默认网关设置(幂等):数据库为空时内置默认网关 ID。
 	if _, err := db.Exec(

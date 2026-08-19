@@ -46,40 +46,10 @@ func New(db *sql.DB, max int) (*Store, error) {
 	if max <= 0 {
 		max = DefaultMax
 	}
-	// 开发期结构演进:旧表 backfill_queue 改名 gw_backfill_queue(统一 gw_ 前缀,
-	// 幂等;仅当旧表存在且新表不存在时执行),须在建表前执行以免被空表挡住。
-	if err := evolveRename(db); err != nil {
-		return nil, err
-	}
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("backfill schema: %w", err)
 	}
 	return &Store{db: db, max: max}, nil
-}
-
-// evolveRename 开发期结构演进:backfill_queue → gw_backfill_queue(保留数据)。
-func evolveRename(db *sql.DB) error {
-	var n int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'backfill_queue'`,
-	).Scan(&n); err != nil {
-		return fmt.Errorf("backfill rename check: %w", err)
-	}
-	if n == 0 {
-		return nil
-	}
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'gw_backfill_queue'`,
-	).Scan(&n); err != nil {
-		return fmt.Errorf("backfill rename check: %w", err)
-	}
-	if n > 0 {
-		return nil
-	}
-	if _, err := db.Exec(`ALTER TABLE backfill_queue RENAME TO gw_backfill_queue`); err != nil {
-		return fmt.Errorf("rename backfill_queue: %w", err)
-	}
-	return nil
 }
 
 // Save 把一批数据点入队;超出上限时按 id 淘汰最旧数据(保最新),并告警。

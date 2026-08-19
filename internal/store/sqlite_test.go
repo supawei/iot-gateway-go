@@ -1,10 +1,8 @@
 package store
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -471,119 +469,6 @@ func TestPointProcessingRoundtrip(t *testing.T) {
 	}
 	if got2.Points[0].Processing != nil {
 		t.Fatalf("expected nil processing, got %+v", got2.Points[0].Processing)
-	}
-}
-
-// TestLegacyDBSchemaEvolve 验证旧版(无 processing/seq 列)point 表经 Open 自动补列,
-// 旧数据可正常读取、新列可写(开发期结构演进,见 docs/development-conventions.md)。
-func TestLegacyDBSchemaEvolve(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
-	}
-	legacy := `
-CREATE TABLE connection (id TEXT PRIMARY KEY, name TEXT NOT NULL, driver TEXT NOT NULL, config TEXT NOT NULL);
-CREATE TABLE device (id TEXT PRIMARY KEY, name TEXT NOT NULL, connection_id TEXT NOT NULL, params TEXT NOT NULL DEFAULT '{}', interval_ms INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1);
-CREATE TABLE point (device_id TEXT NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL, data_type TEXT NOT NULL, scale REAL NOT NULL DEFAULT 0, PRIMARY KEY (device_id, name));
-INSERT INTO connection (id,name,driver,config) VALUES ('c','c','modbus','{}');
-INSERT INTO device (id,name,connection_id,params,interval_ms,enabled) VALUES ('d','d','c','{}',1000,1);
-INSERT INTO point (device_id,name,address,data_type,scale) VALUES ('d','p','a','float32',0.1);
-`
-	if _, err := db.Exec(legacy); err != nil {
-		t.Fatalf("seed legacy db: %v", err)
-	}
-	db.Close()
-
-	st, err := Open(path)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer st.Close()
-	dev, err := st.GetDevice("d")
-	if err != nil {
-		t.Fatalf("get device after evolve: %v", err)
-	}
-	if len(dev.Points) != 1 || dev.Points[0].Name != "p" {
-		t.Fatalf("points after evolve: %+v", dev.Points)
-	}
-	dev.Points[0].Processing = &model.PointProcessing{Aggregate: &model.Aggregate{Type: "avg", Window: "10s"}}
-	if err := st.SaveDevice(dev); err != nil {
-		t.Fatalf("save with processing after evolve: %v", err)
-	}
-	got, err := st.GetDevice("d")
-	if err != nil {
-		t.Fatalf("get after save processing: %v", err)
-	}
-	if got.Points[0].Processing == nil {
-		t.Fatalf("processing not persisted after evolve")
-	}
-}
-
-// TestOpenEvolvesLegacyUserTable 旧库的 user 表(SQL 保留字)经 Open 自动改名
-// gw_user 且数据保留(开发期结构演进)。
-func TestOpenEvolvesLegacyUserTable(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy-user.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacy := `
-CREATE TABLE user (id TEXT PRIMARY KEY, password_hash TEXT NOT NULL, must_change_password INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1);
-INSERT INTO user (id, password_hash, must_change_password, enabled) VALUES ('admin', 'hash', 1, 1);
-`
-	if _, err := db.Exec(legacy); err != nil {
-		t.Fatalf("seed legacy db: %v", err)
-	}
-	db.Close()
-
-	st, err := Open(path)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer st.Close()
-
-	if n, err := st.CountUsers(); err != nil || n != 1 {
-		t.Fatalf("CountUsers = %d err=%v, want 1 (data preserved after rename)", n, err)
-	}
-	u, err := st.GetUser("admin")
-	if err != nil {
-		t.Fatalf("get user after rename: %v", err)
-	}
-	if u.PasswordHash != "hash" {
-		t.Errorf("password hash = %q, want hash", u.PasswordHash)
-	}
-	if ok, _ := tableExists(st.db, "user"); ok {
-		t.Error("legacy user table should be gone after rename")
-	}
-}
-
-// TestOpenEvolvesLegacySettingsColumn 旧库 settings(key) 列经 Open 自动改名
-// setting_key,原数据可读(开发期结构演进)。
-func TestOpenEvolvesLegacySettingsColumn(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy-settings.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-		INSERT INTO settings (key, value) VALUES ('gateway.id', 'gw-legacy');`); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	db.Close()
-
-	st, err := Open(path)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer st.Close()
-
-	v, ok, err := st.GetSetting("gateway.id")
-	if err != nil || !ok {
-		t.Fatalf("get legacy setting: ok=%v err=%v", ok, err)
-	}
-	if v != "gw-legacy" {
-		t.Errorf("value = %q, want gw-legacy", v)
 	}
 }
 
