@@ -150,13 +150,28 @@ body,
   font-size: 12.5px;
 }
 
-/* 点位编辑器行 */
+/* 网关 ID 卡片值:长字符串可换行,避免撑破 stat-cards 网格 */
+.gw-id {
+  font-size: 16px;
+  line-height: 1.5;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+/* 点位编辑器行:6 个子项(名称/地址/类型/系数/按钮组),系数收窄为固定宽度,保证单行排布 */
 .point-row {
   display: grid;
-  grid-template-columns: 1.2fr 1.2fr 1fr 0.7fr auto;
+  grid-template-columns: 1.1fr 1.3fr 0.9fr 100px auto;
   gap: 8px;
   align-items: center;
   margin-bottom: 8px;
+}
+/* 处理/删除按钮组:同格水平排列,避免撑破点位列 */
+.point-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
 }
 
 /* 表单里的说明文字 */

@@ -104,7 +104,7 @@ onMounted(load)
           网关 ID
           <el-button link type="primary" :icon="Edit" style="margin-left: 4px" @click="openEdit">改</el-button>
         </div>
-        <div class="v mono" style="font-size: 22px">{{ gatewayId || '—' }}</div>
+        <div class="v mono gw-id" :title="gatewayId">{{ gatewayId || '—' }}</div>
       </div>
       <div class="stat">
         <div class="k">边缘处理</div>

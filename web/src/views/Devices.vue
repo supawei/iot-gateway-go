@@ -595,11 +595,13 @@ onUnmounted(() => {
               <el-select v-model="p.dataType">
                 <el-option v-for="t in DATA_TYPES" :key="t" :label="t" :value="t" />
               </el-select>
-              <el-input-number v-model="p.scale" :step="0.1" :controls="false" />
-              <el-button link :type="p.processing ? 'primary' : 'default'" @click="openProc(p)">
-                处理{{ p.processing ? '●' : '' }}
-              </el-button>
-              <el-button link type="danger" @click="removePoint(i)">✕</el-button>
+              <el-input-number v-model="p.scale" :step="0.1" :controls="false" style="width: 100%" />
+              <div class="point-actions">
+                <el-button link :type="p.processing ? 'primary' : 'default'" @click="openProc(p)">
+                  处理{{ p.processing ? '●' : '' }}
+                </el-button>
+                <el-button link type="danger" @click="removePoint(i)">✕</el-button>
+              </div>
             </div>
             <el-button text type="primary" :icon="Plus" @click="addPoint">添加点位</el-button>
           </div>
