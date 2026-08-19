@@ -143,7 +143,9 @@ func (s *Scheduler) ensureInfra() {
 	collectCtx, cancel := context.WithCancel(s.baseCtx)
 	s.collectCtx = collectCtx
 	s.collectCancel = cancel
-	s.taskCh = make(chan collectTask, s.poolSize)
+	// 任务队列容量取 2×poolSize:非阻塞投递、满则跳过(防堆积),缓冲只用于吸收
+	// 同一瞬间多个 cron 刻度同时触发(启动/热重载/间隔对齐)的突发,不做积压。
+	s.taskCh = make(chan collectTask, 2*s.poolSize)
 	s.workersDone = s.startWorkers(s.taskCh)
 	c := cron.New()
 	c.Start()
