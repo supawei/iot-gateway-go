@@ -22,6 +22,11 @@ const form = reactive({
   expr: '', advanced: false,
 })
 
+// exprDirty:表达式输入框是否被用户手动编辑过。程序自动回填不改此标记;
+// 用户在高级模式文本框输入(经 exprModel setter)才置 true。
+// 进入高级模式时,仅当未手动编辑过才用最新预览刷新,避免覆盖用户手写内容。
+const exprDirty = ref(false)
+
 const pointOptions = computed(() => {
   const opts = []
   for (const d of devices.value) {
@@ -72,10 +77,17 @@ const compiledExpr = computed(() => {
   return segmentedExpr()
 })
 
-// 切到高级模式:把"表达式预览"里分段模式拼出的表达式填入输入框,方便在其基础上继续编辑。
-// 仅当输入框为空时回填,避免覆盖用户已手动编辑过的表达式。
+// 高级模式文本框的双向绑定:读 form.expr;用户输入时同步写回并标记为手动编辑。
+// 程序侧回填直接写 form.expr,不经此 setter,从而保持 exprDirty=false。
+const exprModel = computed({
+  get: () => form.expr,
+  set: (v) => { form.expr = v; exprDirty.value = true },
+})
+
+// 切到高级模式:用"表达式预览"里分段模式拼出的最新表达式刷新输入框,
+// 方便在其基础上继续编辑;若用户已手动编辑过表达式则保留不动(不覆盖)。
 watch(() => form.advanced, (advanced, was) => {
-  if (advanced && !was && !(form.expr || '').trim()) {
+  if (advanced && !was && !exprDirty.value) {
     const expr = segmentedExpr().trim()
     if (expr) form.expr = expr
   }
@@ -132,6 +144,7 @@ function resetForm() {
     freshnessSeconds: 300, cooldownSeconds: 0,
     expr: '', advanced: false,
   })
+  exprDirty.value = false
 }
 
 function openCreate() {
@@ -153,6 +166,9 @@ function openEdit(row) {
     expr: parsed ? '' : (row.expr || ''),
     advanced: !parsed,
   })
+  // 编辑已有规则:高级模式的服务端表达式视为用户数据,进入高级模式不自动覆盖;
+  // 分段可解析的规则从分段重建(expr 为空,回填由高级模式 watcher 接管)。
+  exprDirty.value = !parsed
   dialogVisible.value = true
 }
 
@@ -282,7 +298,7 @@ onMounted(load)
           </p>
         </el-form-item>
         <el-form-item v-else label="表达式" required>
-          <el-input v-model="form.expr" type="textarea" :rows="3" placeholder='point("d1","temp")>30 && point("d2","sw")=="off"' />
+          <el-input v-model="exprModel" type="textarea" :rows="3" placeholder='point("d1","temp")>30 && point("d2","sw")=="off"' />
         </el-form-item>
         <el-form-item v-if="!form.advanced && compiledExpr" label="表达式预览">
           <code class="mono cond-preview">{{ compiledExpr }}</code>
