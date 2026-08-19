@@ -126,3 +126,78 @@ const (
 	QualityBad       Quality = "bad"
 	QualityUncertain Quality = "uncertain"
 )
+
+// AlertSeverity 是告警级别。
+type AlertSeverity string
+
+const (
+	SeverityWarning  AlertSeverity = "warning"
+	SeverityCritical AlertSeverity = "critical"
+)
+
+// AlertStatus 是告警记录的状态机状态(本地告警表的概念,不放入发出消息)。
+type AlertStatus string
+
+const (
+	AlertPending  AlertStatus = "pending"
+	AlertResolved AlertStatus = "resolved"
+)
+
+// RefPoint 是告警规则引用的一个设备点位。
+type RefPoint struct {
+	DeviceID string `json:"deviceId"`
+	Point    string `json:"point"`
+}
+
+// AlertRule 是跨设备/跨点位告警规则:表达式求值为 true 即触发告警。
+// 规则配置存 SQLite(alert_rules 表),随 store.OnChange 热重载,范式与 Output 一致。
+// 表达式经 expr-lang/expr 求值,引擎注入 point(deviceID, pointName) 函数返回引用点位最新值;
+// ReferencedPoints 显式声明引用点位,引擎据此建反向索引,免 AST 分析。
+type AlertRule struct {
+	ID               string     `json:"id"`
+	Name             string     `json:"name"`
+	Enabled          bool       `json:"enabled"`
+	Severity         string     `json:"severity"`         // warning | critical
+	Expr             string     `json:"expr"`             // 如 point("d1","temp")>30 && point("d2","sw")=="off"
+	ReferencedPoints []RefPoint `json:"referencedPoints"` // 显式声明表达式引用的点位
+	OutputIDs        []string   `json:"outputIds"`        // 定向投递的 output ID
+	FreshnessSeconds int        `json:"freshnessSeconds"` // 状态新鲜度秒数,默认 300
+	CooldownSeconds  int        `json:"cooldownSeconds"`  // 解除后防抖秒数,默认 0
+	CreatedAt        string     `json:"createdAt"`
+	UpdatedAt        string     `json:"updatedAt"`
+}
+
+// AlertContext 是触发瞬间一个引用点位的值快照(告警消息与告警表记录的公共字段)。
+type AlertContext struct {
+	DeviceID  string      `json:"deviceId"`
+	Point     string      `json:"point"`
+	Value     interface{} `json:"value"`
+	Timestamp time.Time   `json:"timestamp"`
+}
+
+// AlertMessage 是告警事件的消息载荷(独立于 DataPoint),经 AlertPublisher 定向投递到指定输出。
+// 与 Alert 表记录对齐,但不带 Status/ResolvedAt(那是本地表的状态机概念,见 docs)。
+type AlertMessage struct {
+	AlertID     string         `json:"alertId"`
+	RuleID      string         `json:"ruleId"`
+	RuleName    string         `json:"ruleName"`
+	Severity    string         `json:"severity"`
+	Message     string         `json:"message"`
+	TriggeredAt time.Time      `json:"triggeredAt"`
+	GatewayID   string         `json:"gatewayId"`
+	Context     []AlertContext `json:"context"`
+}
+
+// Alert 是一条已触发的告警记录(存 alerts 表),比 AlertMessage 多本地状态机字段。
+type Alert struct {
+	AlertID     string         `json:"alertId"`
+	RuleID      string         `json:"ruleId"`
+	RuleName    string         `json:"ruleName"`
+	Severity    string         `json:"severity"`
+	Message     string         `json:"message"`
+	TriggeredAt time.Time      `json:"triggeredAt"`
+	GatewayID   string         `json:"gatewayId"`
+	Context     []AlertContext `json:"context"`
+	Status      string         `json:"status"` // pending | resolved
+	ResolvedAt  *time.Time     `json:"resolvedAt,omitempty"`
+}

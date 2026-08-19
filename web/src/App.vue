@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Odometer, Link, Cpu, Upload, Key, SwitchButton } from '@element-plus/icons-vue'
+import { Odometer, Link, Cpu, Upload, Key, Bell, Warning, SwitchButton } from '@element-plus/icons-vue'
 import api from './api'
 import auth from './stores/auth'
 
@@ -77,6 +77,14 @@ onUnmounted(() => clearInterval(timer))
           <el-menu-item index="/outputs">
             <el-icon><Upload /></el-icon>
             <span>北向输出</span>
+          </el-menu-item>
+          <el-menu-item index="/alert-rules">
+            <el-icon><Bell /></el-icon>
+            <span>告警规则</span>
+          </el-menu-item>
+          <el-menu-item index="/alerts">
+            <el-icon><Warning /></el-icon>
+            <span>告警记录</span>
           </el-menu-item>
           <el-menu-item index="/clients">
             <el-icon><Key /></el-icon>

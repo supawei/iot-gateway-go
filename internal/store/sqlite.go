@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -65,6 +66,31 @@ CREATE TABLE IF NOT EXISTS output (
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS alert_rule (
+    id                 TEXT PRIMARY KEY,
+    name               TEXT NOT NULL,
+    enabled            INTEGER NOT NULL DEFAULT 1,
+    severity           TEXT NOT NULL DEFAULT 'warning',
+    expr               TEXT NOT NULL,
+    referenced_points  TEXT NOT NULL DEFAULT '[]',
+    output_ids         TEXT NOT NULL DEFAULT '[]',
+    freshness_seconds  INTEGER NOT NULL DEFAULT 300,
+    cooldown_seconds   INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS alert (
+    alert_id     TEXT PRIMARY KEY,
+    rule_id      TEXT NOT NULL,
+    rule_name    TEXT NOT NULL,
+    severity     TEXT NOT NULL,
+    message      TEXT NOT NULL,
+    triggered_at TEXT NOT NULL,
+    gateway_id   TEXT NOT NULL,
+    context      TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    resolved_at  TEXT
 );`
 
 // ErrConnectionInUse 表示连接仍被设备引用,不可删除。
@@ -722,4 +748,176 @@ func saveDeviceTx(tx *sql.Tx, device model.Device) error {
 		i++
 	}
 	return nil
+}
+
+// ---- 告警规则 ----
+
+// SaveAlertRule 插入或更新告警规则(upsert);写入后通知热重载。
+func (s *Store) SaveAlertRule(r model.AlertRule) error {
+	refs, err := json.Marshal(r.ReferencedPoints)
+	if err != nil {
+		return fmt.Errorf("marshal referencedPoints: %w", err)
+	}
+	outputs, err := json.Marshal(r.OutputIDs)
+	if err != nil {
+		return fmt.Errorf("marshal outputIds: %w", err)
+	}
+	enabled := 0
+	if r.Enabled {
+		enabled = 1
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO alert_rule (id, name, enabled, severity, expr, referenced_points, output_ids, freshness_seconds, cooldown_seconds, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, enabled=excluded.enabled, severity=excluded.severity,
+		 expr=excluded.expr, referenced_points=excluded.referenced_points, output_ids=excluded.output_ids,
+		 freshness_seconds=excluded.freshness_seconds, cooldown_seconds=excluded.cooldown_seconds, updated_at=excluded.updated_at`,
+		r.ID, r.Name, enabled, r.Severity, r.Expr, string(refs), string(outputs), r.FreshnessSeconds, r.CooldownSeconds, r.CreatedAt, r.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert alert rule: %w", err)
+	}
+	s.notify()
+	return nil
+}
+
+func (s *Store) ListAlertRules() ([]model.AlertRule, error) {
+	rows, err := s.db.Query(`SELECT id, name, enabled, severity, expr, referenced_points, output_ids, freshness_seconds, cooldown_seconds, created_at, updated_at FROM alert_rule ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("query alert rules: %w", err)
+	}
+	defer rows.Close()
+	rules := make([]model.AlertRule, 0)
+	for rows.Next() {
+		r, err := scanAlertRule(rows)
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
+}
+
+func (s *Store) GetAlertRule(id string) (model.AlertRule, error) {
+	row := s.db.QueryRow(`SELECT id, name, enabled, severity, expr, referenced_points, output_ids, freshness_seconds, cooldown_seconds, created_at, updated_at FROM alert_rule WHERE id = ?`, id)
+	r, err := scanAlertRule(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.AlertRule{}, fmt.Errorf("alert rule %q not found", id)
+		}
+		return model.AlertRule{}, fmt.Errorf("get alert rule: %w", err)
+	}
+	return r, nil
+}
+
+func (s *Store) DeleteAlertRule(id string) error {
+	if _, err := s.db.Exec("DELETE FROM alert_rule WHERE id = ?", id); err != nil {
+		return fmt.Errorf("delete alert rule: %w", err)
+	}
+	s.notify()
+	return nil
+}
+
+func scanAlertRule(row rowScanner) (model.AlertRule, error) {
+	var r model.AlertRule
+	var enabled int
+	var refs, outputs string
+	if err := row.Scan(&r.ID, &r.Name, &enabled, &r.Severity, &r.Expr, &refs, &outputs, &r.FreshnessSeconds, &r.CooldownSeconds, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		return model.AlertRule{}, fmt.Errorf("scan alert rule: %w", err)
+	}
+	r.Enabled = enabled != 0
+	if err := json.Unmarshal([]byte(refs), &r.ReferencedPoints); err != nil {
+		return model.AlertRule{}, fmt.Errorf("unmarshal referencedPoints: %w", err)
+	}
+	if err := json.Unmarshal([]byte(outputs), &r.OutputIDs); err != nil {
+		return model.AlertRule{}, fmt.Errorf("unmarshal outputIds: %w", err)
+	}
+	return r, nil
+}
+
+// ---- 告警记录 ----
+
+// SaveAlert 写入一条已触发的告警记录(不通知:结果记录不影响运行态)。
+func (s *Store) SaveAlert(a model.Alert) error {
+	context, err := json.Marshal(a.Context)
+	if err != nil {
+		return fmt.Errorf("marshal alert context: %w", err)
+	}
+	var resolvedAt sql.NullString
+	if a.ResolvedAt != nil {
+		resolvedAt = sql.NullString{String: a.ResolvedAt.Format(time.RFC3339Nano), Valid: true}
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO alert (alert_id, rule_id, rule_name, severity, message, triggered_at, gateway_id, context, status, resolved_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.AlertID, a.RuleID, a.RuleName, a.Severity, a.Message, a.TriggeredAt.Format(time.RFC3339Nano), a.GatewayID, string(context), a.Status, &resolvedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("save alert: %w", err)
+	}
+	return nil
+}
+
+// ListAlerts 返回告警记录;status 非空时按状态过滤,按触发时间倒序。
+func (s *Store) ListAlerts(status string) ([]model.Alert, error) {
+	const base = `SELECT alert_id, rule_id, rule_name, severity, message, triggered_at, gateway_id, context, status, resolved_at FROM alert`
+	var rows *sql.Rows
+	var err error
+	if status != "" {
+		rows, err = s.db.Query(base+" WHERE status = ? ORDER BY triggered_at DESC", status)
+	} else {
+		rows, err = s.db.Query(base + " ORDER BY triggered_at DESC")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query alerts: %w", err)
+	}
+	defer rows.Close()
+	alerts := make([]model.Alert, 0)
+	for rows.Next() {
+		a, err := scanAlert(rows)
+		if err != nil {
+			return nil, err
+		}
+		alerts = append(alerts, a)
+	}
+	return alerts, rows.Err()
+}
+
+// UpdateAlertStatus 更新告警状态(解除时置 resolved 并记解除时间)。
+func (s *Store) UpdateAlertStatus(alertID, status string, resolvedAt time.Time) error {
+	var resolved sql.NullString
+	if status == string(model.AlertResolved) {
+		resolved = sql.NullString{String: resolvedAt.Format(time.RFC3339Nano), Valid: true}
+	}
+	_, err := s.db.Exec(
+		`UPDATE alert SET status = ?, resolved_at = ? WHERE alert_id = ?`,
+		status, &resolved, alertID,
+	)
+	if err != nil {
+		return fmt.Errorf("update alert status: %w", err)
+	}
+	return nil
+}
+
+func scanAlert(row rowScanner) (model.Alert, error) {
+	var a model.Alert
+	var context, triggeredAt string
+	var resolvedAt sql.NullString
+	if err := row.Scan(&a.AlertID, &a.RuleID, &a.RuleName, &a.Severity, &a.Message, &triggeredAt, &a.GatewayID, &context, &a.Status, &resolvedAt); err != nil {
+		return model.Alert{}, fmt.Errorf("scan alert: %w", err)
+	}
+	t, err := time.Parse(time.RFC3339Nano, triggeredAt)
+	if err != nil {
+		return model.Alert{}, fmt.Errorf("parse triggered_at: %w", err)
+	}
+	a.TriggeredAt = t
+	if err := json.Unmarshal([]byte(context), &a.Context); err != nil {
+		return model.Alert{}, fmt.Errorf("unmarshal alert context: %w", err)
+	}
+	if resolvedAt.Valid && resolvedAt.String != "" {
+		if rt, err := time.Parse(time.RFC3339Nano, resolvedAt.String); err == nil {
+			a.ResolvedAt = &rt
+		}
+	}
+	return a, nil
 }

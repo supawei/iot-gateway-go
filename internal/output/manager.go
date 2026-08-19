@@ -13,6 +13,10 @@ import (
 // 或经补传队列持久化(启用补传时),避免慢输出(如 MQTT 阻塞)反压回采集侧拖垮全局。
 const queueSize = 1024
 
+// alertQueueSize 是每个输出各自的告警事件缓冲长度;告警是边沿触发的低频事件,
+// 队列满丢弃并日志(告警不补传,见告警设计)。
+const alertQueueSize = 64
+
 // 断网本地补传(见 docs/offline-backfill-design.md)的轮询参数。
 // replayInterval 用 var 便于测试覆盖为极大值以禁用后台重放(测试自行驱动 replayOnce)。
 var (
@@ -52,10 +56,11 @@ type Manager struct {
 
 // slot 是一个活跃输出及其发布队列。
 type slot struct {
-	inst Instance
-	ch   chan model.DataPoint
-	done chan struct{}
-	wg   sync.WaitGroup
+	inst    Instance
+	ch      chan model.DataPoint
+	alertCh chan model.AlertMessage // 告警事件通道(独立于数据点队列,告警不补传)
+	done    chan struct{}
+	wg      sync.WaitGroup
 
 	mu       sync.Mutex
 	received int64 // 发布循环取到的数据点数
@@ -149,6 +154,34 @@ func (m *Manager) Publish(dp model.DataPoint) {
 				s.mu.Unlock()
 				slog.Warn("output queue full, drop datapoint", "output", s.inst.ID)
 			}
+		}
+	}
+}
+
+// PublishAlertTo 把告警事件定向投递到 outputIDs 指定的输出(规则配置的 output_ids)。
+// 仅投递给实现了 AlertPublisher 的输出;告警不补传,队列满丢弃并日志。
+func (m *Manager) PublishAlertTo(outputIDs []string, alert model.AlertMessage) {
+	if len(outputIDs) == 0 {
+		return
+	}
+	targets := make(map[string]bool, len(outputIDs))
+	for _, id := range outputIDs {
+		targets[id] = true
+	}
+	m.mu.Lock()
+	slots := m.slots
+	m.mu.Unlock()
+	for _, s := range slots {
+		if !targets[s.inst.ID] {
+			continue
+		}
+		if _, ok := s.inst.Out.(AlertPublisher); !ok {
+			continue // 该输出不支持告警投递
+		}
+		select {
+		case s.alertCh <- alert:
+		default:
+			slog.Warn("alert queue full, drop alert", "output", s.inst.ID)
 		}
 	}
 }
@@ -321,9 +354,10 @@ func (m *Manager) Close() {
 // startSlot 启动一个输出的发布 goroutine:从队列取数据点并发布,直到 stop 关闭 done。
 func startSlot(inst Instance) *slot {
 	s := &slot{
-		inst: inst,
-		ch:   make(chan model.DataPoint, queueSize),
-		done: make(chan struct{}),
+		inst:    inst,
+		ch:      make(chan model.DataPoint, queueSize),
+		alertCh: make(chan model.AlertMessage, alertQueueSize),
+		done:    make(chan struct{}),
 	}
 	s.wg.Add(1)
 	go func() {
@@ -338,6 +372,12 @@ func startSlot(inst Instance) *slot {
 				s.mu.Unlock()
 				if err := inst.Out.Publish(dp); err != nil {
 					slog.Error("publish datapoint failed", "output", inst.ID, "err", err)
+				}
+			case alert := <-s.alertCh:
+				if ap, ok := inst.Out.(AlertPublisher); ok {
+					if err := ap.PublishAlert(alert); err != nil {
+						slog.Error("publish alert failed", "output", inst.ID, "err", err)
+					}
 				}
 			}
 		}

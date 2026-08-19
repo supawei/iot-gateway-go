@@ -109,6 +109,13 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/gateway", a.require(auth.ScopeGatewayRead, a.getGateway))
 	mux.HandleFunc("PUT /api/v1/gateway", a.require(auth.ScopeGatewayWrite, a.putGateway))
 	mux.HandleFunc("GET /api/v1/processing/status", a.require(auth.ScopeStatusRead, a.getProcessingStatus))
+
+	mux.HandleFunc("GET /api/v1/alert-rules", a.require(auth.ScopeOutputsRead, a.listAlertRules))
+	mux.HandleFunc("POST /api/v1/alert-rules", a.require(auth.ScopeOutputsWrite, a.createAlertRule))
+	mux.HandleFunc("GET /api/v1/alert-rules/{ruleId}", a.require(auth.ScopeOutputsRead, a.getAlertRule))
+	mux.HandleFunc("PUT /api/v1/alert-rules/{ruleId}", a.require(auth.ScopeOutputsWrite, a.putAlertRule))
+	mux.HandleFunc("DELETE /api/v1/alert-rules/{ruleId}", a.require(auth.ScopeOutputsWrite, a.deleteAlertRule))
+	mux.HandleFunc("GET /api/v1/alerts", a.require(auth.ScopeOutputsRead, a.listAlerts))
 	return mux
 }
 
@@ -1116,4 +1123,106 @@ func writeError(w http.ResponseWriter, status int, err error) {
 // writeErrorCode 返回带显式机器可读 code 的错误(覆盖默认映射,如跳转改密页)。
 func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg, "code": code})
+}
+
+// ---- 告警规则 ----
+
+func (a *API) listAlertRules(w http.ResponseWriter, r *http.Request) {
+	rules, err := a.store.ListAlertRules()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rules)
+}
+
+func (a *API) getAlertRule(w http.ResponseWriter, r *http.Request) {
+	rule, err := a.store.GetAlertRule(r.PathValue("ruleId"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rule)
+}
+
+// createAlertRule 创建告警规则;SaveAlertRule 内部 notify 自动触告警引擎热重载。
+func (a *API) createAlertRule(w http.ResponseWriter, r *http.Request) {
+	rule, ok := decodeAlertRule(w, r)
+	if !ok {
+		return
+	}
+	if rule.Expr == "" {
+		writeError(w, http.StatusBadRequest, errors.New("alert rule expr is required"))
+		return
+	}
+	if rule.ID == "" {
+		rule.ID = a.uniqueAlertID()
+	}
+	now := time.Now().Format(time.RFC3339Nano)
+	rule.CreatedAt = now
+	rule.UpdatedAt = now
+	if err := a.store.SaveAlertRule(rule); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, rule)
+}
+
+func (a *API) putAlertRule(w http.ResponseWriter, r *http.Request) {
+	rule, ok := decodeAlertRule(w, r)
+	if !ok {
+		return
+	}
+	rule.ID = r.PathValue("ruleId")
+	if rule.Expr == "" {
+		writeError(w, http.StatusBadRequest, errors.New("alert rule expr is required"))
+		return
+	}
+	rule.UpdatedAt = time.Now().Format(time.RFC3339Nano)
+	if old, err := a.store.GetAlertRule(rule.ID); err == nil {
+		rule.CreatedAt = old.CreatedAt
+	} else {
+		rule.CreatedAt = rule.UpdatedAt
+	}
+	if err := a.store.SaveAlertRule(rule); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rule)
+}
+
+func (a *API) deleteAlertRule(w http.ResponseWriter, r *http.Request) {
+	if err := a.store.DeleteAlertRule(r.PathValue("ruleId")); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// listAlerts 返回告警记录;status 查询参数非空时按状态过滤(pending/resolved)。
+func (a *API) listAlerts(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	alerts, err := a.store.ListAlerts(status)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, alerts)
+}
+
+func decodeAlertRule(w http.ResponseWriter, r *http.Request) (model.AlertRule, bool) {
+	var rule model.AlertRule
+	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("decode alert rule: %w", err))
+		return model.AlertRule{}, false
+	}
+	return rule, true
+}
+
+func (a *API) uniqueAlertID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
 }

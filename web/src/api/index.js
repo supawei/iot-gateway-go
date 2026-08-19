@@ -96,6 +96,14 @@ export const api = {
 
   // 驱动
   listDrivers: () => http.get('/drivers'),
+
+  // 告警规则
+  listAlertRules: () => http.get('/alert-rules'),
+  createAlertRule: (data) => http.post('/alert-rules', data),
+  getAlertRule: (id) => http.get(`/alert-rules/${id}`),
+  updateAlertRule: (id, data) => http.put(`/alert-rules/${id}`, data),
+  deleteAlertRule: (id) => http.delete(`/alert-rules/${id}`),
+  listAlerts: (status) => http.get('/alerts', { params: { status } }),
 }
 
 export default api

@@ -37,6 +37,8 @@ type Config struct {
 	FlushInterval string `json:"flushInterval"`
 	// BatchMax 是批量模式单条消息最大点数(默认 64)。
 	BatchMax int `json:"batchMax"`
+	// AlertTopic 是告警消息发往的 topic;留空默认 gateway/{网关ID}/alert。
+	AlertTopic string `json:"alertTopic,omitempty"`
 }
 
 // init 注册 MQTT 输出类型:声明配置 schema 并绑定构造器。
@@ -54,6 +56,8 @@ func init() {
 				Hint: "留空=即时单条发布(默认);设置如 200ms 启用批量,同设备多点聚合为一条消息"},
 			{Name: "batchMax", Label: "单条最大点数", Type: output.FieldInt, Default: 64,
 				Hint: "批量模式单条消息最大点数,超出拆分"},
+			{Name: "alertTopic", Label: "告警 Topic", Type: output.FieldString, Placeholder: "gateway/{gw}/alert",
+				Hint: "告警消息发往的 topic;留空默认 gateway/{网关ID}/alert"},
 		},
 	}, func(bc output.BuildContext, raw json.RawMessage) (output.Output, error) {
 		var cfg Config
@@ -76,6 +80,7 @@ type mqttOutput struct {
 
 	flushInterval time.Duration
 	batchMax      int
+	alertTopic    string // 告警 topic,空则默认 gateway/{gw}/alert
 
 	// 批量模式缓冲(flushInterval>0 时启用)。
 	mu           sync.Mutex
@@ -126,6 +131,7 @@ func New(cfg Config, gatewayID string, outputID string, backfill output.Backfill
 		backfill:      backfill,
 		flushInterval: flushInterval,
 		batchMax:      batchMax,
+		alertTopic:    cfg.AlertTopic,
 	}
 	if flushInterval > 0 {
 		m.pending = make(map[string][]model.DataPoint)
@@ -175,6 +181,20 @@ func (m *mqttOutput) publishNow(dp model.DataPoint) error {
 // deviceTopic 返回设备数据 topic:gateway/{gw}/device/{dev}/data。
 func (m *mqttOutput) deviceTopic(deviceID string) string {
 	return fmt.Sprintf("gateway/%s/device/%s/data", m.gatewayID, deviceID)
+}
+
+// PublishAlert 发布告警事件到独立告警 topic(不复用 DataPoint 序列化)。
+// 失败仅返回错误由上层日志,不补传--告警是实时事件,迟到价值骤降。实现 output.AlertPublisher。
+func (m *mqttOutput) PublishAlert(alert model.AlertMessage) error {
+	payload, err := json.Marshal(alert)
+	if err != nil {
+		return fmt.Errorf("marshal alert: %w", err)
+	}
+	topic := m.alertTopic
+	if topic == "" {
+		topic = fmt.Sprintf("gateway/%s/alert", m.gatewayID)
+	}
+	return m.publish(topic, payload)
 }
 
 // runFlusher 每 flushInterval 把缓冲聚合发布一次,直到 Close 关闭 done。

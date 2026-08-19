@@ -38,3 +38,10 @@ type RuntimeStatus struct {
 type StatusProvider interface {
 	RuntimeStatus() RuntimeStatus
 }
+
+// AlertPublisher 是北向输出的可选能力:接收告警事件(独立于 DataPoint 的消息)。
+// 告警引擎经 Manager.PublishAlertTo 定向投递到规则指定的输出;未实现该接口的输出被跳过。
+// 告警不补传:发送失败丢弃并日志,因为告警是实时事件,迟到价值骤降(见告警设计)。
+type AlertPublisher interface {
+	PublishAlert(alert model.AlertMessage) error
+}

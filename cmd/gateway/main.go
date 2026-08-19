@@ -16,6 +16,7 @@ import (
 
 	"gopkg.in/natefinch/lumberjack.v2"
 
+	"iot-gateway-go/internal/alert"
 	"iot-gateway-go/internal/api"
 	"iot-gateway-go/internal/auth"
 	"iot-gateway-go/internal/backfill"
@@ -164,14 +165,21 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// pipelineDone := make(chan struct{})
+	// 告警引擎:跨设备/跨点位告警,接在边缘处理层下游;规则存 SQLite(alert_rules 表),
+	// 随 store.OnChange 热重载。放行点先经告警判断(可能触发告警动作),再正常扇出。
+	gatewayID, err := st.GetGatewayID()
+	if err != nil {
+		fatal("get gateway id for alert engine", "err", err)
+	}
+	alertEng := alert.NewEngine(st, outputs, gatewayID)
+	go alertEng.Run(ctx)
+
 	// 边缘处理层:过滤/聚合采集数据,配置挂在设备点位上,随 store.OnChange 热重载;
-	// 放行/派生点经 outputs.Publish 走与原始点相同的下游链路。见 docs/edge-computing-design.md。
-	proc := processing.NewEngine(st, outputs.Publish)
+	// 放行/派生点经告警引擎(触发告警 + 继续扇出)。见 docs/edge-computing-design.md。
+	proc := processing.NewEngine(st, alertEng.Process)
 	go proc.Run(ctx)
 	go func() {
 		core.RunPipeline(ctx, dataPoints, proc, outputs)
-		// close(pipelineDone)
 	}()
 
 	// schedulerDone := make(chan struct{})
