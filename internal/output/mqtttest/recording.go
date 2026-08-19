@@ -29,14 +29,33 @@ type RecordingBroker struct {
 // StartRecording 启动一个记录型假 broker(测试结束时自动清理)。
 func StartRecording(tb testing.TB) *RecordingBroker {
 	tb.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	b, err := startRecording()
 	if err != nil {
 		tb.Fatalf("mqtttest listen: %v", err)
 	}
-	b := &RecordingBroker{Addr: ln.Addr().String(), ln: ln, done: make(chan struct{})}
-	go b.acceptLoop()
 	tb.Cleanup(b.Close)
 	return b
+}
+
+// StartRecordingStandalone 同 StartRecording,但不依赖 testing.TB,供压测 harness
+// 等非测试程序复用;调用方负责在结束时调用 Close。
+func StartRecordingStandalone() *RecordingBroker {
+	b, err := startRecording()
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// startRecording 构造并启动记录型假 broker(地址取随机空闲端口)。
+func startRecording() (*RecordingBroker, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	b := &RecordingBroker{Addr: ln.Addr().String(), ln: ln, done: make(chan struct{})}
+	go b.acceptLoop()
+	return b, nil
 }
 
 // Close 关闭监听与所有存活连接。

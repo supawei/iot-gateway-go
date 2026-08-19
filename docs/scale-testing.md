@@ -1,0 +1,156 @@
+# 规模化压测方案 (Scale Testing)
+
+> **状态**:方案 + 可运行 harness(2026-08-20)
+> **关联**:[hack/scalebench](../hack/scalebench/)、[ops-monitoring-design.md](ops-monitoring-design.md)(/metrics 指标口径)
+> **目标**:验证网关在设备/点位规模扩大、采集频率升高时的**采集吞吐、输出吞吐、资源占用**与**瓶颈位置**,重点覆盖 32 位 ARM 网关盒的低内存场景。
+
+## 1. 目标与范围
+
+### 1.1 压测什么
+
+网关数据链路(端到端,真实进程):
+
+```
+scheduler 周期采集(Modbus TCP 模拟从站)
+   ──DataPoint──▶ 处理层(过滤/聚合) ──▶ 告警引擎 ──▶ 输出(MQTT 假 broker)
+                                          │
+                     SQLite(WAL:配置 + 断网补传 + 告警记录)
+```
+
+- **南向**:Modbus TCP 模拟从站(`modbus_sim`),支持 FC1-4 读 + FC6/16 写,逐连接独立端口(端点防冲突),统计请求/寄存器数。
+- **北向**:记录型 MQTT 假 broker(复用 `internal/output/mqtttest`),应答 CONNACK/PUBACK/SUBACK,统计发布条数/topic。
+- **被测对象**:真实 `gateway` 二进制(经 REST 批量配置、/metrics 采样),不是单元级 mock。
+
+### 1.2 不测什么
+
+- 协议设备真实性(模拟从站仅确定性应答,不含真实设备延迟/抖动);
+- 公网 MQTT broker 吞吐(假 broker 零延迟);
+- 长时间稳定性(建议 >72h 另跑,见 §8)。
+
+## 2. 环境要求
+
+| 项 | 要求 |
+|---|---|
+| Go | ≥ 1.25(与 go.mod 一致) |
+| 前端 | `web/dist` 需存在(`go:embed` 内嵌);`make web` 或 `make build` 生成 |
+| 端口 | harness 自动选空闲端口,不冲突 |
+| 运行平台 | x86_64 开发机 / 目标 ARMv7 网关(交叉编译 harness 与 gateway 后在同机运行) |
+
+## 3. 快速开始
+
+```bash
+# 默认规模:500 设备 × 4 点位 × 5 连接,1s 轮询,pool=16,30s 采样
+go run ./hack/scalebench
+
+# 完整选项
+go run ./hack/scalebench \
+  -devices 1000 -points 4 -conns 5 -interval-ms 1000 -pool 32 \
+  -mqtt -alerts 50 \
+  -warmup 30s -duration 60s -step 2s \
+  -out /tmp/bench.csv
+```
+
+`go run ./hack/scalebench -h` 查看全部参数。harness 会自动 `go build` 网关二进制到临时目录。
+
+**建议预热时长**:让**全部设备先上线**再进采样窗口,否则采样区间会混入"连接建立/首轮采集"的爬坡段(见 §6 发现)。经验值:`-warmup ≥ 设备数 × 轮询周期 + 5s`(200 设备 @1s ≈ 35s)。
+
+## 4. 参数说明
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `-devices` | 500 | 设备总数 |
+| `-points` | 4 | 每设备点位数量(保持寄存器,float32) |
+| `-conns` | 5 | Modbus 连接数(每条连接独立模拟从站端口;设备轮询分布其上) |
+| `-interval-ms` | 1000 | 轮询周期(毫秒) |
+| `-pool` | 16 | scheduler worker pool 大小 |
+| `-mqtt` | off | 启用 MQTT 输出到假 broker(测北向吞吐) |
+| `-alerts` | 0 | 附加告警规则数(引用点位、阈值 200000 不触发,仅测求值开销) |
+| `-warmup` | 10s | 预热(等待全部设备上线或到期) |
+| `-duration` | 30s | 采样窗口 |
+| `-step` | 2s | 采样间隔 |
+| `-gateway` | 自动 | 网关二进制路径(缺省自动构建) |
+| `-out` | 空 | CSV 汇总报告路径 |
+
+## 5. 场景矩阵
+
+| 场景 | 目标 | 建议参数 |
+|---|---|---|
+| A 规模扫描 | 设备数 ↑ 时吞吐/内存曲线 | `-devices 100/500/1000/2000`, `-interval-ms 1000`, `-mqtt`, `-warmup` 按 §3 放量 |
+| B 频率扫描 | 采集频率 ↑ 时的上限 | `-interval-ms 1000/500/200`, 固定设备数 |
+| C pool 扫描 | worker 池大小对吞吐/队列的影响 | `-pool 8/16/32/64`, 固定规模 |
+| D 输出压力 | 北向发布速率与背压 | `-mqtt` + 大 `-points`/高频率;看 broker 收到条数、`output_pending/dropped` |
+| E 边缘+告警开销 | 处理层与告警求值的 CPU 影响 | `-alerts 100` + 高频率;看 `/metrics` 处理层计数 |
+| F 断连韧性 | 南向/北向故障下的行为 | 运行中手动 kill 模拟从站 / 假 broker,观察补传队列(进阶:另写脚本) |
+| G ARMv7 内存 | **低内存盒子的 RSS 上限**(重点) | 见 §7 |
+
+**对比基线**:固定一套参数(如 A 场景 500 设备),跨版本/跨改动记录 `-out` CSV,保证可比性。
+
+## 6. 指标解读
+
+输出示例(200 设备 @1s,pool 64,预热 35s):
+
+```
+collect 速率   = 199.7 次/秒(≈ 设备数 × 1/周期,达预期)
+在线设备       = 200/200
+采集错误       = 0
+预估数据点吞吐 ≈ collect速率 × points 点/秒
+Modbus 读请求  = 199.7 请求/秒(模拟从站实测)
+假 broker 收到 = N 条/秒(仅 -mqtt)
+RSS            = X MB(进程常驻,重点看 ARM)
+任务队列 len   = 0(非 0 或逼近 cap 说明 pool 不够)
+```
+
+- `collect_total` / `iot_gateway_collect_errors_total`:调度器每次设备轮询 +1,读失败 +1。**速率应 ≈ 设备数 / 周期(秒)**;明显偏低排查:预热不足(爬坡)、pool 过小(队列满)、南向慢。
+- `iot_gateway_task_queue_length`:逼近 `2×pool` 说明 worker 不够,应放大 `-pool`。
+- `iot_gateway_output_pending/dropped_total`:北向背压;非 0 说明输出跟不上或 broker 慢。
+- 处理层计数:`processing_points_in/passed/filtered/aggregated_total` 验证边缘计算在压测下不丢路径。
+- 内存:`process_rss_bytes` 是产品化关键指标(尤其 32 位 ARM)。
+
+### 6.1 已发现的现象(需进一步调查)
+
+- **子秒轮询未生效**:30 设备 `-interval-ms 500`(应 60 次/s)实测稳定在 **30 次/s**(= 1 次/设备/秒),即使全部在线、pool 32、无错误。`@every 500ms` 的 robfig/cron 调度在该规模下呈 1 秒级节拍,疑似 cron 子秒调度/唤醒行为所致。**建议作为专项调查**:确认是 robfig/cron v3.0.1 限制还是网关用法问题,再决定是否换用更精确的定时器(如 `time.Ticker` 批量调度)。
+- **配置爬坡**:大批量 REST 建设备时,scheduler 增量 reconcile 逐设备接入,全部上线耗时 = 设备数 × 每设备连接/首采时间。压测必须等全部上线再采样(见 §3 预热指引),否则速率被低估(200 设备预热不足时测得 62/s,充分预热后 200/s)。
+
+## 7. ARMv7 专项(重点)
+
+32 位 ARM 网关盒**内存受限**(256–512MB 常见),modernc.org/sqlite 转译库内存占用偏大(见 [armv7-compatibility-review.md](armv7-compatibility-review.md))。压测重点:
+
+1. 交叉编译 harness 与 gateway:`GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o scalebench-arm ./hack/scalebench`,连同 `gateway-armv7` 一起拷到目标板。
+2. 同机运行(harness 与 gateway 同一进程树上),采样 `-step 1s`。
+3. **重点指标**:`RSS`、`systemMem 占用`、`goroutines`;对比 x86 基线,确认规模上限(如 500 vs 1000 设备时 RSS 是否突破内存预算)。
+4. **SQLite WAL 专项**:压测期间观察 `gateway.db-wal` 大小(补传/告警写入),确认不超过闪存/内存预算;`-alerts` 与断网补传是主要写源。
+5. 若 RSS 超预算:减 `-points`、加 `-interval-ms`、或评估 `-pool` 对 goroutine 数的影响(worker 池 = goroutine 上限之一)。
+
+## 8. 进阶:长稳测试
+
+harness 适合分钟级吞吐基准;长稳(热泄漏/内存慢涨/SQLite 无限增长)建议:
+
+- 连续运行 72h+ 同参数,`-duration 3600s -step 60s`,定期记录 RSS/goroutines/WAL;
+- 观察 `iot_gateway_go_goroutines` 是否单调上涨(goroutine 泄漏)、RSS 是否慢涨(内存泄漏)、WAL/补传表是否无界增长。
+
+## 9. 结果记录模板
+
+每次压测建议记录:
+
+| 字段 | 值 |
+|---|---|
+| 版本/commit | `git log -1 --oneline` |
+| 平台 | x86_64 / armv7l,内存 |
+| 参数 | devices/points/conns/interval/pool/mqtt/alerts |
+| collect 速率 & 错误 | |
+| 在线设备 | |
+| 数据点吞吐 / MQTT 条率 | |
+| RSS / goroutines / 任务队列 | |
+| WAL 大小(长稳) | |
+
+`-out bench.csv` 自动产出机器可读首行,便于脚本批量对比。
+
+## 10. 调优指引(依据指标)
+
+| 现象 | 手段 |
+|---|---|
+| 队列逼近 cap / collect 掉速 | 增大 `-pool`(scheduler.poolSize) |
+| 子秒轮询只有 1/s | 调查 robfig/cron 子秒调度(§6.1),必要时改定时器 |
+| 输出 pending/dropped 非 0 | 增大输出批量(`flushInterval`/`batchMax`)或排查 broker |
+| RSS 逼近预算(ARM) | 减点位/降频;检查 SQLite 页缓存与补传队列上限(`backfillMax`) |
+| goroutines 慢涨 | 检查驱动连接/订阅/补传 goroutine 是否泄漏(长稳) |
