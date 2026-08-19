@@ -1,7 +1,7 @@
 // Package backfill 提供北向输出的断网本地补传(离线缓存)持久化队列。
 //
 // 设计:采集数据在"无法即时送出"(断连 / 上送失败 / 缓冲满)时,由输出或
-// Manager 经 Save 落库到 SQLite 表 backfill_queue;恢复后由 Manager 按序
+// Manager 经 Save 落库到 SQLite 表 gw_backfill_queue;恢复后由 Manager 按序
 // Peek → 重放 → Ack(确认删除)。队列按 output_id 隔离(每输出独立),有全局
 // 上限,超出时淘汰最旧数据,保证磁盘有界。详见 docs/offline-backfill-design.md。
 package backfill
@@ -21,13 +21,13 @@ import (
 const DefaultMax = 100_000
 
 const schema = `
-CREATE TABLE IF NOT EXISTS backfill_queue (
+CREATE TABLE IF NOT EXISTS gw_backfill_queue (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     output_id  TEXT    NOT NULL,
     payload    TEXT    NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at TEXT    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_backfill_output ON backfill_queue (output_id, id);`
+CREATE INDEX IF NOT EXISTS idx_gw_backfill_output ON gw_backfill_queue (output_id, id);`
 
 // Item 是一条待补传记录:ID 用于确认删除,DP 为还原的采集数据点。
 type Item struct {
@@ -46,10 +46,40 @@ func New(db *sql.DB, max int) (*Store, error) {
 	if max <= 0 {
 		max = DefaultMax
 	}
+	// 开发期结构演进:旧表 backfill_queue 改名 gw_backfill_queue(统一 gw_ 前缀,
+	// 幂等;仅当旧表存在且新表不存在时执行),须在建表前执行以免被空表挡住。
+	if err := evolveRename(db); err != nil {
+		return nil, err
+	}
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("backfill schema: %w", err)
 	}
 	return &Store{db: db, max: max}, nil
+}
+
+// evolveRename 开发期结构演进:backfill_queue → gw_backfill_queue(保留数据)。
+func evolveRename(db *sql.DB) error {
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'backfill_queue'`,
+	).Scan(&n); err != nil {
+		return fmt.Errorf("backfill rename check: %w", err)
+	}
+	if n == 0 {
+		return nil
+	}
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'gw_backfill_queue'`,
+	).Scan(&n); err != nil {
+		return fmt.Errorf("backfill rename check: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE backfill_queue RENAME TO gw_backfill_queue`); err != nil {
+		return fmt.Errorf("rename backfill_queue: %w", err)
+	}
+	return nil
 }
 
 // Save 把一批数据点入队;超出上限时按 id 淘汰最旧数据(保最新),并告警。
@@ -58,7 +88,9 @@ func (s *Store) Save(outputID string, dps []model.DataPoint) error {
 	if len(dps) == 0 {
 		return nil
 	}
-	now := time.Now().Unix()
+	// created_at 统一存 RFC3339Nano 文本(与 gw_client/gw_alert_rule/gw_alert 一致);
+	// 队列顺序以自增 id 为准,created_at 仅留档。
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("backfill begin tx: %w", err)
@@ -66,7 +98,7 @@ func (s *Store) Save(outputID string, dps []model.DataPoint) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(
-		`INSERT INTO backfill_queue (output_id, payload, created_at) VALUES (?, ?, ?)`)
+		`INSERT INTO gw_backfill_queue (output_id, payload, created_at) VALUES (?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("backfill prepare: %w", err)
 	}
@@ -98,7 +130,7 @@ func (s *Store) Save(outputID string, dps []model.DataPoint) error {
 func (s *Store) evictOver(tx *sql.Tx, outputID string) error {
 	var total int
 	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM backfill_queue WHERE output_id = ?`, outputID).Scan(&total); err != nil {
+		`SELECT COUNT(*) FROM gw_backfill_queue WHERE output_id = ?`, outputID).Scan(&total); err != nil {
 		return fmt.Errorf("backfill count: %w", err)
 	}
 	if total <= s.max {
@@ -106,8 +138,8 @@ func (s *Store) evictOver(tx *sql.Tx, outputID string) error {
 	}
 	over := total - s.max
 	res, err := tx.Exec(
-		`DELETE FROM backfill_queue WHERE id IN (
-			SELECT id FROM backfill_queue WHERE output_id = ? ORDER BY id LIMIT ?)`,
+		`DELETE FROM gw_backfill_queue WHERE id IN (
+			SELECT id FROM gw_backfill_queue WHERE output_id = ? ORDER BY id LIMIT ?)`,
 		outputID, over,
 	)
 	if err != nil {
@@ -124,7 +156,7 @@ func (s *Store) evictOver(tx *sql.Tx, outputID string) error {
 func (s *Store) CountByOutput(outputID string) (int, error) {
 	var n int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM backfill_queue WHERE output_id = ?`, outputID).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM gw_backfill_queue WHERE output_id = ?`, outputID).Scan(&n); err != nil {
 		return 0, fmt.Errorf("backfill count: %w", err)
 	}
 	return n, nil
@@ -133,7 +165,7 @@ func (s *Store) CountByOutput(outputID string) (int, error) {
 // TotalCount 返回全部输出的待补传总条数(观测用)。
 func (s *Store) TotalCount() (int, error) {
 	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM backfill_queue`).Scan(&n); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM gw_backfill_queue`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("backfill total count: %w", err)
 	}
 	return n, nil
@@ -143,7 +175,7 @@ func (s *Store) TotalCount() (int, error) {
 // 返回的 Item.DP 已还原为采集数据点。
 func (s *Store) Peek(outputID string, limit int) ([]Item, error) {
 	rows, err := s.db.Query(
-		`SELECT id, payload FROM backfill_queue WHERE output_id = ? ORDER BY id LIMIT ?`,
+		`SELECT id, payload FROM gw_backfill_queue WHERE output_id = ? ORDER BY id LIMIT ?`,
 		outputID, limit,
 	)
 	if err != nil {
@@ -191,7 +223,7 @@ func (s *Store) Ack(outputID string, ids []int64) error {
 			args = append(args, id)
 		}
 		if _, err := s.db.Exec(
-			`DELETE FROM backfill_queue WHERE output_id = ? AND id IN (`+placeholders+`)`,
+			`DELETE FROM gw_backfill_queue WHERE output_id = ? AND id IN (`+placeholders+`)`,
 			args...,
 		); err != nil {
 			return fmt.Errorf("backfill ack: %w", err)
@@ -203,7 +235,7 @@ func (s *Store) Ack(outputID string, ids []int64) error {
 // DropOutput 清空指定输出的全部待补传记录(输出配置被删除时调用)。
 func (s *Store) DropOutput(outputID string) error {
 	if _, err := s.db.Exec(
-		`DELETE FROM backfill_queue WHERE output_id = ?`, outputID); err != nil {
+		`DELETE FROM gw_backfill_queue WHERE output_id = ?`, outputID); err != nil {
 		return fmt.Errorf("backfill drop output: %w", err)
 	}
 	return nil

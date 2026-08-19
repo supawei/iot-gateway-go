@@ -9,12 +9,15 @@ import (
 // Config 只含传输参数(怎么到达总线);设备级协议参数(从机地址等)归 Device.Params。
 // ManagedBy 标记该连接的自动管理来源(如 "smardaten:<outputID>");空串表示
 // Web UI 手工配置,不会被平台同步的孤儿清理删除。见 internal/output/smardaten/sync.go。
+// CreatedAt/UpdatedAt 由 store 维护(RFC3339Nano),业务写入不参与内容比较。
 type Connection struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Driver    string          `json:"driver"`
 	Config    json.RawMessage `json:"config"`
 	ManagedBy string          `json:"managedBy,omitempty"`
+	CreatedAt string          `json:"createdAt,omitempty"`
+	UpdatedAt string          `json:"updatedAt,omitempty"`
 }
 
 // User 是登录管理员账号。密码只存 bcrypt 哈希,不落明文。
@@ -23,6 +26,7 @@ type User struct {
 	PasswordHash       string `json:"-"` // bcrypt 哈希,永不序列化返回
 	MustChangePassword bool   `json:"mustChangePassword"`
 	Enabled            bool   `json:"enabled"`
+	CreatedAt          string `json:"createdAt,omitempty"`
 }
 
 // Client 是三方系统接入主体,凭 API Key(只存哈希)+ 绑定 scope 授权。
@@ -37,17 +41,21 @@ type Client struct {
 
 // Output 是北向输出配置:一个输出插件实例(如 MQTT / ThingsBoard / TDengine)。
 // 与连接/设备一致,输出配置存 SQLite,经 Web UI 增删改并热重载(见 docs/northbound-output-config.md)。
+// CreatedAt/UpdatedAt 由 store 维护。
 type Output struct {
-	ID      string          `json:"id"`
-	Name    string          `json:"name"`
-	Type    string          `json:"type"` // mqtt / thingsboard / tdengine
-	Config  json.RawMessage `json:"config"`
-	Enabled bool            `json:"enabled"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Type      string          `json:"type"` // mqtt / thingsboard / tdengine
+	Config    json.RawMessage `json:"config"`
+	Enabled   bool            `json:"enabled"`
+	CreatedAt string          `json:"createdAt,omitempty"`
+	UpdatedAt string          `json:"updatedAt,omitempty"`
 }
 
 // Device 表示一个物理或逻辑设备,引用一个 Connection 并携带设备级协议参数。
 // IntervalMs 为设备级采集周期,连读时按此周期批量读取所有点位。
 // ManagedBy 同 Connection.ManagedBy,标记设备的自动管理来源(空串=手工配置)。
+// CreatedAt/UpdatedAt 由 store 维护,不参与同步内容比较。
 type Device struct {
 	ID           string          `json:"id"`
 	Name         string          `json:"name"`
@@ -57,6 +65,8 @@ type Device struct {
 	IntervalMs   int             `json:"intervalMs"`
 	Enabled      bool            `json:"enabled"`
 	ManagedBy    string          `json:"managedBy,omitempty"`
+	CreatedAt    string          `json:"createdAt,omitempty"`
+	UpdatedAt    string          `json:"updatedAt,omitempty"`
 }
 
 // Point 描述单个采集点:采什么、怎么采,以及可选的边缘处理(过滤/聚合)。

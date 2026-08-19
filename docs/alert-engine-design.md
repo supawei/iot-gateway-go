@@ -27,7 +27,7 @@ ROADMAP 曾把「规则引擎」列入「暂缓清单(刻意不做)」,理由是
 3. **状态新鲜度**:引用点位的值超过有效期视为失效,防陈旧开关状态误告警。
 4. **告警独立消息 + 定向投递**:告警不复用 `DataPoint` 格式,走独立 `AlertMessage` + `AlertPublisher`
    接口,定向投递到规则指定的输出(如某 MQTT 输出的告警 topic)。
-5. **告警表持久化**:触发即落 SQLite `alerts` 表,`pending`/`resolved` 状态机,供 Web UI 查看。
+5. **告警表持久化**:触发即落 SQLite `gw_alert` 表,`pending`/`resolved` 状态机,供 Web UI 查看。
 6. **配置热重载**:规则存 SQLite,经 Web UI/API 编辑后 `store.OnChange` 自动热重载,范式与 processing 一致。
 
 ### 1.2 非目标(保持克制)
@@ -42,7 +42,7 @@ ROADMAP 曾把「规则引擎」列入「暂缓清单(刻意不做)」,理由是
 
 ## 2. 数据模型
 
-告警规则是网关级配置(跨设备,不属于单个点位),故独立 `alert_rule` 表,不挂在 `Point` 上。
+告警规则是网关级配置(跨设备,不属于单个点位),故独立 `gw_alert_rule` 表,不挂在 `Point` 上。
 
 ```go
 // AlertRule 是跨设备/跨点位告警规则:表达式求值为 true 即触发告警。
@@ -122,7 +122,7 @@ schema 也不统一(普通点 value 是标量,告警 value 是对象)。告警�
 新增两表(开发期演进,`schema` 常量内 `CREATE TABLE IF NOT EXISTS`,见 development-conventions.md):
 
 ```sql
-CREATE TABLE IF NOT EXISTS alert_rule (
+CREATE TABLE IF NOT EXISTS gw_alert_rule (
     id                 TEXT PRIMARY KEY,
     name               TEXT NOT NULL,
     enabled            INTEGER NOT NULL DEFAULT 1,
@@ -135,8 +135,8 @@ CREATE TABLE IF NOT EXISTS alert_rule (
     created_at         TEXT NOT NULL,
     updated_at         TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS alert (
-    alert_id     TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS gw_alert (
+    id           TEXT PRIMARY KEY,
     rule_id      TEXT NOT NULL,
     rule_name    TEXT NOT NULL,
     severity     TEXT NOT NULL,

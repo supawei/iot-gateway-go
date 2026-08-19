@@ -221,7 +221,7 @@ payload 为 `AlertMessage` JSON(与告警表记录对齐,但不带本地状态�
 ### 6.2 告警记录页
 
 侧边栏 **「告警记录」**(`/alerts`):列出已触发告警(级别 / 规则 / 内容 / 触发时间 / 状态 / 解除时间),
-可按状态过滤:全部 / 未解除(`pending`)/ 已解除(`resolved`)。记录存 SQLite `alerts` 表,随网关重启保留。
+可按状态过滤:全部 / 未解除(`pending`)/ 已解除(`resolved`)。记录存 SQLite `gw_alert` 表,随网关重启保留。
 
 ### 6.3 投递语义
 

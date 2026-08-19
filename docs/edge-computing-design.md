@@ -102,7 +102,7 @@ type Aggregate struct {
 `point` 表新增 `processing TEXT` 列（JSON，可为 NULL）：
 
 ```sql
-CREATE TABLE IF NOT EXISTS point (
+CREATE TABLE IF NOT EXISTS gw_point (
     ... 原有列 ...,
     processing TEXT
 );

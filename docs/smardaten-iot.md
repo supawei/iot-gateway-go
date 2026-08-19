@@ -81,9 +81,9 @@
 
 ## 3. 配置设计
 
-### 3.1 输出插件配置（SQLite `output` 表）
+### 3.1 输出插件配置（SQLite `gw_output` 表）
 
-smardaten-iot 与其他输出插件一样，配置存储在 SQLite 的 `output` 表中，类型为 `"smardaten-iot"`。配置 JSON 结构如下：
+smardaten-iot 与其他输出插件一样，配置存储在 SQLite 的 `gw_output` 表中，类型为 `"smardaten-iot"`。配置 JSON 结构如下：
 
 ```json
 {
@@ -113,7 +113,7 @@ smardaten-iot 与其他输出插件一样，配置存储在 SQLite 的 `output` 
 
 ### 3.2 gatewayID 来源
 
-`gatewayID` 不从插件配置读取，而是从 `BuildContext.GatewayID`（即 SQLite `settings` 表的 `gateway.id`）注入。这与现有 mqtt 输出一致。
+`gatewayID` 不从插件配置读取，而是从 `BuildContext.GatewayID`（即 SQLite `gw_settings` 表的 `gateway.id`）注入。这与现有 mqtt 输出一致。
 
 ### 3.3 application.json（平台下发）
 

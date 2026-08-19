@@ -16,14 +16,16 @@ import (
 )
 
 const schema = `
-CREATE TABLE IF NOT EXISTS connection (
+CREATE TABLE IF NOT EXISTS gw_connection (
     id         TEXT PRIMARY KEY,
     name       TEXT NOT NULL,
     driver     TEXT NOT NULL,
     config     TEXT NOT NULL,
-    managed_by TEXT NOT NULL DEFAULT ''
+    managed_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE IF NOT EXISTS device (
+CREATE TABLE IF NOT EXISTS gw_device (
     id            TEXT PRIMARY KEY,
     name          TEXT NOT NULL,
     connection_id TEXT NOT NULL,
@@ -31,9 +33,11 @@ CREATE TABLE IF NOT EXISTS device (
     interval_ms   INTEGER NOT NULL,
     enabled       INTEGER NOT NULL DEFAULT 1,
     managed_by    TEXT NOT NULL DEFAULT '',
-    FOREIGN KEY (connection_id) REFERENCES connection(id) ON DELETE RESTRICT
+    created_at    TEXT NOT NULL DEFAULT '',
+    updated_at    TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (connection_id) REFERENCES gw_connection(id) ON DELETE RESTRICT
 );
-CREATE TABLE IF NOT EXISTS point (
+CREATE TABLE IF NOT EXISTS gw_point (
     device_id   TEXT NOT NULL,
     name        TEXT NOT NULL,
     address     TEXT NOT NULL,
@@ -42,15 +46,16 @@ CREATE TABLE IF NOT EXISTS point (
     processing  TEXT,
     seq         INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (device_id, name),
-    FOREIGN KEY (device_id) REFERENCES device(id) ON DELETE CASCADE
+    FOREIGN KEY (device_id) REFERENCES gw_device(id) ON DELETE CASCADE
 );
-CREATE TABLE IF NOT EXISTS user (
+CREATE TABLE IF NOT EXISTS gw_user (
     id                   TEXT PRIMARY KEY,
     password_hash        TEXT NOT NULL,
     must_change_password INTEGER NOT NULL DEFAULT 1,
-    enabled              INTEGER NOT NULL DEFAULT 1
+    enabled              INTEGER NOT NULL DEFAULT 1,
+    created_at           TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE IF NOT EXISTS client (
+CREATE TABLE IF NOT EXISTS gw_client (
     id           TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     api_key_hash TEXT NOT NULL,
@@ -58,18 +63,20 @@ CREATE TABLE IF NOT EXISTS client (
     enabled      INTEGER NOT NULL DEFAULT 1,
     created_at   TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS output (
-    id      TEXT PRIMARY KEY,
-    name    TEXT NOT NULL,
-    type    TEXT NOT NULL,
-    config  TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1
+CREATE TABLE IF NOT EXISTS gw_output (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    type       TEXT NOT NULL,
+    config     TEXT NOT NULL,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE IF NOT EXISTS settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS gw_settings (
+    setting_key TEXT PRIMARY KEY,
+    value       TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS alert_rule (
+CREATE TABLE IF NOT EXISTS gw_alert_rule (
     id                 TEXT PRIMARY KEY,
     name               TEXT NOT NULL,
     enabled            INTEGER NOT NULL DEFAULT 1,
@@ -82,8 +89,8 @@ CREATE TABLE IF NOT EXISTS alert_rule (
     created_at         TEXT NOT NULL,
     updated_at         TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS alert (
-    alert_id     TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS gw_alert (
+    id           TEXT PRIMARY KEY,
     rule_id      TEXT NOT NULL,
     rule_name    TEXT NOT NULL,
     severity     TEXT NOT NULL,
@@ -93,7 +100,10 @@ CREATE TABLE IF NOT EXISTS alert (
     context      TEXT NOT NULL,
     status       TEXT NOT NULL DEFAULT 'pending',
     resolved_at  TEXT
-);`
+);
+CREATE INDEX IF NOT EXISTS idx_gw_device_connection_id ON gw_device (connection_id);
+CREATE INDEX IF NOT EXISTS idx_gw_alert_rule_id ON gw_alert (rule_id);
+CREATE INDEX IF NOT EXISTS idx_gw_alert_triggered_at ON gw_alert (triggered_at);`
 
 // ErrConnectionInUse 表示连接仍被设备引用,不可删除。
 var ErrConnectionInUse = errors.New("connection is referenced by devices")
@@ -112,6 +122,62 @@ func isDuplicateColumn(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "duplicate column name")
 }
 
+// tableExists 判断 SQLite 中是否存在指定表(开发期结构演进用)。
+func tableExists(db *sql.DB, name string) (bool, error) {
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// evolveRenameTable 开发期结构演进:把旧表名改名新表名(幂等;仅当旧表存在且
+// 新表不存在时执行),保留数据。表名来自代码常量,无注入风险。
+func evolveRenameTable(db *sql.DB, oldName, newName string) error {
+	oldExists, err := tableExists(db, oldName)
+	if err != nil {
+		return err
+	}
+	if !oldExists {
+		return nil
+	}
+	newExists, err := tableExists(db, newName)
+	if err != nil {
+		return err
+	}
+	if newExists {
+		return nil
+	}
+	if _, err := db.Exec("ALTER TABLE " + oldName + " RENAME TO " + newName); err != nil {
+		return fmt.Errorf("rename %s -> %s: %w", oldName, newName, err)
+	}
+	return nil
+}
+
+// columnExists 判断表中是否存在指定列(开发期结构演进用)。
+// 表名来自代码常量,无注入风险。
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
 // Store 负责连接/设备/点位配置的持久化与变更通知。
 type Store struct {
 	db *sql.DB
@@ -127,33 +193,76 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	// 开发期结构演进:旧表名统一加 gw_ 前缀(命名规范,规避保留字/通用名冲突)。
+	// 须在 schema 建表前执行,否则 CREATE TABLE IF NOT EXISTS gw_* 会先建出空表
+	// 挡住重命名;保留旧数据。user/app_user 均为历史形态,统一落到 gw_user。
+	renames := [][2]string{
+		{"connection", "gw_connection"},
+		{"device", "gw_device"},
+		{"point", "gw_point"},
+		{"user", "gw_user"},
+		{"app_user", "gw_user"},
+		{"client", "gw_client"},
+		{"output", "gw_output"},
+		{"settings", "gw_settings"},
+		{"alert_rule", "gw_alert_rule"},
+		{"alert", "gw_alert"},
+	}
+	for _, r := range renames {
+		if err := evolveRenameTable(db, r[0], r[1]); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("evolve rename table %s: %w", r[0], err)
+		}
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 	// 开发期结构演进:为历史 point 表补 processing / seq 列(幂等;新库已含该列时报错忽略)。
 	// 见 docs/development-conventions.md(未发布不做版本化迁移)。
-	if _, err := db.Exec(`ALTER TABLE point ADD COLUMN processing TEXT`); err != nil && !isDuplicateColumn(err) {
+	if _, err := db.Exec(`ALTER TABLE gw_point ADD COLUMN processing TEXT`); err != nil && !isDuplicateColumn(err) {
 		db.Close()
 		return nil, fmt.Errorf("evolve point schema: %w", err)
 	}
-	if _, err := db.Exec(`ALTER TABLE point ADD COLUMN seq INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumn(err) {
+	if _, err := db.Exec(`ALTER TABLE gw_point ADD COLUMN seq INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumn(err) {
 		db.Close()
 		return nil, fmt.Errorf("evolve point schema: %w", err)
 	}
 	// 开发期结构演进:为历史 connection/device 表补 managed_by 列(幂等;标记
 	// 平台同步创建的实体,取代 settings 表的 JSON 登记,见 internal/output/smardaten/sync.go)。
-	if _, err := db.Exec(`ALTER TABLE connection ADD COLUMN managed_by TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+	if _, err := db.Exec(`ALTER TABLE gw_connection ADD COLUMN managed_by TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
 		db.Close()
 		return nil, fmt.Errorf("evolve connection schema: %w", err)
 	}
-	if _, err := db.Exec(`ALTER TABLE device ADD COLUMN managed_by TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+	if _, err := db.Exec(`ALTER TABLE gw_device ADD COLUMN managed_by TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
 		db.Close()
 		return nil, fmt.Errorf("evolve device schema: %w", err)
 	}
+	// 开发期结构演进:gw_connection/gw_device/gw_output/gw_user 补 created_at/updated_at 列(幂等)。
+	for _, t := range []struct{ table, col string }{
+		{"gw_connection", "created_at"}, {"gw_connection", "updated_at"},
+		{"gw_device", "created_at"}, {"gw_device", "updated_at"},
+		{"gw_output", "created_at"}, {"gw_output", "updated_at"},
+		{"gw_user", "created_at"},
+	} {
+		if _, err := db.Exec("ALTER TABLE " + t.table + " ADD COLUMN " + t.col + " TEXT NOT NULL DEFAULT ''"); err != nil && !isDuplicateColumn(err) {
+			db.Close()
+			return nil, fmt.Errorf("evolve %s.%s: %w", t.table, t.col, err)
+		}
+	}
+	// 开发期结构演进:gw_settings.key 改名 setting_key(规避保留字;幂等,
+	// 仅当旧列存在且新列不存在时执行)。
+	if has, err := columnExists(db, "gw_settings", "key"); err == nil && has {
+		if missing, err := columnExists(db, "gw_settings", "setting_key"); err == nil && !missing {
+			if _, err := db.Exec(`ALTER TABLE gw_settings RENAME COLUMN key TO setting_key`); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("evolve settings column: %w", err)
+			}
+		}
+	}
 	// 预置默认网关设置(幂等):数据库为空时内置默认网关 ID。
 	if _, err := db.Exec(
-		`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`,
+		`INSERT OR IGNORE INTO gw_settings (setting_key, value) VALUES (?, ?)`,
 		SettingGatewayID, DefaultGatewayID,
 	); err != nil {
 		db.Close()
@@ -219,10 +328,15 @@ func (s *Store) notify() {
 }
 
 func (s *Store) SaveConnection(conn model.Connection) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	conn.UpdatedAt = now
+	if conn.CreatedAt == "" {
+		conn.CreatedAt = now
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO connection (id, name, driver, config, managed_by) VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, driver=excluded.driver, config=excluded.config, managed_by=excluded.managed_by`,
-		conn.ID, conn.Name, conn.Driver, string(conn.Config), conn.ManagedBy,
+		`INSERT INTO gw_connection (id, name, driver, config, managed_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, driver=excluded.driver, config=excluded.config, managed_by=excluded.managed_by, updated_at=excluded.updated_at`,
+		conn.ID, conn.Name, conn.Driver, string(conn.Config), conn.ManagedBy, conn.CreatedAt, conn.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert connection: %w", err)
@@ -232,7 +346,7 @@ func (s *Store) SaveConnection(conn model.Connection) error {
 }
 
 func (s *Store) ListConnections() ([]model.Connection, error) {
-	rows, err := s.db.Query("SELECT id, name, driver, config, managed_by FROM connection")
+	rows, err := s.db.Query("SELECT id, name, driver, config, managed_by, created_at, updated_at FROM gw_connection")
 	if err != nil {
 		return nil, fmt.Errorf("query connections: %w", err)
 	}
@@ -249,7 +363,7 @@ func (s *Store) ListConnections() ([]model.Connection, error) {
 }
 
 func (s *Store) GetConnection(id string) (model.Connection, error) {
-	row := s.db.QueryRow("SELECT id, name, driver, config, managed_by FROM connection WHERE id = ?", id)
+	row := s.db.QueryRow("SELECT id, name, driver, config, managed_by, created_at, updated_at FROM gw_connection WHERE id = ?", id)
 	conn, err := scanConnection(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -263,7 +377,7 @@ func (s *Store) GetConnection(id string) (model.Connection, error) {
 // ListManagedConnectionIDs 列出由 manager 自动创建管理的连接 ID(用于平台同步
 // 的孤儿清理;手工配置的连接 managed_by 为空,不会出现在结果中)。
 func (s *Store) ListManagedConnectionIDs(manager string) ([]string, error) {
-	rows, err := s.db.Query("SELECT id FROM connection WHERE managed_by = ?", manager)
+	rows, err := s.db.Query("SELECT id FROM gw_connection WHERE managed_by = ?", manager)
 	if err != nil {
 		return nil, fmt.Errorf("query managed connections: %w", err)
 	}
@@ -282,13 +396,13 @@ func (s *Store) ListManagedConnectionIDs(manager string) ([]string, error) {
 // DeleteConnection 删除连接;若有 device 引用则返回 ErrConnectionInUse。
 func (s *Store) DeleteConnection(id string) error {
 	var refCount int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM device WHERE connection_id = ?", id).Scan(&refCount); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM gw_device WHERE connection_id = ?", id).Scan(&refCount); err != nil {
 		return fmt.Errorf("check connection references: %w", err)
 	}
 	if refCount > 0 {
 		return fmt.Errorf("%w: %d device(s)", ErrConnectionInUse, refCount)
 	}
-	if _, err := s.db.Exec("DELETE FROM connection WHERE id = ?", id); err != nil {
+	if _, err := s.db.Exec("DELETE FROM gw_connection WHERE id = ?", id); err != nil {
 		return fmt.Errorf("delete connection: %w", err)
 	}
 	s.notify()
@@ -296,7 +410,7 @@ func (s *Store) DeleteConnection(id string) error {
 }
 
 func (s *Store) ListDevices() ([]model.Device, error) {
-	devices, err := s.queryDevices("SELECT id, name, connection_id, params, interval_ms, enabled, managed_by FROM device")
+	devices, err := s.queryDevices("SELECT id, name, connection_id, params, interval_ms, enabled, managed_by, created_at, updated_at FROM gw_device")
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +429,7 @@ func (s *Store) ListDevices() ([]model.Device, error) {
 }
 
 func (s *Store) GetDevice(id string) (model.Device, error) {
-	devices, err := s.queryDevices("SELECT id, name, connection_id, params, interval_ms, enabled, managed_by FROM device WHERE id = ?", id)
+	devices, err := s.queryDevices("SELECT id, name, connection_id, params, interval_ms, enabled, managed_by, created_at, updated_at FROM gw_device WHERE id = ?", id)
 	if err != nil {
 		return model.Device{}, err
 	}
@@ -323,7 +437,7 @@ func (s *Store) GetDevice(id string) (model.Device, error) {
 		return model.Device{}, fmt.Errorf("device %q not found", id)
 	}
 	device := devices[0]
-	device.Points, err = s.queryPoints("SELECT name, address, data_type, scale, processing FROM point WHERE device_id = ? ORDER BY seq", id)
+	device.Points, err = s.queryPoints("SELECT name, address, data_type, scale, processing FROM gw_point WHERE device_id = ? ORDER BY seq", id)
 	if err != nil {
 		return model.Device{}, err
 	}
@@ -351,11 +465,11 @@ func (s *Store) DeleteDevice(id string) error {
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	if _, err := tx.Exec("DELETE FROM point WHERE device_id = ?", id); err != nil {
+	if _, err := tx.Exec("DELETE FROM gw_point WHERE device_id = ?", id); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("delete points: %w", err)
 	}
-	if _, err := tx.Exec("DELETE FROM device WHERE id = ?", id); err != nil {
+	if _, err := tx.Exec("DELETE FROM gw_device WHERE id = ?", id); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("delete device: %w", err)
 	}
@@ -369,7 +483,7 @@ func (s *Store) DeleteDevice(id string) error {
 // ListManagedDeviceIDs 列出由 manager 自动创建管理的设备 ID(用于平台同步的
 // 孤儿清理;手工配置的设备 managed_by 为空,不会出现在结果中)。
 func (s *Store) ListManagedDeviceIDs(manager string) ([]string, error) {
-	rows, err := s.db.Query("SELECT id FROM device WHERE managed_by = ?", manager)
+	rows, err := s.db.Query("SELECT id FROM gw_device WHERE managed_by = ?", manager)
 	if err != nil {
 		return nil, fmt.Errorf("query managed devices: %w", err)
 	}
@@ -392,7 +506,7 @@ func (s *Store) SetDeviceEnabled(id string, enabled bool) error {
 	if enabled {
 		enabledVal = 1
 	}
-	res, err := s.db.Exec("UPDATE device SET enabled = ? WHERE id = ?", enabledVal, id)
+	res, err := s.db.Exec("UPDATE gw_device SET enabled = ? WHERE id = ?", enabledVal, id)
 	if err != nil {
 		return fmt.Errorf("update device enabled: %w", err)
 	}
@@ -406,11 +520,11 @@ func (s *Store) SetDeviceEnabled(id string, enabled bool) error {
 func (s *Store) AddPoint(deviceID string, point model.Point) error {
 	// 追加到末尾:seq 取该设备当前最大序号 +1,保持用户定义的点位顺序。
 	var maxSeq int
-	if err := s.db.QueryRow("SELECT COALESCE(MAX(seq), 0) FROM point WHERE device_id = ?", deviceID).Scan(&maxSeq); err != nil {
+	if err := s.db.QueryRow("SELECT COALESCE(MAX(seq), 0) FROM gw_point WHERE device_id = ?", deviceID).Scan(&maxSeq); err != nil {
 		return fmt.Errorf("query point seq: %w", err)
 	}
 	_, err := s.db.Exec(
-		"INSERT INTO point (device_id, name, address, data_type, scale, processing, seq) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO gw_point (device_id, name, address, data_type, scale, processing, seq) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		deviceID, point.Name, point.Address, string(point.DataType), point.Scale, marshalProcessing(point.Processing), maxSeq+1,
 	)
 	if err != nil {
@@ -421,7 +535,7 @@ func (s *Store) AddPoint(deviceID string, point model.Point) error {
 }
 
 func (s *Store) DeletePoint(deviceID, name string) error {
-	if _, err := s.db.Exec("DELETE FROM point WHERE device_id = ? AND name = ?", deviceID, name); err != nil {
+	if _, err := s.db.Exec("DELETE FROM gw_point WHERE device_id = ? AND name = ?", deviceID, name); err != nil {
 		return fmt.Errorf("delete point: %w", err)
 	}
 	s.notify()
@@ -439,10 +553,13 @@ func (s *Store) SaveUser(u model.User) error {
 	if u.Enabled {
 		enabled = 1
 	}
+	if u.CreatedAt == "" {
+		u.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO user (id, password_hash, must_change_password, enabled) VALUES (?, ?, ?, ?)
+		`INSERT INTO gw_user (id, password_hash, must_change_password, enabled, created_at) VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash, must_change_password=excluded.must_change_password, enabled=excluded.enabled`,
-		u.ID, u.PasswordHash, mustChange, enabled,
+		u.ID, u.PasswordHash, mustChange, enabled, u.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert user: %w", err)
@@ -452,10 +569,10 @@ func (s *Store) SaveUser(u model.User) error {
 
 // GetUser 返回用户;不存在返回 sql.ErrNoRows 包装的错误。
 func (s *Store) GetUser(id string) (model.User, error) {
-	row := s.db.QueryRow("SELECT id, password_hash, must_change_password, enabled FROM user WHERE id = ?", id)
+	row := s.db.QueryRow("SELECT id, password_hash, must_change_password, enabled, created_at FROM gw_user WHERE id = ?", id)
 	var u model.User
 	var mustChange, enabled int
-	if err := row.Scan(&u.ID, &u.PasswordHash, &mustChange, &enabled); err != nil {
+	if err := row.Scan(&u.ID, &u.PasswordHash, &mustChange, &enabled, &u.CreatedAt); err != nil {
 		return model.User{}, fmt.Errorf("get user %q: %w", id, err)
 	}
 	u.MustChangePassword = mustChange != 0
@@ -466,7 +583,7 @@ func (s *Store) GetUser(id string) (model.User, error) {
 // CountUsers 返回用户数,用于判断是否需要预置管理员。
 func (s *Store) CountUsers() (int, error) {
 	var n int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM user").Scan(&n); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM gw_user").Scan(&n); err != nil {
 		return 0, fmt.Errorf("count users: %w", err)
 	}
 	return n, nil
@@ -485,7 +602,7 @@ func (s *Store) SaveClient(c model.Client) error {
 		enabled = 1
 	}
 	_, err = s.db.Exec(
-		`INSERT INTO client (id, name, api_key_hash, scopes, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO gw_client (id, name, api_key_hash, scopes, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, api_key_hash=excluded.api_key_hash, scopes=excluded.scopes, enabled=excluded.enabled`,
 		c.ID, c.Name, c.APIKeyHash, string(scopes), enabled, c.CreatedAt,
 	)
@@ -497,7 +614,7 @@ func (s *Store) SaveClient(c model.Client) error {
 
 // GetClient 返回三方 client;不存在返回 sql.ErrNoRows 包装的错误。
 func (s *Store) GetClient(id string) (model.Client, error) {
-	row := s.db.QueryRow("SELECT id, name, api_key_hash, scopes, enabled, created_at FROM client WHERE id = ?", id)
+	row := s.db.QueryRow("SELECT id, name, api_key_hash, scopes, enabled, created_at FROM gw_client WHERE id = ?", id)
 	c, err := scanClient(row)
 	if err != nil {
 		return model.Client{}, fmt.Errorf("get client %q: %w", id, err)
@@ -507,7 +624,7 @@ func (s *Store) GetClient(id string) (model.Client, error) {
 
 // GetClientByKeyHash 按 API Key 的 SHA-256 哈希查找三方 client(认证用)。
 func (s *Store) GetClientByKeyHash(hash string) (model.Client, bool) {
-	row := s.db.QueryRow("SELECT id, name, api_key_hash, scopes, enabled, created_at FROM client WHERE api_key_hash = ?", hash)
+	row := s.db.QueryRow("SELECT id, name, api_key_hash, scopes, enabled, created_at FROM gw_client WHERE api_key_hash = ?", hash)
 	c, err := scanClient(row)
 	if err != nil {
 		return model.Client{}, false
@@ -517,7 +634,7 @@ func (s *Store) GetClientByKeyHash(hash string) (model.Client, bool) {
 
 // ListClients 返回全部三方 client,按 ID 排序。
 func (s *Store) ListClients() ([]model.Client, error) {
-	rows, err := s.db.Query("SELECT id, name, api_key_hash, scopes, enabled, created_at FROM client ORDER BY id")
+	rows, err := s.db.Query("SELECT id, name, api_key_hash, scopes, enabled, created_at FROM gw_client ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("query clients: %w", err)
 	}
@@ -535,7 +652,7 @@ func (s *Store) ListClients() ([]model.Client, error) {
 
 // DeleteClient 删除三方 client。
 func (s *Store) DeleteClient(id string) error {
-	if _, err := s.db.Exec("DELETE FROM client WHERE id = ?", id); err != nil {
+	if _, err := s.db.Exec("DELETE FROM gw_client WHERE id = ?", id); err != nil {
 		return fmt.Errorf("delete client: %w", err)
 	}
 	return nil
@@ -553,10 +670,15 @@ func (s *Store) SaveOutput(o model.Output) error {
 	if len(config) == 0 {
 		config = json.RawMessage(`{}`)
 	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	o.UpdatedAt = now
+	if o.CreatedAt == "" {
+		o.CreatedAt = now
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO output (id, name, type, config, enabled) VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, config=excluded.config, enabled=excluded.enabled`,
-		o.ID, o.Name, o.Type, string(config), enabled,
+		`INSERT INTO gw_output (id, name, type, config, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, config=excluded.config, enabled=excluded.enabled, updated_at=excluded.updated_at`,
+		o.ID, o.Name, o.Type, string(config), enabled, o.CreatedAt, o.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert output: %w", err)
@@ -567,7 +689,7 @@ func (s *Store) SaveOutput(o model.Output) error {
 
 // ListOutputs 返回全部输出配置,按 ID 排序。
 func (s *Store) ListOutputs() ([]model.Output, error) {
-	rows, err := s.db.Query("SELECT id, name, type, config, enabled FROM output ORDER BY id")
+	rows, err := s.db.Query("SELECT id, name, type, config, enabled, created_at, updated_at FROM gw_output ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("query outputs: %w", err)
 	}
@@ -585,7 +707,7 @@ func (s *Store) ListOutputs() ([]model.Output, error) {
 
 // GetOutput 返回单个输出配置;不存在返回 sql.ErrNoRows 包装的错误。
 func (s *Store) GetOutput(id string) (model.Output, error) {
-	row := s.db.QueryRow("SELECT id, name, type, config, enabled FROM output WHERE id = ?", id)
+	row := s.db.QueryRow("SELECT id, name, type, config, enabled, created_at, updated_at FROM gw_output WHERE id = ?", id)
 	o, err := scanOutput(row)
 	if err != nil {
 		return model.Output{}, fmt.Errorf("get output %q: %w", id, err)
@@ -595,7 +717,7 @@ func (s *Store) GetOutput(id string) (model.Output, error) {
 
 // DeleteOutput 删除输出配置。
 func (s *Store) DeleteOutput(id string) error {
-	if _, err := s.db.Exec("DELETE FROM output WHERE id = ?", id); err != nil {
+	if _, err := s.db.Exec("DELETE FROM gw_output WHERE id = ?", id); err != nil {
 		return fmt.Errorf("delete output: %w", err)
 	}
 	s.notify()
@@ -606,7 +728,7 @@ func scanOutput(row rowScanner) (model.Output, error) {
 	var o model.Output
 	var config string
 	var enabled int
-	if err := row.Scan(&o.ID, &o.Name, &o.Type, &config, &enabled); err != nil {
+	if err := row.Scan(&o.ID, &o.Name, &o.Type, &config, &enabled, &o.CreatedAt, &o.UpdatedAt); err != nil {
 		return model.Output{}, err
 	}
 	o.Config = json.RawMessage(config)
@@ -619,7 +741,7 @@ func scanOutput(row rowScanner) (model.Output, error) {
 // GetSetting 读取网关设置;不存在返回 ("", false, nil)。
 func (s *Store) GetSetting(key string) (string, bool, error) {
 	var value string
-	err := s.db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&value)
+	err := s.db.QueryRow("SELECT value FROM gw_settings WHERE setting_key = ?", key).Scan(&value)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", false, nil
@@ -632,8 +754,8 @@ func (s *Store) GetSetting(key string) (string, bool, error) {
 // SetSetting 写入网关设置(upsert)。
 func (s *Store) SetSetting(key, value string) error {
 	if _, err := s.db.Exec(
-		`INSERT INTO settings (key, value) VALUES (?, ?)
-		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		`INSERT INTO gw_settings (setting_key, value) VALUES (?, ?)
+		 ON CONFLICT(setting_key) DO UPDATE SET value=excluded.value`,
 		key, value,
 	); err != nil {
 		return fmt.Errorf("set setting %q: %w", key, err)
@@ -702,7 +824,7 @@ func (s *Store) queryPoints(query string, args ...any) ([]model.Point, error) {
 }
 
 func (s *Store) queryAllPoints() (map[string][]model.Point, error) {
-	rows, err := s.db.Query("SELECT device_id, name, address, data_type, scale, processing FROM point ORDER BY device_id, seq")
+	rows, err := s.db.Query("SELECT device_id, name, address, data_type, scale, processing FROM gw_point ORDER BY device_id, seq")
 	if err != nil {
 		return nil, fmt.Errorf("query all points: %w", err)
 	}
@@ -729,7 +851,7 @@ type rowScanner interface {
 func scanConnection(row rowScanner) (model.Connection, error) {
 	var conn model.Connection
 	var config string
-	if err := row.Scan(&conn.ID, &conn.Name, &conn.Driver, &config, &conn.ManagedBy); err != nil {
+	if err := row.Scan(&conn.ID, &conn.Name, &conn.Driver, &config, &conn.ManagedBy, &conn.CreatedAt, &conn.UpdatedAt); err != nil {
 		return model.Connection{}, fmt.Errorf("scan connection: %w", err)
 	}
 	conn.Config = json.RawMessage(config)
@@ -740,7 +862,7 @@ func scanDevice(row rowScanner) (model.Device, error) {
 	var device model.Device
 	var connectionID, params string
 	var enabled int
-	if err := row.Scan(&device.ID, &device.Name, &connectionID, &params, &device.IntervalMs, &enabled, &device.ManagedBy); err != nil {
+	if err := row.Scan(&device.ID, &device.Name, &connectionID, &params, &device.IntervalMs, &enabled, &device.ManagedBy, &device.CreatedAt, &device.UpdatedAt); err != nil {
 		return model.Device{}, fmt.Errorf("scan device: %w", err)
 	}
 	device.ConnectionID = connectionID
@@ -794,21 +916,26 @@ func saveDeviceTx(tx *sql.Tx, device model.Device) error {
 	if len(params) == 0 {
 		params = json.RawMessage(`{}`)
 	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	device.UpdatedAt = now
+	if device.CreatedAt == "" {
+		device.CreatedAt = now
+	}
 	_, err := tx.Exec(
-		`INSERT INTO device (id, name, connection_id, params, interval_ms, enabled, managed_by) VALUES (?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, connection_id=excluded.connection_id, params=excluded.params, interval_ms=excluded.interval_ms, enabled=excluded.enabled, managed_by=excluded.managed_by`,
-		device.ID, device.Name, device.ConnectionID, string(params), device.IntervalMs, enabled, device.ManagedBy,
+		`INSERT INTO gw_device (id, name, connection_id, params, interval_ms, enabled, managed_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, connection_id=excluded.connection_id, params=excluded.params, interval_ms=excluded.interval_ms, enabled=excluded.enabled, managed_by=excluded.managed_by, updated_at=excluded.updated_at`,
+		device.ID, device.Name, device.ConnectionID, string(params), device.IntervalMs, enabled, device.ManagedBy, device.CreatedAt, device.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert device: %w", err)
 	}
-	if _, err := tx.Exec("DELETE FROM point WHERE device_id = ?", device.ID); err != nil {
+	if _, err := tx.Exec("DELETE FROM gw_point WHERE device_id = ?", device.ID); err != nil {
 		return fmt.Errorf("clear points: %w", err)
 	}
 	i := 0
 	for _, point := range device.Points {
 		if _, err := tx.Exec(
-			"INSERT INTO point (device_id, name, address, data_type, scale, processing, seq) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO gw_point (device_id, name, address, data_type, scale, processing, seq) VALUES (?, ?, ?, ?, ?, ?, ?)",
 			device.ID, point.Name, point.Address, string(point.DataType), point.Scale, marshalProcessing(point.Processing), i,
 		); err != nil {
 			return fmt.Errorf("insert point %q: %w", point.Name, err)
@@ -835,7 +962,7 @@ func (s *Store) SaveAlertRule(r model.AlertRule) error {
 		enabled = 1
 	}
 	_, err = s.db.Exec(
-		`INSERT INTO alert_rule (id, name, enabled, severity, expr, referenced_points, output_ids, freshness_seconds, cooldown_seconds, created_at, updated_at)
+		`INSERT INTO gw_alert_rule (id, name, enabled, severity, expr, referenced_points, output_ids, freshness_seconds, cooldown_seconds, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, enabled=excluded.enabled, severity=excluded.severity,
 		 expr=excluded.expr, referenced_points=excluded.referenced_points, output_ids=excluded.output_ids,
@@ -850,7 +977,7 @@ func (s *Store) SaveAlertRule(r model.AlertRule) error {
 }
 
 func (s *Store) ListAlertRules() ([]model.AlertRule, error) {
-	rows, err := s.db.Query(`SELECT id, name, enabled, severity, expr, referenced_points, output_ids, freshness_seconds, cooldown_seconds, created_at, updated_at FROM alert_rule ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id, name, enabled, severity, expr, referenced_points, output_ids, freshness_seconds, cooldown_seconds, created_at, updated_at FROM gw_alert_rule ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("query alert rules: %w", err)
 	}
@@ -867,7 +994,7 @@ func (s *Store) ListAlertRules() ([]model.AlertRule, error) {
 }
 
 func (s *Store) GetAlertRule(id string) (model.AlertRule, error) {
-	row := s.db.QueryRow(`SELECT id, name, enabled, severity, expr, referenced_points, output_ids, freshness_seconds, cooldown_seconds, created_at, updated_at FROM alert_rule WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, name, enabled, severity, expr, referenced_points, output_ids, freshness_seconds, cooldown_seconds, created_at, updated_at FROM gw_alert_rule WHERE id = ?`, id)
 	r, err := scanAlertRule(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -879,7 +1006,7 @@ func (s *Store) GetAlertRule(id string) (model.AlertRule, error) {
 }
 
 func (s *Store) DeleteAlertRule(id string) error {
-	if _, err := s.db.Exec("DELETE FROM alert_rule WHERE id = ?", id); err != nil {
+	if _, err := s.db.Exec("DELETE FROM gw_alert_rule WHERE id = ?", id); err != nil {
 		return fmt.Errorf("delete alert rule: %w", err)
 	}
 	s.notify()
@@ -916,7 +1043,7 @@ func (s *Store) SaveAlert(a model.Alert) error {
 		resolvedAt = sql.NullString{String: a.ResolvedAt.Format(time.RFC3339Nano), Valid: true}
 	}
 	_, err = s.db.Exec(
-		`INSERT INTO alert (alert_id, rule_id, rule_name, severity, message, triggered_at, gateway_id, context, status, resolved_at)
+		`INSERT INTO gw_alert (id, rule_id, rule_name, severity, message, triggered_at, gateway_id, context, status, resolved_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.AlertID, a.RuleID, a.RuleName, a.Severity, a.Message, a.TriggeredAt.Format(time.RFC3339Nano), a.GatewayID, string(context), a.Status, &resolvedAt,
 	)
@@ -928,7 +1055,7 @@ func (s *Store) SaveAlert(a model.Alert) error {
 
 // ListAlerts 返回告警记录;status 非空时按状态过滤,按触发时间倒序。
 func (s *Store) ListAlerts(status string) ([]model.Alert, error) {
-	const base = `SELECT alert_id, rule_id, rule_name, severity, message, triggered_at, gateway_id, context, status, resolved_at FROM alert`
+	const base = `SELECT id, rule_id, rule_name, severity, message, triggered_at, gateway_id, context, status, resolved_at FROM gw_alert`
 	var rows *sql.Rows
 	var err error
 	if status != "" {
@@ -958,7 +1085,7 @@ func (s *Store) UpdateAlertStatus(alertID, status string, resolvedAt time.Time) 
 		resolved = sql.NullString{String: resolvedAt.Format(time.RFC3339Nano), Valid: true}
 	}
 	_, err := s.db.Exec(
-		`UPDATE alert SET status = ?, resolved_at = ? WHERE alert_id = ?`,
+		`UPDATE gw_alert SET status = ?, resolved_at = ? WHERE id = ?`,
 		status, &resolved, alertID,
 	)
 	if err != nil {

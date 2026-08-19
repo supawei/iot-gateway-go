@@ -100,7 +100,7 @@ func NewManager(st *store.Store, ttl time.Duration) *Manager {
 	return &Manager{st: st, sessions: newSessionStore(), ttl: ttl}
 }
 
-// BootstrapAdmin 在 user 表为空时预置默认管理员(admin/admin123,须改密)。
+// BootstrapAdmin 在 gw_user 表为空时预置默认管理员(admin/admin123,须改密)。
 // 幂等:已有用户则跳过。返回是否执行了预置。
 func (m *Manager) BootstrapAdmin() (bool, error) {
 	n, err := m.st.CountUsers()

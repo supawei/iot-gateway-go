@@ -33,7 +33,7 @@ _ "iot-gateway-go/internal/output/sparkplugb"  // 注册 sparkplugb 输出
 
 ### 1.1 生命周期与配置
 
-- 配置存 SQLite `output` 表(`id/name/type/config/enabled`),经 Web UI + REST 增删改,写入即触发 `Manager.Reload()` 热重载(无需重启)。
+- 配置存 SQLite `gw_output` 表(`id/name/type/config/enabled`),经 Web UI + REST 增删改,写入即触发 `Manager.Reload()` 热重载(无需重启)。
 - 一个输出类型可有**多个实例**(每条 `output` 记录一个实例),实例以 `OutputID` 相互隔离。
 - 新增输出插件 = 新增子包 + main.go 一行空导入,Web UI 表单、API、状态面板全部自动适配(见 §6.7)。
 

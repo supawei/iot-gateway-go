@@ -40,7 +40,7 @@ scheduler → dataPoints → Manager.Publish ──(每 slot)──▶ slot.ch �
         Manager.runReplay ──────┘  (每 1s:健康时 Peek 一批 → 经 slot.ch 重放 → 成功 Ack)
 ```
 
-- **持久化队列**:`internal/backfill` 包,SQLite 表 `backfill_queue`,同一 `gateway.db`(WAL)。
+- **持久化队列**:`internal/backfill` 包,SQLite 表 `gw_backfill_queue`,同一 `gateway.db`(WAL)。
 - **失败入队**:Manager 扇出队列满、输出内存缓冲满、输出上送失败,三处统一经 `BackfillSink.Save` 落库。
 - **重放**:Manager 驱动(集中式),以 `BackfillHealthy`(输出可选能力)判断"当前可上送";重放点经 `slot.ch` 投递,复用 slot 单写 goroutine,保证并发安全与顺序。
 - **确认删除**:点经 `slot.ch` 成功投递(即已被输出接收并缓冲/再处理)后 `Ack` 删除;若输出后续仍失败,失败路径会再次入队,数据不丢(at-least-once)。
@@ -52,13 +52,13 @@ scheduler → dataPoints → Manager.Publish ──(每 slot)──▶ slot.ch �
 表结构(建表随既有 `schema` 外的独立 `CREATE TABLE IF NOT EXISTS`,由 `store.NewBackfillStore` 触发):
 
 ```sql
-CREATE TABLE IF NOT EXISTS backfill_queue (
+CREATE TABLE IF NOT EXISTS gw_backfill_queue (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     output_id  TEXT    NOT NULL,
     payload    TEXT    NOT NULL,   -- model.DataPoint 的 JSON
-    created_at INTEGER NOT NULL
+    created_at TEXT    NOT NULL   -- RFC3339Nano,与 gw_client/gw_alert_rule 等时间列一致
 );
-CREATE INDEX IF NOT EXISTS idx_backfill_output ON backfill_queue (output_id, id);
+CREATE INDEX IF NOT EXISTS idx_gw_backfill_output ON gw_backfill_queue (output_id, id);
 ```
 
 API:
@@ -225,7 +225,7 @@ for each slot:
 
 ### 11.1 代码变更(2026-08-18)
 
-- **`internal/backfill`**(新增):`Store` 持久化队列 + `Item`;`Save`(事务 + 超限淘汰最旧)/`CountByOutput`/`TotalCount`/`Peek`(FIFO)/`Ack`(幂等)/`DropOutput`;表 `backfill_queue` 随 `gateway.db`(WAL)。
+- **`internal/backfill`**(新增):`Store` 持久化队列 + `Item`;`Save`(事务 + 超限淘汰最旧)/`CountByOutput`/`TotalCount`/`Peek`(FIFO)/`Ack`(幂等)/`DropOutput`;表 `gw_backfill_queue` 随 `gateway.db`(WAL)。
 - **`internal/output/backfill.go`**(新增):`BackfillSink`(Save)与 `BackfillHealthy` 两个能力接口。
 - **`internal/output/registry.go`**:`BuildContext` 增加 `OutputID` 与 `Backfill`。
 - **`internal/output/buildset.go`**:构建时逐条注入 `bc.OutputID`。
@@ -243,7 +243,7 @@ for each slot:
 - `internal/output/manager_backfill_test.go`:重放投递 + 顺序 + Ack;健康门控(不健康不重放);非补传输出不参与;扇出队列满入队;热重载删输出清队、同 ID 续传。
 - `internal/output/tdengine_test.go`:INSERT 失败入队;`BackfillHealthy` 失败后退避、恢复后立即可重放。
 - `internal/output/thingsboard_test.go`:broker 半死(QoS1 无 PUBACK)上送失败 → 入队。
-- 全量 `go test ./...` 通过;网关启动冒烟验证 `backfill_queue` 建表正常。
+- 全量 `go test ./...` 通过;网关启动冒烟验证 `gw_backfill_queue` 建表正常。
 
 ### 11.3 已知限制(见 §7)
 

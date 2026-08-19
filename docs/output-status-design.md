@@ -11,7 +11,7 @@
 
 ### 1.1 背景
 
-当前北向输出只有**配置**(SQLite `output` 表 + CRUD API + `Outputs.vue` 列表),**没有运行态观测**:
+当前北向输出只有**配置**(SQLite `gw_output` 表 + CRUD API + `Outputs.vue` 列表),**没有运行态观测**:
 
 - broker 是否连上、断连后是否在重连、数据是否真的在往上游送——完全不可见;
 - 输出内部缓冲积压(断连期 pending 增长)、Manager 扇出队列打满丢点——无感知;

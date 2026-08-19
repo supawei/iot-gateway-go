@@ -2,9 +2,11 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -515,5 +517,128 @@ INSERT INTO point (device_id,name,address,data_type,scale) VALUES ('d','p','a','
 	}
 	if got.Points[0].Processing == nil {
 		t.Fatalf("processing not persisted after evolve")
+	}
+}
+
+// TestOpenEvolvesLegacyUserTable 旧库的 user 表(SQL 保留字)经 Open 自动改名
+// gw_user 且数据保留(开发期结构演进)。
+func TestOpenEvolvesLegacyUserTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-user.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := `
+CREATE TABLE user (id TEXT PRIMARY KEY, password_hash TEXT NOT NULL, must_change_password INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1);
+INSERT INTO user (id, password_hash, must_change_password, enabled) VALUES ('admin', 'hash', 1, 1);
+`
+	if _, err := db.Exec(legacy); err != nil {
+		t.Fatalf("seed legacy db: %v", err)
+	}
+	db.Close()
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer st.Close()
+
+	if n, err := st.CountUsers(); err != nil || n != 1 {
+		t.Fatalf("CountUsers = %d err=%v, want 1 (data preserved after rename)", n, err)
+	}
+	u, err := st.GetUser("admin")
+	if err != nil {
+		t.Fatalf("get user after rename: %v", err)
+	}
+	if u.PasswordHash != "hash" {
+		t.Errorf("password hash = %q, want hash", u.PasswordHash)
+	}
+	if ok, _ := tableExists(st.db, "user"); ok {
+		t.Error("legacy user table should be gone after rename")
+	}
+}
+
+// TestOpenEvolvesLegacySettingsColumn 旧库 settings(key) 列经 Open 自动改名
+// setting_key,原数据可读(开发期结构演进)。
+func TestOpenEvolvesLegacySettingsColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-settings.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+		INSERT INTO settings (key, value) VALUES ('gateway.id', 'gw-legacy');`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	db.Close()
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer st.Close()
+
+	v, ok, err := st.GetSetting("gateway.id")
+	if err != nil || !ok {
+		t.Fatalf("get legacy setting: ok=%v err=%v", ok, err)
+	}
+	if v != "gw-legacy" {
+		t.Errorf("value = %q, want gw-legacy", v)
+	}
+}
+
+// TestTimestampsManagedByStore 连接/设备/输出的 created_at/updated_at 由 store 维护:
+// 首次写入双时间戳,再次更新保留 created_at、刷新 updated_at。
+func TestTimestampsManagedByStore(t *testing.T) {
+	st := newTestStore(t)
+
+	conn := sampleConnection()
+	if err := st.SaveConnection(conn); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetConnection("conn-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CreatedAt == "" || got.UpdatedAt == "" {
+		t.Fatalf("connection timestamps not set: created=%q updated=%q", got.CreatedAt, got.UpdatedAt)
+	}
+	firstCreated, firstUpdated := got.CreatedAt, got.UpdatedAt
+
+	// 更新后 created_at 保留、updated_at 刷新
+	conn = sampleConnection()
+	conn.Name = "renamed"
+	time.Sleep(5 * time.Millisecond)
+	if err := st.SaveConnection(conn); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.GetConnection("conn-1")
+	if got.CreatedAt != firstCreated {
+		t.Errorf("created_at changed on update: %q -> %q", firstCreated, got.CreatedAt)
+	}
+	if got.UpdatedAt <= firstUpdated {
+		t.Errorf("updated_at not refreshed on update: %q -> %q", firstUpdated, got.UpdatedAt)
+	}
+
+	// 设备与输出同样由 store 维护
+	if err := st.SaveDevice(sampleDevice("d1")); err != nil {
+		t.Fatal(err)
+	}
+	d, err := st.GetDevice("d1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.CreatedAt == "" || d.UpdatedAt == "" {
+		t.Fatalf("device timestamps not set")
+	}
+	if err := st.SaveOutput(model.Output{ID: "o1", Name: "o1", Type: "mqtt", Config: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := st.GetOutput("o1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.CreatedAt == "" || o.UpdatedAt == "" {
+		t.Fatalf("output timestamps not set")
 	}
 }

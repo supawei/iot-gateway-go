@@ -74,7 +74,7 @@ broker 地址、凭据属于"部署环境"信息,天然适合 yaml 这类**可�
 ### 7.1 存储与模型
 
 - `model.Output{ID, Name, Type, Config, Enabled}`:一条记录对应一个输出插件实例。
-- SQLite 新增 `output` 表(`id/name/type/config/enabled`);`Type` 取值 `mqtt` / `thingsboard` / `tdengine`。
+- SQLite 新增 `gw_output` 表(`id/name/type/config/enabled`);`Type` 取值 `mqtt` / `thingsboard` / `tdengine`。
 
 ### 7.2 输出注册表与热重载(OutputManager)
 

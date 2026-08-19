@@ -98,17 +98,17 @@ Scope 命名 `资源:动作`。动作细分:
 
 ## 5. 存储设计(SQLite)
 
-在现有 `store` 中新增表(与 `connection`/`device`/`point` 并列):
+在现有 `store` 中新增表(与 `gw_connection`/`gw_device`/`gw_point` 并列):
 
 ```sql
-CREATE TABLE IF NOT EXISTS user (
+CREATE TABLE IF NOT EXISTS gw_user (
     id                   TEXT PRIMARY KEY,          -- 如 "admin"
     password_hash        TEXT NOT NULL,             -- bcrypt
     must_change_password INTEGER NOT NULL DEFAULT 1,-- 首次登录强制改密标志
     enabled              INTEGER NOT NULL DEFAULT 1
 );
 
-CREATE TABLE IF NOT EXISTS client (
+CREATE TABLE IF NOT EXISTS gw_client (
     id            TEXT PRIMARY KEY,          -- 如 "mes-readonly"
     name          TEXT NOT NULL,
     api_key_hash  TEXT NOT NULL,             -- SHA-256(apiKey),hex
