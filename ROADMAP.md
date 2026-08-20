@@ -115,7 +115,7 @@
 **目标:把"已实现未真机验证"变成"可交付的 v1.0.0"。聚焦验证,不是加功能。**
 
 - [ ] **A1 真实实例 E2E(最高优先)**:ThingsBoard 上送/下行/connect-disconnect、TDengine taosAdapter 写入、OPC UA sign/signAndEncrypt、smardaten 全双工、Sparkplug B 消费端、**ARMv7 真机**(启动/采集/RSS/内存上限,落地 [armv7-compatibility-review.md](docs/armv7-compatibility-review.md) 的 checklist)
-- [ ] **A2 版本化迁移机制**:发布前冻结 v1.0.0 schema,同时搭好迁移框架(`PRAGMA user_version` + 有序迁移 + N-1 升级测试),留给 v1.0.1 起使用
+- [x] **A2 版本化迁移机制(2026-08-20)**:v1.0.0 冻结 schema = 版本 1;`internal/store/migrate.go` 搭好框架(`PRAGMA user_version` + 有序 `migrations`(现为空)+ 事务内推进版本可回滚 + 全新/认领/升级/拒绝四路径 + N-1 升级测试范式),首个真实迁移随 v1.0.1 变更加入
 - [x] **A3 工程门禁补全(2026-08-20)**:CI 增加 `test/check`(fmt-check+vet+test)+ core 并发包 `-race`(见 [.github/workflows/ci.yml](.github/workflows/ci.yml));scalebench 加**冒烟档** `make smoke`(200 设备 @1s,新增 `-min-rate`/`-require-online` 断言,低于阈值即失败退出并清理)——本次子秒轮询 bug 即"测试基建缺失"的直接证据
 - [ ] **A4 部署产物**:systemd unit(工控机最常用)+ 部署/升级文档 + Docker 可选
 - [ ] **A5 发布收官**:版本号策略(v1.0.0)、release notes(附压测基线背书)、升级文档、鉴权默认值再审计

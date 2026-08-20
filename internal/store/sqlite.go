@@ -15,6 +15,8 @@ import (
 	"iot-gateway-go/internal/model"
 )
 
+// schema 是 v1.0.0 初始 schema(版本 1)。发布后改表一律走 migrations(migrate.go),
+// 不再直接改这里;版本号与迁移见 schemaVersion。
 const schema = `
 CREATE TABLE IF NOT EXISTS gw_connection (
     id         TEXT PRIMARY KEY,
@@ -132,9 +134,9 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if err := initSchema(db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("init schema: %w", err)
+		return nil, err
 	}
 	// 预置默认网关设置(幂等):数据库为空时内置默认网关 ID。
 	if _, err := db.Exec(
