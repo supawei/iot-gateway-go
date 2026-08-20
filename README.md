@@ -34,6 +34,8 @@ go build -o gateway ./cmd/gateway    # 或 make build(自动注入版本号)
 
 启动后访问 **Web 管理界面**(默认 `http://localhost:8080/`,前端已内嵌进二进制)操作设备/连接/输出,无需额外部署;也可直接调用 [REST API](docs/api.md)。默认管理员 `admin/admin123`,首次登录强制改密。
 
+> **生产部署**:裸机(systemd)/ Docker 部署、升级与回滚、ARMv7 网关盒要点、安全加固见 [docs/deployment.md](docs/deployment.md)。
+
 ## 命令行参数与版本
 
 ```bash

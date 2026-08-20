@@ -1,0 +1,39 @@
+# systemd 单元:IoT 网关(iot-gateway-go)
+#
+# 安装(目录约定与升级流程见 docs/deployment.md):
+#   install -d -m 0755 /opt/iot-gateway /etc/iot-gateway /var/lib/iot-gateway
+#   install -m 0755 dist/linux-<arch>/gateway /opt/iot-gateway/gateway
+#   install -m 0644 config.example.yaml /etc/iot-gateway/config.yaml
+#   install -m 0644 deploy/gateway.service /etc/systemd/system/iot-gateway.service
+#   systemctl daemon-reload && systemctl enable --now iot-gateway
+
+[Unit]
+Description=IoT Gateway (iot-gateway-go)
+Documentation=https://github.com/supawei/iot-gateway-go
+# 等网络就绪再启动(南向/北向连接依赖网络)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# 默认 root 运行(工控网关盒常见);如需降权运行,见 docs/deployment.md「安全加固」。
+User=root
+Group=root
+# 数据/日志相对路径的基准:config.yaml 里 sqlitePath "./gateway.db"、
+# log.file.path "./logs/..." 均相对此目录解析。
+WorkingDirectory=/var/lib/iot-gateway
+ExecStart=/opt/iot-gateway/gateway /etc/iot-gateway/config.yaml
+# 崩溃自动拉起(南向断线、偶发 panic 后自愈)
+Restart=always
+RestartSec=3
+# 大量 Modbus TCP / 订阅场景的文件句柄上限
+LimitNOFILE=65536
+# 优雅退出:给足时间释放连接 / 冲刷补传队列
+TimeoutStopSec=30
+# 日志同时镜像到 journal(systemctl status / journalctl 可看);文件轮转由
+# config.yaml 的 log.file 控制,二者不冲突。
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

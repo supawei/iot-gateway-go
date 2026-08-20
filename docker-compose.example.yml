@@ -1,0 +1,27 @@
+# 可选:Docker Compose 部署示例
+#
+#   docker compose -f docker-compose.example.yml up -d --build
+#
+# 需先准备 gateway.docker.yaml(基于 config.example.yaml,把 sqlitePath/log 指向 /data,
+# 见 docs/deployment.md §5)。示例:
+#   storage:
+#     sqlitePath: "/data/gateway.db"
+#   log:
+#     level: info
+#     format: text
+#     file:
+#       path: "/data/logs/gateway.log"
+services:
+  iot-gateway:
+    build: .
+    image: iot-gateway:latest
+    container_name: iot-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./gateway.docker.yaml:/data/config.yaml:ro  # 你的配置
+      - iot-gateway-data:/data                      # 数据持久化(DB/WAL/日志)
+
+volumes:
+  iot-gateway-data:

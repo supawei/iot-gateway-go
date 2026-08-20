@@ -117,7 +117,7 @@
 - [ ] **A1 真实实例 E2E(最高优先)**:ThingsBoard 上送/下行/connect-disconnect、TDengine taosAdapter 写入、OPC UA sign/signAndEncrypt、smardaten 全双工、Sparkplug B 消费端、**ARMv7 真机**(启动/采集/RSS/内存上限,落地 [armv7-compatibility-review.md](docs/armv7-compatibility-review.md) 的 checklist)
 - [x] **A2 版本化迁移机制(2026-08-20)**:v1.0.0 冻结 schema = 版本 1;`internal/store/migrate.go` 搭好框架(`PRAGMA user_version` + 有序 `migrations`(现为空)+ 事务内推进版本可回滚 + 全新/认领/升级/拒绝四路径 + N-1 升级测试范式),首个真实迁移随 v1.0.1 变更加入
 - [x] **A3 工程门禁补全(2026-08-20)**:CI 增加 `test/check`(fmt-check+vet+test)+ core 并发包 `-race`(见 [.github/workflows/ci.yml](.github/workflows/ci.yml));scalebench 加**冒烟档** `make smoke`(200 设备 @1s,新增 `-min-rate`/`-require-online` 断言,低于阈值即失败退出并清理)——本次子秒轮询 bug 即"测试基建缺失"的直接证据
-- [ ] **A4 部署产物**:systemd unit(工控机最常用)+ 部署/升级文档 + Docker 可选
+- [x] **A4 部署产物(2026-08-20)**:systemd 单元 [deploy/gateway.service](../deploy/gateway.service)(FHS 目录布局 + 自动拉起 + journal 日志)+ 多阶段 [Dockerfile](../Dockerfile)(前端+静态二进制+精简运行镜像)+ [docker-compose.example.yml](../docker-compose.example.yml)+ 部署/升级文档 [docs/deployment.md](docs/deployment.md)(裸机/systemd、v1.0.1 起版本化升级回滚、ARMv7 要点、安全加固、常见问题)
 - [ ] **A5 发布收官**:版本号策略(v1.0.0)、release notes(附压测基线背书)、升级文档、鉴权默认值再审计
 
 ### Phase B — P4 产品化核心落地(中期,发布后 1–2 月)

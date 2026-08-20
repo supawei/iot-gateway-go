@@ -1,0 +1,11 @@
+# 构建产物与本地状态不入镜像
+.git/
+gateway
+dist/
+web/dist/
+web/node_modules/
+logs/
+*.db
+*.db-wal
+*.db-shm
+.goreleaser.yaml
