@@ -45,6 +45,7 @@ systemctl daemon-reload
 systemctl enable --now iot-gateway
 
 # 4) 验证
+./gateway -version                       # 打印版本(核对归档产物)
 systemctl status iot-gateway
 curl -fsS http://localhost:8080/readyz      # 200 = 就绪
 journalctl -u iot-gateway -f                # 日志(文件日志另按 config.yaml)
