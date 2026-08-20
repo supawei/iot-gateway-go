@@ -11,7 +11,8 @@
 | **P1** | MVP:Modbus→MQTT 端到端链路 + REST 配置 + SQLite | ✅ 已完成 (2026-08-13) |
 | **P2** | 验证扩展性:第二协议 / 第二北向输出 / 能力接口 | ✅ 已完成 (2026-08-16) |
 | **P3** | 增强:边缘计算、规则告警、断网补传、云平台对接、增量热加载、API 鉴权 | ✅ 已完成 (2026-08-19) |
-| **P4** | 产品化:更多协议、Sparkplug B、运维监控、物模型映射 | ⬜ 待开始 |
+| **P4** | 产品化:更多协议、Sparkplug B、运维监控、物模型映射 | 🔶 部分完成 (2026-08-20:Sparkplug B / 运维监控 ✅;协议 / 物模型按需求暂缓) |
+| **v1.0.0** | 发布冲刺:真实实例 E2E、迁移机制、CI 门禁、部署产物 | ⬜ 见 [发布与演进路线](#发布与演进路线2026-08-20) |
 
 ---
 
@@ -98,12 +99,54 @@
 
 ## P4 产品化
 
-- [ ] **更多协议**:Profinet / EtherCAT(工业以太网实时)、现场总线
+- [ ] **更多协议**(按真实需求暂缓,见[发布与演进路线](#发布与演进路线2026-08-20) B3):Profinet / EtherCAT(工业以太网实时)、现场总线
 - [x] **Sparkplug B 支持**:工业 MQTT 事实标准——网关作为边缘节点发布 STATE/NBIRTH/DBIRTH/DDATA/DDEATH/NDEATH,手写 protobuf 编码 + 别名压缩,复用 mqttutil 韧性,接入设备上下线通知与断网补传(设计见 [docs/sparkplugb.md](docs/sparkplugb.md),2026-08-18)
 - [x] **运维监控**:指标采集、结构化日志增强、健康检查端点--纯标准库手写 Prometheus text exposition(零新增依赖,零 client_golang/otel),`/metrics` + `/livez` + `/readyz` 匿名端点;access log 中间件带 request_id(复用客户端 header);日志经 slog handler 包装注入 gateway_id + component 公共字段(component 由调用方 PC 推导,零调用点改动);采集侧补全局采集计数/错误计数,运行时含系统内存总/剩余字节与占用率、网关所在分区磁盘总/剩余字节与占用率、进程 RSS;沿用 output-status-design 的纯内存可观测边界(不落历史指标、不做运维阈值告警推送,运维告警交外部 Alertmanager)(设计见 [docs/ops-monitoring-design.md](docs/ops-monitoring-design.md),2026-08-19)
-- [ ] **物模型映射层**:在设备-点位之上加云物模型(TSL)映射,对接云平台语义(草案见 [docs/tsl-mapping.md](docs/tsl-mapping.md));**边界**:smardaten 路线下语义由平台 `application.json` 承担(网关自动同步,无需自建 TSL),该层仅在对接物模型驱动的公有云(华为云/AWS IoT,见暂缓清单)时需要
+- [ ] **物模型映射层**(按真实需求暂缓,见[发布与演进路线](#发布与演进路线2026-08-20) B4):在设备-点位之上加云物模型(TSL)映射,对接云平台语义(草案见 [docs/tsl-mapping.md](docs/tsl-mapping.md));**边界**:smardaten 路线下语义由平台 `application.json` 承担(网关自动同步,无需自建 TSL),该层仅在对接物模型驱动的公有云(华为云/AWS IoT,见暂缓清单)时需要
 
 ---
+
+## 发布与演进路线(2026-08-20)
+
+> 依据:2026-08-20 压测基线(见 [docs/scale-testing.md §6.2](docs/scale-testing.md))+ ARMv7 兼容性 review(见 [docs/armv7-compatibility-review.md](docs/armv7-compatibility-review.md))+ 本轮架构分析。
+
+### Phase A — v1.0.0 发布冲刺(近期,1–2 周)
+
+**目标:把"已实现未真机验证"变成"可交付的 v1.0.0"。聚焦验证,不是加功能。**
+
+- [ ] **A1 真实实例 E2E(最高优先)**:ThingsBoard 上送/下行/connect-disconnect、TDengine taosAdapter 写入、OPC UA sign/signAndEncrypt、smardaten 全双工、Sparkplug B 消费端、**ARMv7 真机**(启动/采集/RSS/内存上限,落地 [armv7-compatibility-review.md](docs/armv7-compatibility-review.md) 的 checklist)
+- [ ] **A2 版本化迁移机制**:发布前冻结 v1.0.0 schema,同时搭好迁移框架(`PRAGMA user_version` + 有序迁移 + N-1 升级测试),留给 v1.0.1 起使用
+- [ ] **A3 工程门禁补全**:CI 增加 `test/check`(fmt-check+vet+test);scalebench 加**冒烟档**(如 200 设备 @1s)进 CI 防回归——本次子秒轮询 bug 即"测试基建缺失"的直接证据
+- [ ] **A4 部署产物**:systemd unit(工控机最常用)+ 部署/升级文档 + Docker 可选
+- [ ] **A5 发布收官**:版本号策略(v1.0.0)、release notes(附压测基线背书)、升级文档、鉴权默认值再审计
+
+### Phase B — P4 产品化核心落地(中期,发布后 1–2 月)
+
+按"真实需求 + 压测证据"排序,逐个关闭 [scale-testing.md §6.2](docs/scale-testing.md) 的未覆盖边界:
+
+- [ ] **B1 补压测缺口**:场景 F(断连韧性:kill 从站/broker → 补传 → 恢复重放)、场景 E(告警/边缘计算开销)、MQTT **批量模式**真实 broker 验证(`flushInterval` 消息数降约 200 倍)
+- [ ] **B2 ARMv7 内存专项**:真机数据驱动(RSS / 32 位 SQLite 上限);超预算 → 降 SQLite 页缓存、限补传队列、降频
+- [ ] **B3 协议按真实需求**:Profinet/EtherCAT 重投入保持暂缓;电力/楼宇协议(DL/T645、IEC 104、BACnet)依客户驱动,复用 [driver-development.md](docs/driver-development.md) 插件化路径
+- [ ] **B4 触发式增强**:Sparkplug B 下行(NCMD/DCMD)、TSL 物模型映射——有真实需求才做
+- [ ] **B5 运维增强**:日志/告警联动、Webhook 通知、配置导入导出/备份(批量操作已有基础,低成本高价值)
+
+### Phase C — 规模化/平台化(远期,3–6 月,触发式)
+
+当前架构(单 goroutine 调度器 + 单 SQLite + 单进程)的简约可靠是资产,不轻易破坏。给出明确的**架构演进触发线**:
+
+| 触发信号 | 演进方向 |
+|---|---|
+| 设备 >5000 / 频率 <100ms / CPU 单核吃满 | 调度器多分片(按连接/区间分片,每片一 goroutine) |
+| SQLite 写并发成为瓶颈(补传/告警密集) | 采集-存储分离 / 可选嵌入式时序库 |
+| 多网关规模部署 | 集中管理:配置下发、批量升级、集中监控 |
+| 需隔离不稳定驱动 | 进程外插件(暂缓清单触发条件) |
+
+### 贯穿原则
+
+1. **克制**:纯标准库手写(metrics/迁移)已验证可行,不引重依赖;
+2. **证据驱动**:每个"未覆盖边界"用压测/真机验证后关闭;压测基建进 CI;
+3. **安全默认**:鉴权默认开;A5 发布前再审计默认值;
+4. **暂缓清单照做**:go plugin / 工业以太网 / 公有云物模型——无真实需求不启动。
 
 ## 暂缓清单(刻意不做,按真实需求驱动)
 
