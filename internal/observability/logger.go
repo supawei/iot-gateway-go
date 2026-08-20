@@ -64,17 +64,24 @@ func (h *LoggerHandler) WithGroup(name string) slog.Handler {
 
 // deriveComponent 走当前 goroutine 调用栈,跳过 runtime.Callers / 本方法 / Handle 与所有
 // stdlib 帧(含 log/slog 包装器、内联残留),取首个本模块(iot-gateway-go/*)或 main 包帧。
+// 用 runtime.CallersFrames 逐帧展开(含内联):被内联进用户帧的 stdlib 函数(如
+// bytes.Buffer.String)会先占一帧、随后跟一帧其外层用户函数;逐帧展开必能命中用户帧,
+// 对常规内联与 -race(禁内联)都稳健。
 func deriveComponent() string {
-	var pcs [32]uintptr
+	var pcs [64]uintptr
 	n := runtime.Callers(3, pcs[:]) // 跳过 [runtime.Callers, deriveComponent, Handle]
-	for _, pc := range pcs[:n] {
-		fn := runtime.FuncForPC(pc)
-		if fn == nil {
-			continue
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		f, more := frames.Next()
+		if f.Function == "" {
+			break
 		}
-		pkg := packageOf(fn.Name())
+		pkg := packageOf(f.Function)
 		if isUserPackage(pkg) {
 			return lastSegment(pkg)
+		}
+		if !more {
+			break
 		}
 	}
 	return ""
