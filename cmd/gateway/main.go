@@ -248,6 +248,13 @@ func initLogger(cfg config.Config) (*slog.Logger, *observability.LoggerHandler) 
 
 	writer := io.Writer(os.Stdout)
 	if cfg.Log.File.Path != "" {
+		// 自动创建日志目录:lumberjack 不会 mkdir,默认配置 ./logs/gateway.log
+		// 在全新目录下需先建目录,否则文件日志静默写不进去。
+		if dir := filepath.Dir(cfg.Log.File.Path); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				slog.Warn("create log dir failed, fallback to stdout", "dir", dir, "err", err)
+			}
+		}
 		writer = io.MultiWriter(os.Stdout, &lumberjack.Logger{
 			Filename:   cfg.Log.File.Path,
 			MaxSize:    cfg.Log.File.MaxSize,

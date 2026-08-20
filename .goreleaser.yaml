@@ -46,12 +46,13 @@ archives:
   - name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
-    # 只携带二进制与必要的示例/配置/部署文件,不含任何运行时数据。
-    # 保持 repo 相对路径:归档内 config.example.yaml、deploy/、docs/ 与
-    # docs/deployment.md 里的路径引用自洽(可直接照文档部署)。
+    # 只携带二进制与必要的配置/部署文件,不含任何运行时数据。
+    # config.example.yaml 以 config.yaml 名归档:配置即默认值,解压后可直接
+    # ./gateway 启动(日志目录由网关自动创建)。保持 repo 相对路径,归档内
+    # config.yaml、deploy/、docs/ 与 docs/deployment.md 里的路径引用自洽。
     files:
       - src: config.example.yaml
-        dst: config.example.yaml
+        dst: config.yaml
       - src: deploy/gateway.service
         dst: deploy/gateway.service
       - src: docs/deployment.md

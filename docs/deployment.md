@@ -14,7 +14,7 @@ GoReleaser 发布产出于 GitHub Releases,三平台静态二进制(`CGO_ENABLED
 | linux arm64 | `gateway_linux_arm64` | aarch64 网关盒 |
 | linux armv7 | `gateway_linux_arm_7` | 32 位 ARM(Cortex-A,工业网关主流) |
 
-本地构建:`make build`(当前平台,产物在根目录)或 `make build-all`(三平台,产物在 `dist/<platform>/gateway`)。前端已 `go:embed` 内嵌进二进制,**单文件即可运行**,无需 nginx/Node。
+发布归档内容:`gateway`(二进制,前端已内嵌)+ `config.yaml`(默认配置,**解压后可直接 `./gateway` 启动**)+ `deploy/gateway.service` + `docs/deployment.md` + `README.md`/`LICENSE`。本地构建:`make build`(当前平台,产物在根目录)或 `make build-all`(三平台,产物在 `dist/<platform>/gateway`)。
 
 ## 2. 目录布局(推荐)
 
@@ -34,9 +34,10 @@ systemd 单元 `deploy/gateway.service` 已按此布局写好。
 install -d -m 0755 /opt/iot-gateway /etc/iot-gateway /var/lib/iot-gateway
 install -m 0755 dist/linux-<arch>/gateway /opt/iot-gateway/gateway
 
-# 2) 配置
-install -m 0644 config.example.yaml /etc/iot-gateway/config.yaml
-#    按需编辑 sqlitePath / log.file / scheduler.poolSize(配置说明见 config.example.yaml)
+# 2) 配置:发布归档已自带可直接使用的 config.yaml(默认值即开箱即用);
+#    源码构建则先 cp config.example.yaml config.yaml
+install -m 0644 config.yaml /etc/iot-gateway/config.yaml
+#    按需编辑 sqlitePath / log.file / scheduler.poolSize(见 config.yaml 内注释)
 
 # 3) systemd 单元
 install -m 0644 deploy/gateway.service /etc/systemd/system/iot-gateway.service
