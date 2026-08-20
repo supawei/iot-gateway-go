@@ -46,10 +46,16 @@ archives:
   - name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
-    # 只携带二进制与必要的示例/许可证,不含任何运行时数据
+    # 只携带二进制与必要的示例/配置/部署文件,不含任何运行时数据。
+    # 保持 repo 相对路径:归档内 config.example.yaml、deploy/、docs/ 与
+    # docs/deployment.md 里的路径引用自洽(可直接照文档部署)。
     files:
       - src: config.example.yaml
         dst: config.example.yaml
+      - src: deploy/gateway.service
+        dst: deploy/gateway.service
+      - src: docs/deployment.md
+        dst: docs/deployment.md
       - LICENSE
       - README.md
 
