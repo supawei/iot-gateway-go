@@ -47,7 +47,8 @@ jobs:
         with:
           distribution: goreleaser
           version: latest
-          args: release --clean
+          # 使用仓库内人工维护的发布说明(含性能基线/已知边界),而非自动 changelog
+          args: release --clean --release-notes=RELEASE_NOTES.md
         env:
           # Actions 内置的仓库级写权限 token(permissions.contents: write)
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

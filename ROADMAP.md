@@ -12,7 +12,7 @@
 | **P2** | 验证扩展性:第二协议 / 第二北向输出 / 能力接口 | ✅ 已完成 (2026-08-16) |
 | **P3** | 增强:边缘计算、规则告警、断网补传、云平台对接、增量热加载、API 鉴权 | ✅ 已完成 (2026-08-19) |
 | **P4** | 产品化:更多协议、Sparkplug B、运维监控、物模型映射 | 🔶 部分完成 (2026-08-20:Sparkplug B / 运维监控 ✅;协议 / 物模型按需求暂缓) |
-| **v1.0.0** | 发布冲刺:真实实例 E2E、迁移机制、CI 门禁、部署产物 | ⬜ 见 [发布与演进路线](#发布与演进路线2026-08-20) |
+| **v0.1.0 / v1.0.0** | 发布:v0.1.0 首个公开预览版(2026-08-20);v1.0.0 以 A1 真实实例 E2E 通过为里程碑 | ✅ v0.1.0 已发布;v1.0.0 ⬜ 待 A1 |
 
 ---
 
@@ -118,7 +118,7 @@
 - [x] **A2 版本化迁移机制(2026-08-20)**:v1.0.0 冻结 schema = 版本 1;`internal/store/migrate.go` 搭好框架(`PRAGMA user_version` + 有序 `migrations`(现为空)+ 事务内推进版本可回滚 + 全新/认领/升级/拒绝四路径 + N-1 升级测试范式),首个真实迁移随 v1.0.1 变更加入
 - [x] **A3 工程门禁补全(2026-08-20)**:CI 增加 `test/check`(fmt-check+vet+test)+ core 并发包 `-race`(见 [.github/workflows/ci.yml](.github/workflows/ci.yml));scalebench 加**冒烟档** `make smoke`(200 设备 @1s,新增 `-min-rate`/`-require-online` 断言,低于阈值即失败退出并清理)——本次子秒轮询 bug 即"测试基建缺失"的直接证据
 - [x] **A4 部署产物(2026-08-20)**:systemd 单元 [deploy/gateway.service](../deploy/gateway.service)(FHS 目录布局 + 自动拉起 + journal 日志)+ 多阶段 [Dockerfile](../Dockerfile)(前端+静态二进制+精简运行镜像)+ [docker-compose.example.yml](../docker-compose.example.yml)+ 部署/升级文档 [docs/deployment.md](docs/deployment.md)(裸机/systemd、v1.0.1 起版本化升级回滚、ARMv7 要点、安全加固、常见问题)
-- [ ] **A5 发布收官**:版本号策略(v1.0.0)、release notes(附压测基线背书)、升级文档、鉴权默认值再审计
+- [x] **A5 发布收官(2026-08-20)**:版本号策略=**首个公开版 v0.1.0(预览版)**,v1.0.0 定为"真实实例 E2E(A1)全部通过"的里程碑(A1 未验证前不发 1.0.0,避免承诺生产可用);release notes [RELEASE_NOTES.md](../RELEASE_NOTES.md)(含压测基线背书与已知边界)经 release.yml `--release-notes` 注入 GitHub Release;鉴权默认值已审计(默认开启 + admin 首登强制改密);升级文档见 [docs/deployment.md](docs/deployment.md)
 
 ### Phase B — P4 产品化核心落地(中期,发布后 1–2 月)
 
