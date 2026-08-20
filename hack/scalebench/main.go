@@ -49,6 +49,8 @@ var (
 	flagStep     = flag.Duration("step", 2*time.Second, "采样间隔")
 	flagGateway  = flag.String("gateway", "", "网关二进制路径;为空时自动 go build 到临时目录")
 	flagOut      = flag.String("out", "", "可选:CSV 汇总报告输出路径")
+	flagMinRate  = flag.Float64("min-rate", 0, "采集速率下限(次/秒),低于则失败退出(CI 冒烟断言);0=不检查")
+	flagReqOnl   = flag.Bool("require-online", false, "采样结束时要求全部设备在线,否则失败退出(CI 冒烟断言)")
 )
 
 // sample 是采样窗口内的一次指标快照。
@@ -97,17 +99,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("setup: %v", err)
 	}
-	defer env.cleanup()
+	// 统一失败出口:先清理(杀网关/模拟器/临时目录)再退出,避免 CI 遗留孤儿进程。
+	fail := func(format string, args ...any) {
+		env.cleanup()
+		log.Fatalf(format, args...)
+	}
 	log.Printf("gateway ready at %s (sim %s, sink %s)", env.gwAddr, env.sims[0].Addr(), env.sink.Addr)
 
 	if err := env.configure(); err != nil {
-		log.Fatalf("configure: %v", err)
+		fail("configure: %v", err)
 	}
 	if err := env.warmup(); err != nil {
-		log.Fatalf("warmup: %v", err)
+		fail("warmup: %v", err)
 	}
 	samples := env.collect()
-	report(samples)
+	if err := report(samples); err != nil {
+		fail("断言失败: %v", err)
+	}
+	env.cleanup()
 }
 
 // setup 启动模拟从站、假 broker 与网关子进程。
@@ -448,10 +457,10 @@ func (e *runEnv) sampleOnce() (sample, bool) {
 	}, true
 }
 
-// report 汇总并打印结果。
-func report(samples []sample) {
+// report 汇总并打印结果;返回 CI 冒烟断言结果(min-rate / require-online)。
+func report(samples []sample) error {
 	if len(samples) < 2 {
-		log.Fatal("采样点不足,无法计算速率")
+		return fmt.Errorf("采样点不足,无法计算速率")
 	}
 	first, last := samples[0], samples[len(samples)-1]
 	dt := last.t.Sub(first.t).Seconds()
@@ -532,6 +541,16 @@ func report(samples []sample) {
 			log.Printf("CSV 报告已写入 %s", *flagOut)
 		}
 	}
+
+	// CI 冒烟断言(CSV 先落盘,再判失败)。
+	collectRate := rate(first.collect, last.collect)
+	if *flagMinRate > 0 && collectRate < *flagMinRate {
+		return fmt.Errorf("collect 速率 %.1f 次/s < 下限 %.1f 次/s", collectRate, *flagMinRate)
+	}
+	if *flagReqOnl && last.online < *flagDevices {
+		return fmt.Errorf("在线设备 %d/%d,未全部上线", last.online, *flagDevices)
+	}
+	return nil
 }
 
 // cleanup 关闭网关子进程与模拟器,清理临时目录。

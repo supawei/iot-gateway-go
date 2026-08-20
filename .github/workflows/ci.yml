@@ -1,0 +1,43 @@
+# .github/workflows/ci.yml
+#
+# 常规 CI:push/PR 时跑静态检查 + 单测 + 并发包竞态 + 压测冒烟档。
+# 压测冒烟(200 设备 @1s)是"测试基建"的一部分——调度/采集类功能回归
+# (如 robfig/cron 子秒轮询 bug)只有端到端压测能兜住,见 docs/scale-testing.md。
+#
+# 发布走 .github/workflows/release.yml(GoReleaser,v* tag 触发)。
+
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js (web 前端)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Lint & unit tests (make check)
+        run: make check
+
+      - name: Race detector (core 并发包)
+        run: go test -race ./internal/core/...
+
+      - name: Scale smoke (200 设备 @1s,速率/在线阈值断言)
+        run: make smoke

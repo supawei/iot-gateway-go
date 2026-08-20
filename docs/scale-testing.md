@@ -54,6 +54,8 @@ go run ./hack/scalebench \
 
 **建议预热时长**:让**全部设备先上线**再进采样窗口,否则采样区间会混入"连接建立/首轮采集"的爬坡段(见 §6 发现)。经验值:`-warmup ≥ 设备数 × 轮询周期 + 5s`(200 设备 @1s ≈ 35s)。
 
+**CI 冒烟**:`make smoke` 跑 200 设备 @1s 快速回归,`-min-rate` / `-require-online` 低于阈值即失败退出——已接入 CI(见 [.github/workflows/ci.yml](../.github/workflows/ci.yml)),防调度/采集类功能回归(如 robfig/cron 子秒轮询 bug,见 §6.1)。
+
 ## 4. 参数说明
 
 | 参数 | 默认 | 说明 |
@@ -70,6 +72,8 @@ go run ./hack/scalebench \
 | `-step` | 2s | 采样间隔 |
 | `-gateway` | 自动 | 网关二进制路径(缺省自动构建) |
 | `-out` | 空 | CSV 汇总报告路径 |
+| `-min-rate` | 0 | 采集速率下限(次/秒),低于则失败退出(CI 冒烟断言);0=不检查 |
+| `-require-online` | off | 采样结束要求全部设备在线,否则失败退出(CI 冒烟断言) |
 
 ## 5. 场景矩阵
 

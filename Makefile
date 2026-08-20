@@ -26,7 +26,7 @@ LDFLAGS := -s -w $(VERSION_LDFLAGS)
 ARM32_GOARM := 7
 
 .PHONY: all build build-all web linux-amd64 linux-arm64 linux-arm32 \
-        run test vet fmt fmt-check tidy check clean help
+        run test vet fmt fmt-check tidy check smoke clean help
 
 all: build
 
@@ -81,6 +81,12 @@ tidy: ## 整理依赖
 	$(GO) mod tidy
 
 check: web fmt-check vet test ## 提交前检查：前端 + 格式 + vet + 测试
+
+smoke: web ## 压测冒烟(CI 用):200 设备 @1s 快速回归,速率/在线低于阈值即失败
+	go run ./hack/scalebench \
+		-devices 200 -points 4 -conns 5 -interval-ms 1000 -pool 32 \
+		-warmup 45s -duration 15s -step 3s \
+		-min-rate 180 -require-online
 
 clean: ## 清理构建产物
 	rm -rf $(BINARY_NAME) $(DIST_DIR)
